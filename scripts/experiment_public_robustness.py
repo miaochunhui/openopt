@@ -11,8 +11,10 @@ import argparse
 from dataclasses import asdict
 from datetime import datetime, timezone
 import hashlib
+import importlib
 import importlib.metadata
 import json
+import os
 from pathlib import Path, PurePosixPath
 import subprocess
 import sys
@@ -27,7 +29,7 @@ sys.path.insert(0, str(ROOT))
 from scripts import public_qp_corpus as corpus
 from scripts import qualify_public_qp as runner
 
-VERSION = "public-robustness-v1"
+VERSION = "public-robustness-v2"
 BASE_COMMIT = "e566b0b8163f099a29a0d554fa3b87ad15e4fb67"
 GATES = {"eps_abs": 1e-7, "eps_rel": 1e-7,
          "direction_atol": 1e-8, "direction_rtol": 1e-8}
@@ -50,6 +52,48 @@ DEPENDENCIES = {
     "refinement.py": "src/openopt/refinement.py",
 }
 STATES = ("QUALIFIED", "UNQUALIFIED", "FAIL", "BUDGET_EXHAUSTED")
+PACKAGE_VERSIONS = {"numpy": "2.2.6", "scipy": "1.15.3", "torch": "2.8.0+cu128",
+                    "osqp": "1.0.4", "clarabel": "0.11.1"}
+THREAD_ENV = {"OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
+              "CUDA_VISIBLE_DEVICES": "-1", "PYTHONDONTWRITEBYTECODE": "1"}
+THREAD_CONTRACT = {"environment": THREAD_ENV, "torch_intraop": 1, "torch_interop": 1}
+
+# Exact supported-version defaults, captured without solving. Unknown fields
+# require a separately reviewed contract/version, not a partial default match.
+OSQP_EFFECTIVE = {
+    "adaptive_rho": 1, "adaptive_rho_fraction": 0.4, "adaptive_rho_interval": 50,
+    "adaptive_rho_tolerance": 5.0, "alpha": 1.6, "cg_max_iter": 20, "cg_precond": 1,
+    "cg_tol_fraction": 0.15, "cg_tol_reduction": 10, "check_termination": 25,
+    "delta": 1e-6, "device": 0, "eps_abs": 1e-10, "eps_dual_inf": 1e-8,
+    "eps_prim_inf": 1e-8, "eps_rel": 1e-10, "linsys_solver": 1, "max_iter": 10000,
+    "polish_refine_iter": 3, "polishing": 0, "rho": 0.1, "rho_is_vec": 1,
+    "scaled_termination": 0, "scaling": 10, "sigma": 1e-6, "time_limit": 1e10,
+    "verbose": 0, "warm_starting": 0,
+}
+OSQP_REQUESTED = {key: value for key, value in OSQP_EFFECTIVE.items()
+                  if key not in ("linsys_solver", "cg_precond")}
+OSQP_REQUESTED.update({"solver_type": "direct", "cg_preconditioner": "diagonal"})
+CLARABEL_EFFECTIVE = {
+    "chordal_decomposition_compact": True, "chordal_decomposition_complete_dual": True,
+    "chordal_decomposition_enable": True, "chordal_decomposition_merge_method": "clique_graph",
+    "direct_kkt_solver": True, "direct_solve_method": "auto",
+    "dynamic_regularization_delta": 2e-7, "dynamic_regularization_enable": True,
+    "dynamic_regularization_eps": 1e-13, "equilibrate_enable": True,
+    "equilibrate_max_iter": 10, "equilibrate_max_scaling": 1e4,
+    "equilibrate_min_scaling": 1e-4, "input_sparse_dropzeros": False,
+    "iterative_refinement_abstol": 1e-12, "iterative_refinement_enable": True,
+    "iterative_refinement_max_iter": 10, "iterative_refinement_reltol": 1e-13,
+    "iterative_refinement_stop_ratio": 5.0, "linesearch_backtrack_step": 0.8,
+    "max_iter": 200, "max_step_fraction": 0.99, "max_threads": 1,
+    "min_switch_step_length": 0.1, "min_terminate_step_length": 1e-4,
+    "pardiso_iparm": [-2147483648] * 64, "pardiso_verbose": False, "presolve_enable": False,
+    "reduced_tol_feas": 1e-4, "reduced_tol_gap_abs": 5e-5, "reduced_tol_gap_rel": 5e-5,
+    "reduced_tol_infeas_abs": 5e-12, "reduced_tol_infeas_rel": 5e-5, "reduced_tol_ktratio": 1e-4,
+    "static_regularization_constant": 1e-8, "static_regularization_enable": True,
+    "static_regularization_proportional": 4.930380657631324e-32, "time_limit": "Infinity",
+    "tol_feas": 1e-10, "tol_gap_abs": 1e-10, "tol_gap_rel": 1e-10,
+    "tol_infeas_abs": 1e-8, "tol_infeas_rel": 1e-8, "tol_ktratio": 1e-6, "verbose": False,
+}
 
 
 def now() -> str:
@@ -63,6 +107,104 @@ def require(condition: bool, message: str) -> None:
 
 def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def exact(actual, expected, context: str) -> None:
+    """JSON equality includes types and exact field membership, not coercion."""
+    if type(actual) is not type(expected):
+        raise ValueError(f"{context}: type mismatch")
+    if isinstance(expected, dict):
+        require(actual.keys() == expected.keys(), f"{context}: field membership mismatch")
+        for key, value in expected.items():
+            exact(actual[key], value, f"{context}.{key}")
+    elif isinstance(expected, list):
+        require(len(actual) == len(expected), f"{context}: list length mismatch")
+        for index, value in enumerate(expected):
+            exact(actual[index], value, f"{context}[{index}]")
+    else:
+        require(actual == expected, f"{context}: value mismatch")
+
+
+def settings_snapshot(settings) -> dict:
+    values = {}
+    for key in dir(settings):
+        if key.startswith("_"):
+            continue
+        value = getattr(settings, key)
+        if callable(value):
+            continue
+        if hasattr(value, "value"):
+            value = value.value
+        if isinstance(value, float) and math_is_infinite(value):
+            value = "Infinity" if value > 0 else "-Infinity"
+        require(type(value) in (bool, int, float, str, list), f"unsupported settings field: {key}")
+        values[key] = value
+    return values
+
+
+def math_is_infinite(value: float) -> bool:
+    require(not np.isnan(value), "NaN settings field")
+    return bool(np.isinf(value))
+
+
+def runtime_identity() -> dict:
+    """Bind loaded backend/wrapper bytes and versions, without constructing a solve."""
+    versions = {name: importlib.metadata.version(name) for name in PACKAGE_VERSIONS}
+    exact(versions, PACKAGE_VERSIONS, "runtime versions")
+    exact(sys.version.split()[0], "3.10.20", "runtime Python version")
+    modules = {}
+    for name in ("numpy", "scipy", "torch", "osqp", "osqp.interface", "osqp.ext_builtin",
+                 "clarabel", "clarabel.clarabel"):
+        module = importlib.import_module(name)
+        path = Path(module.__file__).resolve(strict=True)
+        modules[name] = {"file": path.name, "sha256": digest(path)}
+    for name in PACKAGE_VERSIONS:
+        exact(str(importlib.import_module(name).__version__), versions[name],
+              f"runtime loaded version {name}")
+    return {"python": "3.10.20", "packages": versions, "modules": modules}
+
+
+def worker_threads() -> dict:
+    import torch
+
+    actual = {"environment": {key: os.environ.get(key) for key in THREAD_ENV},
+              "torch_intraop": torch.get_num_threads(), "torch_interop": torch.get_num_interop_threads()}
+    exact(actual, THREAD_CONTRACT, "runtime threads")
+    return actual
+
+
+def settings_contract(core) -> dict:
+    config, scaling, refinement = openopt_configs(core)
+    openopt = {"solver": config_json(config), "scaling": asdict(scaling),
+               "refinement": config_json(refinement)}
+    exact(openopt, {
+        "solver": {
+            "device": "cpu", "dtype": "torch.float64", "rho": 1.0, "sigma": 1e-6,
+            "relaxation": 1.6, "max_iterations": 10000, "check_interval": 25,
+            "eps_abs": 1e-10, "eps_rel": 1e-10, "linear_solver": "cholesky",
+            "adaptive_rho": True, "adaptive_rho_interval": 100, "adaptive_rho_tolerance": 5.0,
+            "rho_min": 1e-6, "rho_max": 1e6, "dual_gap_termination": True,
+            "direction_termination": True, "direction_atol": 1e-8, "direction_rtol": 1e-8,
+        },
+        "scaling": {"method": "ruiz", "iterations": 10, "scale_min": 1e-6, "scale_max": 1e6,
+                    "objective_scaling": True, "check_atol": 1e-7, "check_rtol": 1e-7},
+        "refinement": {"device": "cpu", "dtype": "torch.float64", "factor_dtype": "torch.float64",
+                       "max_refinement_steps": 3, "active_atol": 1e-5, "active_rtol": 1e-7,
+                       "check_atol": 1e-7, "check_rtol": 1e-7},
+    }, "Openopt settings contract")
+    return {
+        "openopt": {"requested": openopt, "effective": openopt},
+        "osqp": {"requested": OSQP_REQUESTED, "effective": OSQP_EFFECTIVE},
+        "clarabel": {"requested": CLARABEL_EFFECTIVE, "effective": CLARABEL_EFFECTIVE},
+    }
+
+
+def check_settings(raw: dict, solver: str, contracts: dict) -> None:
+    contract = contracts[solver]
+    exact(raw.get("requested"), contract["requested"], f"{solver} requested settings")
+    exact(raw.get("settings"), contract["effective"], f"{solver} effective settings")
+    exact(raw.get("settings_before_solve"), contract["effective"], f"{solver} before-solve settings")
+    exact(raw.get("settings_after_solve"), contract["effective"], f"{solver} after-solve settings")
 
 
 def read_json(path: Path) -> dict:
@@ -186,11 +328,15 @@ def run_arm(model: dict, arm: dict, core, saved_runner) -> tuple[dict, dict]:
     transfers = {"device": "cpu", "dtype": "float64", "gpu_transfer_count": 0,
                  "host_input_bytes": sum(view[key].nbytes for key in ("P", "q", "A", "l", "u"))}
     extra = {}
+    contracts = settings_contract(core)
     begin = time.perf_counter()
     if arm["solver"] == "openopt":
         p = tensor_problem(view, core.qp)
         transfers["host_to_cpu_tensor_seconds"] = time.perf_counter() - begin
         config, scaling, refinement = openopt_configs(core)
+        settings = {"solver": config_json(config), "scaling": asdict(scaling),
+                    "refinement": config_json(refinement)}
+        exact(settings, contracts["openopt"]["effective"], "Openopt worker settings")
         begin = time.perf_counter()
         prepared = core.scaling.equilibrate_qp(p, config, scaling)
         transfers["equilibration_seconds"] = time.perf_counter() - begin
@@ -219,8 +365,8 @@ def run_arm(model: dict, arm: dict, core, saved_runner) -> tuple[dict, dict]:
         raw = {
             # An accepted transformation does not upgrade an exhausted solver status.
             "status": solved.status, "iterations": solved.iterations, "observed_device": "cpu",
-            "settings": {"solver": config_json(config), "scaling": asdict(scaling),
-                         "refinement": config_json(refinement)},
+            "settings": settings, "requested": settings,
+            "settings_before_solve": settings, "settings_after_solve": settings,
             "solver_residuals": {"coordinate": "scaled",
                                 "primal": solved.primal_residual, "dual": solved.dual_residual,
                                 "normal_cone": solved.normal_cone_residual},
@@ -251,27 +397,22 @@ def run_arm(model: dict, arm: dict, core, saved_runner) -> tuple[dict, dict]:
         if arm["solver"] == "osqp":
             import osqp
 
-            workspace = osqp.OSQP()
-            requested = {"eps_abs": arm["solve_eps"], "eps_rel": arm["solve_eps"],
-                         "eps_prim_inf": 1e-8, "eps_dual_inf": 1e-8,
-                         "max_iter": arm["max_iterations"], "verbose": False,
-                         "warm_starting": False}
+            workspace = osqp.OSQP(algebra="builtin")
+            requested = dict(contracts["osqp"]["requested"])
             workspace.setup(P=sparse.csc_matrix(np.triu(view["P"])), q=view["q"].copy(),
                             A=sparse.csc_matrix(view["A"]), l=view["l"].copy(),
                             u=view["u"].copy(), **requested)
+            before_settings = settings_snapshot(workspace.settings)
+            exact(before_settings, contracts["osqp"]["effective"], "OSQP worker before-solve settings")
             transfers["adapter_setup_seconds"] = time.perf_counter() - begin
             begin = time.perf_counter()
             solved = workspace.solve(raise_error=False)
             transfers["solve_seconds"] = time.perf_counter() - begin
-            setting_names = (
-                "scaling", "scaled_termination", "polishing", "warm_starting", "rho", "sigma",
-                "alpha", "adaptive_rho", "adaptive_rho_interval", "adaptive_rho_tolerance",
-                "adaptive_rho_fraction", "check_termination",
-            )
-            effective = {key: getattr(workspace.settings, key)
-                         for key in (*requested, *setting_names)}
+            effective = settings_snapshot(workspace.settings)
+            exact(effective, contracts["osqp"]["effective"], "OSQP worker after-solve settings")
             raw = {"status": solved.info.status, "iterations": int(solved.info.iter),
                    "observed_device": "cpu", "settings": effective, "requested": requested,
+                   "settings_before_solve": before_settings, "settings_after_solve": effective,
                    "solver_residuals": {"coordinate": "OSQP original reporting",
                                        "primal": solved.info.prim_res, "dual": solved.info.dual_res},
                    "vectors": {"x": solved.x, "y": solved.y,
@@ -281,19 +422,21 @@ def run_arm(model: dict, arm: dict, core, saved_runner) -> tuple[dict, dict]:
 
             A, b, cones, mapping = saved_runner.clarabel_form(view, clarabel)
             settings = clarabel.DefaultSettings()
-            requested = {"verbose": False, "max_threads": 1, "max_iter": arm["max_iterations"],
-                         "tol_gap_abs": arm["solve_eps"], "tol_gap_rel": arm["solve_eps"],
-                         "tol_feas": arm["solve_eps"], "tol_infeas_abs": 1e-8,
-                         "tol_infeas_rel": 1e-8, "presolve_enable": False}
+            requested = dict(contracts["clarabel"]["requested"])
             for key, value in requested.items():
-                setattr(settings, key, value)
+                setattr(settings, key, float("inf") if value == "Infinity" else value)
             workspace = clarabel.DefaultSolver(
                 sparse.csc_matrix(np.triu(view["P"])), view["q"].copy(),
                 sparse.csc_matrix(A), b, cones, settings)
+            before_settings = settings_snapshot(workspace.get_settings())
+            exact(before_settings, contracts["clarabel"]["effective"],
+                  "Clarabel worker before-solve settings")
             transfers["adapter_setup_seconds"] = time.perf_counter() - begin
             begin = time.perf_counter()
             solved = workspace.solve()
             transfers["solve_seconds"] = time.perf_counter() - begin
+            effective = settings_snapshot(workspace.get_settings())
+            exact(effective, contracts["clarabel"]["effective"], "Clarabel worker after-solve settings")
             z = np.asarray(solved.z, dtype=np.float64)
             require(z.shape == (len(mapping),), "Clarabel mapping shape mismatch")
             y = np.zeros(len(view["l"]))
@@ -302,11 +445,8 @@ def run_arm(model: dict, arm: dict, core, saved_runner) -> tuple[dict, dict]:
             extra["cone_z"] = z
             raw = {"status": str(solved.status), "iterations": int(solved.iterations),
                    "observed_device": "cpu", "requested": requested,
-                   "settings": {key: getattr(settings, key) for key in (
-                       *requested, "equilibrate_enable", "equilibrate_max_iter",
-                       "equilibrate_min_scaling", "equilibrate_max_scaling",
-                       "iterative_refinement_enable", "iterative_refinement_reltol",
-                       "iterative_refinement_abstol", "iterative_refinement_max_iter")},
+                   "settings": effective, "settings_before_solve": before_settings,
+                   "settings_after_solve": effective,
                    "dual_mapping": [list(item) for item in mapping],
                    "solver_residuals": {"coordinate": "Clarabel original reporting",
                                        "primal": solved.r_prim, "dual": solved.r_dual},
@@ -351,10 +491,22 @@ def worker(output: Path, index: int) -> int:
         import torch
 
         torch.set_num_threads(1)
+        if torch.get_num_interop_threads() != 1:
+            torch.set_num_interop_threads(1)
+        exact(plan.get("version"), VERSION, "worker plan version")
+        exact(plan.get("thread_contract"), THREAD_CONTRACT, "worker plan thread contract")
+        runtime = runtime_identity()
+        exact(plan["runtime"], runtime, "worker runtime")
+        threads = worker_threads()
+        contracts = settings_contract(core)
+        exact(plan["settings_contract"], contracts, "worker settings contract")
         model = saved_runner.load_model(output / "baseline/frozen", row["case_id"])
         before = importer.model_hash(model)
         require(before == row["model_sha256"], "worker original model hash mismatch")
         raw, extra = run_arm(model, ARMS[index % len(ARMS)], core, saved_runner)
+        check_settings(raw, row["solver"], contracts)
+        raw["runtime"] = runtime
+        raw["threads"] = threads
         require(importer.model_hash(model) == before, "arm mutated original arrays")
         vectors = folder / (row["arm"] + ".npz")
         saved_runner.save_vectors(vectors, raw["vectors"])
@@ -414,6 +566,10 @@ def run(baseline: Path, pin: str, output: Path, budget: float = 180) -> tuple[Pa
         report["source_hashes"] = {relative: digest(output / "code" / name)
                                    for name, relative in DEPENDENCIES.items()}
         runner.copy_file(Path(__file__), output / "code/producer.py")
+        _, _, core = load_dependencies(output / "code")
+        report["settings_contract"] = settings_contract(core)
+        report["runtime"] = runtime_identity()
+        report["thread_contract"] = THREAD_CONTRACT
         frozen = read_json(output / "baseline/frozen/corpus.json")
         report["corpus_sha256"] = old["corpus_sha256"]
         report["public_acceptance_sha256"] = old.get("public_acceptance_sha256")
@@ -425,7 +581,10 @@ def run(baseline: Path, pin: str, output: Path, budget: float = 180) -> tuple[Pa
              "solver": arm["solver"], "arm": arm["arm"], "attempt": 1, "denominator": 1,
              "attempted": False, "verdict": "BUDGET_EXHAUSTED"}
             for case in frozen["cases"] for arm in ARMS]
-        corpus.write_json(output / "plan.json", {"rows": report["rows"], "arms": list(ARMS), "gates": GATES})
+        corpus.write_json(output / "plan.json", {
+            "rows": report["rows"], "arms": list(ARMS), "gates": GATES, "version": VERSION,
+            "settings_contract": report["settings_contract"], "runtime": report["runtime"],
+            "thread_contract": THREAD_CONTRACT})
         for index, initial in enumerate(report["rows"]):
             remaining = budget - (time.perf_counter() - begin)
             folder = output / "attempts" / initial["case_id"]
@@ -438,7 +597,8 @@ def run(baseline: Path, pin: str, output: Path, budget: float = 180) -> tuple[Pa
                 with log_path.open("xb") as stream:
                     try:
                         process = subprocess.run(command, stdout=stream, stderr=subprocess.STDOUT,
-                                                 timeout=remaining, check=False)
+                                                 timeout=remaining, check=False,
+                                                 env={**os.environ, **THREAD_ENV})
                         worker_code = process.returncode
                     except subprocess.TimeoutExpired:
                         timed_out, worker_code = True, 124
@@ -587,6 +747,10 @@ def replay(path: Path, pin: str) -> dict:
             and old.get("public_acceptance_sha256") == report["public_acceptance_sha256"]
             and old["source_eligibility"] == report["source_eligibility"], "baseline/source altered")
     saved_runner, importer, core = load_dependencies(output / "code")
+    contracts = settings_contract(core)
+    exact(report.get("settings_contract"), contracts, "predeclared settings contract")
+    exact(report.get("runtime"), runtime_identity(), "runtime identity")
+    exact(report.get("thread_contract"), THREAD_CONTRACT, "thread contract")
     for name in ("importer.py", "certificates.py"):
         require(digest(output / "code" / name) == old["files"]["code/" + name]["sha256"],
                 "original parser/checker rule changed")
@@ -596,6 +760,10 @@ def replay(path: Path, pin: str) -> dict:
     require(expected and [(row["case_id"], row["arm"], row["solver"], row["model_sha256"])
                           for row in report["rows"]] == expected, "arm denominator/membership mismatch")
     plan = read_json(output / "plan.json")
+    exact(plan.get("version"), VERSION, "plan version")
+    exact(plan.get("settings_contract"), contracts, "plan settings contract")
+    exact(plan.get("runtime"), report["runtime"], "plan runtime identity")
+    exact(plan.get("thread_contract"), THREAD_CONTRACT, "plan thread contract")
     require(plan["arms"] == list(ARMS) and plan["gates"] == GATES
             and [(row["case_id"], row["arm"], row["solver"], row["model_sha256"])
                  for row in plan["rows"]] == expected, "plan mismatch")
@@ -613,6 +781,9 @@ def replay(path: Path, pin: str) -> dict:
                 if key not in ("worker_exit_code", "worker_log")}, "worker/final row mismatch")
         if row["verdict"] in ("QUALIFIED", "UNQUALIFIED"):
             require(row["attempted"] and row["worker_exit_code"] == 0, "successful worker mismatch")
+            check_settings(row["raw"], row["solver"], contracts)
+            exact(row["raw"].get("runtime"), report["runtime"], "worker runtime identity")
+            exact(row["raw"].get("threads"), THREAD_CONTRACT, "worker thread configuration")
             model = saved_runner.load_model(output / "baseline/frozen", row["case_id"])
             require(importer.model_hash(model) == row["model_sha256"]
                     == row["input_model_before"] == row["input_model_after"],
@@ -624,21 +795,6 @@ def replay(path: Path, pin: str) -> dict:
                     "original full gate replay mismatch")
             check_transform(model, row, vectors, read_extra(member(output, row["transform_path"])),
                             core, saved_runner)
-            if row["solver"] == "osqp":
-                require(row["raw"]["settings"]["scaling"] == 10
-                        and row["raw"]["settings"]["eps_abs"] == ARMS[1]["solve_eps"]
-                        and row["raw"]["settings"]["eps_rel"] == ARMS[1]["solve_eps"],
-                        "OSQP requested/default scaling settings mismatch")
-            elif row["solver"] == "clarabel":
-                require(row["raw"]["settings"]["equilibrate_enable"] is True
-                        and row["raw"]["settings"]["tol_feas"] == ARMS[2]["solve_eps"],
-                        "Clarabel requested/default equilibration mismatch")
-            else:
-                require(row["raw"]["settings"]["solver"]["eps_abs"] == ARMS[0]["solve_eps"]
-                        and row["raw"]["settings"]["solver"]["eps_rel"] == ARMS[0]["solve_eps"]
-                        and row["raw"]["settings"]["scaling"]["check_atol"] == 1e-7
-                        and row["raw"]["settings"]["refinement"]["check_atol"] == 1e-7,
-                        "Openopt solve/check settings mismatch")
             count += 1
         else:
             require(row.get("error") and row["worker_exit_code"] != 0,

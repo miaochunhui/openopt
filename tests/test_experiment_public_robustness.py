@@ -1,10 +1,14 @@
 """Cheap synthetic CPU controls, never public/industrial corpus coverage."""
 
-from dataclasses import replace
 import argparse
+from contextlib import redirect_stderr, redirect_stdout
+from copy import deepcopy
 import json
 from pathlib import Path
+import shutil
+import tempfile
 from types import SimpleNamespace
+from xml.etree import ElementTree
 
 import numpy as np
 import pytest
@@ -23,6 +27,315 @@ RHS
  RHS1 CAP 2
 ENDATA
 """
+
+REAL_V1 = Path("/hf3fs-jd/data/tmp/openopt-release-20261010/public-robustness/real-v1/result.json")
+REAL_V1_PIN = "aa584b62f97349f37afad438dfbd87320ace3408df4d7e574a0989370970e8e7"
+P2_MUTATIONS = (
+    ("osqp", "max_iter", 9999),
+    ("osqp", "warm_starting", 1),
+    ("clarabel", "max_iter", 199),
+    ("clarabel", "max_threads", 2),
+    ("clarabel", "presolve_enable", True),
+)
+
+
+@pytest.fixture(autouse=True)
+def no_solver_calls_in_this_suite(monkeypatch):
+    """All current P2/unit fixtures replay saved candidates or do setup only."""
+    previous = gate.sys.getprofile()
+
+    def profile(frame, event, arg):
+        if event == "call" and frame.f_code.co_name in ("solve_qp", "solve"):
+            pytest.fail("no-solve unit contract violated")
+        if previous is not None:
+            previous(frame, event, arg)
+
+    gate.sys.setprofile(profile)
+    try:
+        yield
+    finally:
+        gate.sys.setprofile(previous)
+
+
+def reseal_rows(result, report):
+    """Coordinate result, worker, row and progress edits; byte gates still agree."""
+    for row in report["rows"]:
+        folder = result.parent / "attempts" / row["case_id"]
+        (folder / (row["arm"] + ".json")).write_text(json.dumps(row))
+        worker = {key: value for key, value in row.items()
+                  if key not in ("worker_exit_code", "worker_log")}
+        (folder / (row["arm"] + "-worker-result.json")).write_text(json.dumps(worker))
+    for path in result.parent.glob("progress-*.json"):
+        progress = gate.read_json(path)
+        count = int(path.stem.split("-")[1]) + 1
+        progress["rows"][:count] = report["rows"][:count]
+        path.write_text(json.dumps(progress))
+    report["files"] = gate.inventory(result.parent)
+    result.write_text(json.dumps(report))
+
+
+def forbid_solves(monkeypatch):
+    import osqp
+    import clarabel
+    import torch
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("read-only P2 test called solve")
+
+    monkeypatch.setattr(gate, "run_arm", forbidden)
+    monkeypatch.setattr(osqp.OSQP, "solve", forbidden)
+    monkeypatch.setattr(clarabel, "DefaultSolver", forbidden)
+    # Frozen modules load their own solve_qp; profile guards that function too.
+    previous = gate.sys.getprofile()
+
+    def profile(frame, event, arg):
+        if event == "call" and frame.f_code.co_name in ("solve_qp", "solve"):
+            pytest.fail("read-only P2 test entered a solver")
+        if previous is not None:
+            previous(frame, event, arg)
+
+    monkeypatch.setattr(torch, "cholesky_solve", forbidden)
+    gate.sys.setprofile(profile)
+    return previous
+
+
+@pytest.fixture
+def real_metadata_test_copy(tmp_path):
+    """Old vectors with fabricated v2 metadata ONLY for checker negative tests.
+
+    This is not a v2 run, worker execution receipt or requalification of v1.
+    """
+    assert gate.digest(REAL_V1) == REAL_V1_PIN
+    result = tmp_path / "test-only-metadata-copy-not-a-run" / "result.json"
+    shutil.copytree(REAL_V1.parent, result.parent)
+    report = gate.read_json(result)
+    shutil.copyfile(Path(gate.__file__), result.parent / "code/producer.py")
+    _, _, core = gate.load_dependencies(result.parent / "code")
+    contracts = gate.settings_contract(core)
+    runtime = gate.runtime_identity()
+    report.update({"version": gate.VERSION, "producer_sha256": gate.digest(Path(gate.__file__)),
+                   "settings_contract": contracts, "runtime": runtime,
+                   "thread_contract": gate.THREAD_CONTRACT})
+    for row in report["rows"]:
+        settings = contracts[row["solver"]]
+        row["raw"].update({
+            "requested": deepcopy(settings["requested"]), "settings": deepcopy(settings["effective"]),
+            "settings_before_solve": deepcopy(settings["effective"]),
+            "settings_after_solve": deepcopy(settings["effective"]),
+            "runtime": deepcopy(runtime), "threads": deepcopy(gate.THREAD_CONTRACT)})
+    plan_path = result.parent / "plan.json"
+    plan = gate.read_json(plan_path)
+    plan.update({"version": gate.VERSION, "settings_contract": contracts,
+                 "runtime": runtime, "thread_contract": gate.THREAD_CONTRACT})
+    plan_path.write_text(json.dumps(plan))
+    reseal_rows(result, report)
+    return result
+
+
+@pytest.mark.parametrize("solver,key,value", P2_MUTATIONS)
+def test_p2_coordinated_settings_reseal_rejected(
+    real_metadata_test_copy, monkeypatch, request, solver, key, value,
+):
+    result = real_metadata_test_copy
+    report = gate.read_json(result)
+    previous = forbid_solves(monkeypatch)
+    try:
+        assert gate.replay(result, gate.digest(result))["new_numerically_replayed"] == 6
+    finally:
+        gate.sys.setprofile(previous)
+    for row in report["rows"]:
+        if row["solver"] == solver:
+            row["raw"]["requested"][key] = value
+            row["raw"]["settings"][key] = value
+            row["raw"]["settings_before_solve"][key] = value
+            row["raw"]["settings_after_solve"][key] = value
+    report["settings_contract"][solver]["requested"][key] = value
+    report["settings_contract"][solver]["effective"][key] = value
+    plan_path = result.parent / "plan.json"
+    plan = gate.read_json(plan_path)
+    plan["settings_contract"] = report["settings_contract"]
+    plan_path.write_text(json.dumps(plan))
+    reseal_rows(result, report)
+    request.node.user_properties.append(("p2_mutation_result", str(result)))
+    request.node.user_properties.append(("p2_mutation_pin", gate.digest(result)))
+    previous = forbid_solves(monkeypatch)
+    try:
+        with pytest.raises(ValueError, match="settings"):
+            gate.replay(result, gate.digest(result))
+    finally:
+        gate.sys.setprofile(previous)
+    assert gate.digest(REAL_V1) == REAL_V1_PIN
+
+
+def test_p2_capture_default_fields_without_solve(tmp_path, request):
+    import osqp
+    import clarabel
+    from scipy import sparse
+
+    workspace = osqp.OSQP()
+    workspace.setup(P=sparse.csc_matrix([[1.0]]), q=np.zeros(1),
+                    A=sparse.csc_matrix([[1.0]]), l=np.zeros(1), u=np.ones(1), verbose=False)
+    def fields(settings):
+        values = {}
+        for key in dir(settings):
+            if key.startswith("_") or callable(getattr(settings, key)):
+                continue
+            value = getattr(settings, key)
+            if hasattr(value, "value"):
+                value = value.value
+            if isinstance(value, float) and not np.isfinite(value):
+                value = str(value)
+            values[key] = value
+        return values
+
+    values = {"osqp": fields(workspace.settings), "clarabel": fields(clarabel.DefaultSettings()),
+              "python": gate.sys.version.split()[0],
+              "dependencies": {name: gate.importlib.metadata.version(name)
+                               for name in ("numpy", "scipy", "torch", "osqp", "clarabel")}}
+    path = tmp_path / "settings-defaults.json"
+    corpus.write_json(path, values)
+    assert gate.read_json(path) == values
+    request.node.user_properties.append(("p2_defaults", str(path)))
+
+
+def test_p2_full_effective_settings_observed_at_setup_without_solve(tmp_path, request, monkeypatch):
+    import osqp
+    import clarabel
+    from scipy import sparse
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("setup-only contract probe attempted solve")
+
+    monkeypatch.setattr(osqp.OSQP, "solve", forbidden)
+    runtime = gate.runtime_identity()
+    workspace = osqp.OSQP(algebra="builtin")
+    workspace.setup(P=sparse.csc_matrix([[1.0]]), q=np.zeros(1),
+                    A=sparse.csc_matrix([[1.0]]), l=np.zeros(1), u=np.ones(1),
+                    **gate.OSQP_REQUESTED)
+    osqp_settings = gate.settings_snapshot(workspace.settings)
+    gate.exact(osqp_settings, gate.OSQP_EFFECTIVE, "OSQP setup settings")
+    settings = clarabel.DefaultSettings()
+    for key, value in gate.CLARABEL_EFFECTIVE.items():
+        setattr(settings, key, float("inf") if value == "Infinity" else value)
+    probe = clarabel.DefaultSolver(sparse.csc_matrix([[1.0]]), np.zeros(1),
+                                  sparse.csc_matrix([[1.0]]), np.ones(1),
+                                  [clarabel.NonnegativeConeT(1)], settings)
+    observed = gate.settings_snapshot(probe.get_settings())
+    gate.exact(observed, gate.CLARABEL_EFFECTIVE, "Clarabel setup settings")
+    assert len(osqp_settings) == 28 and len(observed) == 45
+    receipt = {"kind": "setup-only-not-a-solve", "runtime": runtime,
+               "osqp": osqp_settings, "clarabel": observed, "solve_calls": 0}
+    path = tmp_path / "p2-setup-contract.json"
+    corpus.write_json(path, receipt)
+    assert gate.read_json(path) == receipt
+    request.node.user_properties.append(("p2_setup_evidence", str(path)))
+
+
+@pytest.mark.parametrize("solver", ["osqp", "clarabel", "openopt"])
+@pytest.mark.parametrize("mutation", ["missing", "extra", "type", "requested-only", "effective-only",
+                                     "before-only", "after-only"])
+def test_p2_settings_exact_membership_types_and_each_stage(
+    real_metadata_test_copy, monkeypatch, solver, mutation,
+):
+    result = real_metadata_test_copy
+    report = gate.read_json(result)
+    row = next(row for row in report["rows"] if row["solver"] == solver)
+    raw = row["raw"]
+    key = "solver" if solver == "openopt" else "max_iter"
+    if mutation == "missing":
+        raw["settings"].pop(key)
+    elif mutation == "extra":
+        raw["settings"]["unreviewed_default"] = 1
+    elif mutation == "type":
+        if solver == "openopt":
+            raw["settings"]["solver"]["max_iterations"] = 10000.0
+        else:
+            raw["settings"]["max_iter"] = float(raw["settings"]["max_iter"])
+    else:
+        stage = {"requested-only": "requested", "effective-only": "settings",
+                 "before-only": "settings_before_solve", "after-only": "settings_after_solve"}[mutation]
+        if solver == "openopt":
+            raw[stage]["solver"]["max_iterations"] -= 1
+        else:
+            raw[stage]["max_iter"] -= 1
+    reseal_rows(result, report)
+    previous = forbid_solves(monkeypatch)
+    try:
+        with pytest.raises(ValueError, match="settings"):
+            gate.replay(result, gate.digest(result))
+    finally:
+        gate.sys.setprofile(previous)
+
+
+@pytest.mark.parametrize("mutation", ["version", "module", "thread-env", "torch-thread"])
+def test_p2_runtime_and_thread_coordinated_reseal_rejected(
+    real_metadata_test_copy, monkeypatch, mutation,
+):
+    result = real_metadata_test_copy
+    report = gate.read_json(result)
+    if mutation == "version":
+        report["runtime"]["packages"]["osqp"] = "1.0.5"
+    elif mutation == "module":
+        report["runtime"]["modules"]["osqp.ext_builtin"]["sha256"] = "0" * 64
+    elif mutation == "thread-env":
+        report["thread_contract"]["environment"]["OMP_NUM_THREADS"] = "2"
+    else:
+        report["thread_contract"]["torch_intraop"] = 2
+    for row in report["rows"]:
+        row["raw"]["runtime"] = deepcopy(report["runtime"])
+        row["raw"]["threads"] = deepcopy(report["thread_contract"])
+    plan_path = result.parent / "plan.json"
+    plan = gate.read_json(plan_path)
+    plan.update({"runtime": report["runtime"], "thread_contract": report["thread_contract"]})
+    plan_path.write_text(json.dumps(plan))
+    reseal_rows(result, report)
+    previous = forbid_solves(monkeypatch)
+    try:
+        with pytest.raises(ValueError, match="runtime|thread"):
+            gate.replay(result, gate.digest(result))
+    finally:
+        gate.sys.setprofile(previous)
+
+
+def test_p2_v1_is_not_promoted_or_relabelled(monkeypatch):
+    assert gate.digest(REAL_V1) == REAL_V1_PIN
+    previous = forbid_solves(monkeypatch)
+    try:
+        with pytest.raises(ValueError, match="unsupported experiment"):
+            gate.replay(REAL_V1, REAL_V1_PIN)
+    finally:
+        gate.sys.setprofile(previous)
+    assert gate.read_json(REAL_V1)["version"] == "public-robustness-v1"
+    assert gate.digest(REAL_V1) == REAL_V1_PIN
+
+
+def test_p2_wrong_installed_version_fails_before_worker_execution(monkeypatch):
+    original = gate.importlib.metadata.version
+    monkeypatch.setattr(gate.importlib.metadata, "version",
+                        lambda name: "1.0.5" if name == "osqp" else original(name))
+    with pytest.raises(ValueError, match="runtime versions.osqp"):
+        gate.runtime_identity()
+
+
+def test_p2_wrong_worker_thread_environment_fails(monkeypatch):
+    monkeypatch.setenv("OMP_NUM_THREADS", "2")
+    with pytest.raises(ValueError, match="runtime threads.environment"):
+        gate.worker_threads()
+
+
+@pytest.mark.parametrize("solver,key,value", P2_MUTATIONS)
+def test_p2_coordinated_worker_rows_without_contract_edit_rejected(
+    real_metadata_test_copy, solver, key, value,
+):
+    result = real_metadata_test_copy
+    report = gate.read_json(result)
+    for row in report["rows"]:
+        if row["solver"] == solver:
+            for stage in ("requested", "settings", "settings_before_solve", "settings_after_solve"):
+                row["raw"][stage][key] = value
+    reseal_rows(result, report)
+    with pytest.raises(ValueError, match="settings"):
+        gate.replay(result, gate.digest(result))
 
 
 @pytest.fixture
@@ -61,8 +374,55 @@ def baseline(tmp_path, monkeypatch):
 
 @pytest.fixture
 def experiment(baseline, tmp_path, monkeypatch):
-    def inline_worker(command, stdout, stderr, timeout, check):
+    def saved_candidate(model, arm, core, saved_runner):
+        """Planted unit KKT vectors, never a backend execution receipt."""
+        import torch
+
+        view = corpus.solver_arrays(model)
+        x, y = np.asarray([2.0]), np.asarray([1.0, 0.0])
+        evidence = core.checker.check_qp_candidate(
+            saved_runner.problem(view), x, y, atol=1e-7, rtol=1e-7).to_dict()
+        assert evidence["passed"]
+        contract = gate.settings_contract(core)[arm["solver"]]
+        raw = {"status": "Solved" if arm["solver"] == "clarabel" else "solved",
+               "iterations": 1, "observed_device": "cpu",
+               "requested": deepcopy(contract["requested"]),
+               "settings": deepcopy(contract["effective"]),
+               "settings_before_solve": deepcopy(contract["effective"]),
+               "settings_after_solve": deepcopy(contract["effective"]),
+               "vectors": {"x": x, "y": y, "reported_objective": np.asarray(-2.0)}}
+        extra = {}
+        if arm["solver"] == "openopt":
+            config, scaling, _ = gate.openopt_configs(core)
+            prepared = core.scaling.equilibrate_qp(gate.tensor_problem(view, core.qp), config, scaling)
+            scaled_x, scaled_y = prepared.scaling.to_scaled(torch.tensor(x), torch.tensor(y))
+            extra = {"scaled_x": gate.numpy_tensor(scaled_x), "scaled_y": gate.numpy_tensor(scaled_y),
+                     "restored_x": x.copy(), "restored_y": y.copy(),
+                     "variable_scale": gate.numpy_tensor(prepared.scaling.variable_scale),
+                     "constraint_scale": gate.numpy_tensor(prepared.scaling.constraint_scale),
+                     "objective_scale": np.asarray(prepared.scaling.objective_scale)}
+            raw["refinement"] = {"status": "rejected", "reason": "synthetic_saved_control",
+                                 "baseline_evidence": evidence, "returned_evidence": evidence,
+                                 "attempted_evidence": None}
+            raw["before_refinement_assessment"] = saved_runner.assess(
+                model, "openopt", raw, gate.GATES, core.checker)
+        elif arm["solver"] == "clarabel":
+            import clarabel
+
+            _, _, _, mapping = saved_runner.clarabel_form(view, clarabel)
+            z = np.zeros(len(mapping))
+            z[next(i for i, item in enumerate(mapping) if item == (0, 1.0))] = 1.0
+            extra["cone_z"] = z
+            raw["dual_mapping"] = [list(item) for item in mapping]
+        return raw, extra
+
+    monkeypatch.setattr(gate, "run_arm", saved_candidate)
+
+    def inline_worker(command, stdout, stderr, timeout, check, env):
         assert command[3] == "worker" and timeout <= 180 and check is False
+        for key, value in gate.THREAD_ENV.items():
+            assert env[key] == value
+            monkeypatch.setenv(key, value)
         index = int(command[-1])
         code = gate.worker(Path(command[-3]), index)
         return SimpleNamespace(returncode=code)
@@ -82,7 +442,7 @@ def test_fixed_arms_original_gates_and_one_attempt(baseline):
     assert all(row["attempt"] == row["denominator"] == 1 for row in report["rows"])
 
 
-def test_cheap_three_backend_real_calls_and_readonly_replay(experiment, monkeypatch, request):
+def test_cheap_three_backend_saved_candidates_and_readonly_replay(experiment, monkeypatch, request):
     before = {key: gate.digest(gate.member(experiment.parent, key))
               for key in gate.read_json(experiment)["files"]}
     pin = gate.digest(experiment)
@@ -214,19 +574,20 @@ def test_accepted_refinement_cannot_upgrade_iteration_exhaustion(baseline, monke
     package = core.qp.__package__
     core.scaling = runner.load_module(gate.ROOT / "src/openopt/scaling.py", package + ".scaling")
     core.refinement = runner.load_module(gate.ROOT / "src/openopt/refinement.py", package + ".refinement")
-    original = core.qp.solve_qp
-
-    def exhausted(*args, **kwargs):
-        return replace(original(*args, **kwargs), status="max_iterations")
-
-    monkeypatch.setattr(core.qp, "solve_qp", exhausted)
     model = runner.load_model(baseline.parent / "frozen", "cheap")
-    raw, extra = gate.run_arm(model, gate.ARMS[0], core, runner)
+    import torch
+
+    refined = core.refinement.refine_qp_candidate(
+        gate.tensor_problem(corpus.solver_arrays(model), core.qp),
+        torch.tensor([2.0]), torch.tensor([1.0, 0.0]), gate.openopt_configs(core)[2])
+    assert refined.status == "accepted"
+    raw = {"status": "max_iterations", "iterations": 10000, "observed_device": "cpu",
+           "settings": gate.settings_contract(core)["openopt"]["effective"],
+           "vectors": {"x": gate.numpy_tensor(refined.x), "y": gate.numpy_tensor(refined.y),
+                       "reported_objective": np.asarray(-2.0)}}
     assessment = runner.assess(model, "openopt", raw, gate.GATES, core.checker)
-    assert raw["refinement"]["status"] == "accepted"
     assert assessment["candidate"]["passed"]
     assert raw["status"] == "max_iterations" and assessment["verdict"] == "UNQUALIFIED"
-    assert extra["restored_y"].shape == raw["vectors"]["y"].shape
 
 
 def test_source_membership_tamper_cannot_be_resealed(experiment):
@@ -255,11 +616,13 @@ def replay_receipt(result: Path, pin: str, output: Path) -> dict:
     measured = gate.replay(result, pin)
     report = gate.read_json(result)
     receipt = {
-        "schema_version": 1, "kind": "public-robustness-replay-receipt-v1",
+        "schema_version": 1, "kind": "public-robustness-replay-receipt-v2",
         "result_path": str(result.resolve()), "result_sha256": pin,
         "baseline_sha256": report["baseline_sha256"], "corpus_sha256": report["corpus_sha256"],
         "public_acceptance_sha256": report["public_acceptance_sha256"],
         "source_hashes": report["source_hashes"], "replay": measured,
+        "runtime": report["runtime"], "thread_contract": report["thread_contract"],
+        "settings_contract": report["settings_contract"],
         "license_verified": False, "public_redistribution": False,
         "qualification_upgraded": False,
         "rows": [{
@@ -288,13 +651,76 @@ def test_external_replay_receipt_roundtrip_and_sealed_inventory(experiment, tmp_
         replay_receipt(experiment, pin, output)
 
 
+def no_solve_units(artifact_root: Path) -> dict:
+    """Run this suite directly: no general verifier's unrelated solve example."""
+    root = runner.external(artifact_root)
+    root.mkdir(parents=True, exist_ok=True)
+    output = Path(tempfile.mkdtemp(prefix="p2-unit-", dir=root))
+    paths = (Path(gate.__file__), Path(__file__), gate.ROOT / "docs/research/public-robustness.md")
+    before = {str(path): gate.digest(path) for path in paths}
+    baseline_pin = gate.digest(REAL_V1.parent / "baseline/result.json")
+    report = {"kind": "p2-no-solve-unit-verification-v2", "started_at": gate.now(),
+              "source_before": before, "original_result_sha256": gate.digest(REAL_V1),
+              "baseline_sha256": baseline_pin, "verdict": "RUNNING", "solver_calls": 0}
+    old_profile = gate.sys.getprofile()
+    calls = []
+
+    def profile(frame, event, arg):
+        if event == "call" and frame.f_code.co_name in ("solve_qp", "solve"):
+            calls.append(f"{frame.f_code.co_filename}:{frame.f_code.co_name}")
+            raise RuntimeError("P2 unit entry attempted solve")
+
+    gate.sys.setprofile(profile)
+    try:
+        with (output / "pytest.log").open("x") as log, redirect_stdout(log), redirect_stderr(log):
+            code = pytest.main([
+                "-q", "-ra", "-o", f"cache_dir={output / 'pytest-cache'}",
+                "--basetemp", str(output / "pytest-tmp"), f"--junitxml={output / 'pytest.xml'}",
+                str(Path(__file__))])
+        report["exit_code"] = int(code)
+        suites = ElementTree.parse(output / "pytest.xml").getroot().findall("testsuite")
+        counts = {key: sum(int(suite.attrib.get(key, 0)) for suite in suites)
+                  for key in ("tests", "failures", "errors", "skipped")}
+        report["tests"] = counts
+        report["source_after"] = {str(path): gate.digest(path) for path in paths}
+        assert report["source_after"] == before
+        assert gate.digest(REAL_V1) == REAL_V1_PIN == report["original_result_sha256"]
+        assert gate.digest(REAL_V1.parent / "baseline/result.json") == baseline_pin
+        assert not calls and code == 0 and counts["tests"] > 0
+        assert counts["failures"] == counts["errors"] == counts["skipped"] == 0
+        report["verdict"] = "PASS"
+    except Exception as error:
+        report.update({"verdict": "FAIL", "error": str(error)})
+        raise
+    finally:
+        gate.sys.setprofile(old_profile)
+        report["solver_calls"] = len(calls)
+        report["finished_at"] = gate.now()
+        corpus.write_json(output / "verification.json", report)
+        gate.exact(gate.read_json(output / "verification.json"), report, "verification JSON readback")
+        print("P2_UNIT " + json.dumps({
+            "verification": str(output / "verification.json"),
+            "sha256": gate.digest(output / "verification.json"),
+            "verdict": report["verdict"], "solver_calls": len(calls),
+            "tests": report.get("tests")}, sort_keys=True))
+    return report
+
+
 if __name__ == "__main__":
     cli = argparse.ArgumentParser(description="Read-only pinned robustness replay with external receipt")
-    cli.add_argument("--check-result", type=Path, required=True)
-    cli.add_argument("--sha256", required=True)
-    cli.add_argument("--output", type=Path, required=True)
+    cli.add_argument("--check-result", type=Path)
+    cli.add_argument("--sha256")
+    cli.add_argument("--output", type=Path)
+    cli.add_argument("--unit-artifact-dir", type=Path)
     args = cli.parse_args()
-    receipt = replay_receipt(args.check_result, args.sha256, args.output)
-    print("PUBLIC_ROBUSTNESS_RECEIPT " + json.dumps({
-        "receipt": str(args.output), "receipt_sha256": gate.digest(args.output),
-        "replay": receipt["replay"]}, sort_keys=True))
+    if args.unit_artifact_dir is not None:
+        if any(value is not None for value in (args.check_result, args.sha256, args.output)):
+            cli.error("unit and replay arguments are mutually exclusive")
+        no_solve_units(args.unit_artifact_dir)
+    else:
+        if any(value is None for value in (args.check_result, args.sha256, args.output)):
+            cli.error("replay requires --check-result, --sha256 and --output")
+        receipt = replay_receipt(args.check_result, args.sha256, args.output)
+        print("PUBLIC_ROBUSTNESS_RECEIPT " + json.dumps({
+            "receipt": str(args.output), "receipt_sha256": gate.digest(args.output),
+            "replay": receipt["replay"]}, sort_keys=True))
