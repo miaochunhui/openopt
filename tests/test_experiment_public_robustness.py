@@ -1,9 +1,10 @@
-"""Cheap synthetic CPU controls, never public/industrial corpus coverage."""
+"""Portable synthetic controls; pinned local evidence is explicit opt-in only."""
 
 import argparse
 from contextlib import redirect_stderr, redirect_stdout
 from copy import deepcopy
 import json
+import os
 from pathlib import Path
 import shutil
 import tempfile
@@ -30,6 +31,13 @@ ENDATA
 
 REAL_V1 = Path("/hf3fs-jd/data/tmp/openopt-release-20261010/public-robustness/real-v1/result.json")
 REAL_V1_PIN = "aa584b62f97349f37afad438dfbd87320ace3408df4d7e574a0989370970e8e7"
+BASELINE_PIN = "b10d49a32a13a9f34b8bf86ea6bd8a126dc779bf72a47db3f069420f653456ef"
+EVIDENCE_ENV = "OPENOPT_RUN_PUBLIC_EVIDENCE_TESTS"
+EVIDENCE_PATH_ENV = "OPENOPT_PUBLIC_ROBUSTNESS_V1_RESULT"
+LOCAL_EVIDENCE = pytest.mark.skipif(
+    os.environ.get(EVIDENCE_ENV) != "1",
+    reason=f"local pinned evidence/setup probes require {EVIDENCE_ENV}=1",
+)
 P2_MUTATIONS = (
     ("osqp", "max_iter", 9999),
     ("osqp", "warm_starting", 1),
@@ -37,6 +45,28 @@ P2_MUTATIONS = (
     ("clarabel", "max_threads", 2),
     ("clarabel", "presolve_enable", True),
 )
+
+
+def pinned_real_evidence() -> Path:
+    """Opt-in missing/wrong bytes are errors, never skips or fabricated defaults."""
+    if os.environ.get(EVIDENCE_ENV) != "1":
+        raise ValueError(f"pinned local evidence requires {EVIDENCE_ENV}=1")
+    result = Path(os.environ.get(EVIDENCE_PATH_ENV, str(REAL_V1)))
+    if not result.is_file() or result.is_symlink():
+        raise ValueError(f"opt-in pinned real-v1 result missing/unsafe: {result}")
+    gate.exact(gate.digest(result), REAL_V1_PIN, "opt-in real-v1 SHA256")
+    baseline = result.parent / "baseline/result.json"
+    if not baseline.is_file() or baseline.is_symlink():
+        raise ValueError(f"opt-in pinned baseline missing/unsafe: {baseline}")
+    gate.exact(gate.digest(baseline), BASELINE_PIN, "opt-in baseline SHA256")
+    return result
+
+
+@pytest.fixture
+def local_real_evidence():
+    if os.environ.get(EVIDENCE_ENV) != "1":
+        pytest.skip(f"local evidence requires {EVIDENCE_ENV}=1")
+    return pinned_real_evidence()
 
 
 @pytest.fixture(autouse=True)
@@ -100,14 +130,14 @@ def forbid_solves(monkeypatch):
 
 
 @pytest.fixture
-def real_metadata_test_copy(tmp_path):
+def real_metadata_test_copy(tmp_path, local_real_evidence):
     """Old vectors with fabricated v2 metadata ONLY for checker negative tests.
 
     This is not a v2 run, worker execution receipt or requalification of v1.
     """
-    assert gate.digest(REAL_V1) == REAL_V1_PIN
+    original = local_real_evidence
     result = tmp_path / "test-only-metadata-copy-not-a-run" / "result.json"
-    shutil.copytree(REAL_V1.parent, result.parent)
+    shutil.copytree(original.parent, result.parent)
     report = gate.read_json(result)
     shutil.copyfile(Path(gate.__file__), result.parent / "code/producer.py")
     _, _, core = gate.load_dependencies(result.parent / "code")
@@ -115,7 +145,9 @@ def real_metadata_test_copy(tmp_path):
     runtime = gate.runtime_identity()
     report.update({"version": gate.VERSION, "producer_sha256": gate.digest(Path(gate.__file__)),
                    "settings_contract": contracts, "runtime": runtime,
-                   "thread_contract": gate.THREAD_CONTRACT})
+                   "thread_contract": gate.THREAD_CONTRACT,
+                   "test_fixture_kind": "test-only-metadata-copy-not-a-run",
+                   "worker_execution_verified": False})
     for row in report["rows"]:
         settings = contracts[row["solver"]]
         row["raw"].update({
@@ -132,15 +164,11 @@ def real_metadata_test_copy(tmp_path):
     return result
 
 
-@pytest.mark.parametrize("solver,key,value", P2_MUTATIONS)
-def test_p2_coordinated_settings_reseal_rejected(
-    real_metadata_test_copy, monkeypatch, request, solver, key, value,
-):
-    result = real_metadata_test_copy
+def coordinated_settings_reseal_rejected(result, monkeypatch, request, solver, key, value):
     report = gate.read_json(result)
     previous = forbid_solves(monkeypatch)
     try:
-        assert gate.replay(result, gate.digest(result))["new_numerically_replayed"] == 6
+        assert gate.replay(result, gate.digest(result))["new_numerically_replayed"] == len(report["rows"])
     finally:
         gate.sys.setprofile(previous)
     for row in report["rows"]:
@@ -164,9 +192,29 @@ def test_p2_coordinated_settings_reseal_rejected(
             gate.replay(result, gate.digest(result))
     finally:
         gate.sys.setprofile(previous)
-    assert gate.digest(REAL_V1) == REAL_V1_PIN
 
 
+@pytest.mark.parametrize("solver,key,value", P2_MUTATIONS)
+def test_p2_coordinated_settings_reseal_rejected(
+    experiment, monkeypatch, request, solver, key, value,
+):
+    coordinated_settings_reseal_rejected(experiment, monkeypatch, request, solver, key, value)
+
+
+@LOCAL_EVIDENCE
+@pytest.mark.parametrize("solver,key,value", P2_MUTATIONS)
+def test_optin_real_metadata_only_coordinated_reseal_rejected(
+    real_metadata_test_copy, local_real_evidence, monkeypatch, request, solver, key, value,
+):
+    report = gate.read_json(real_metadata_test_copy)
+    assert report["test_fixture_kind"] == "test-only-metadata-copy-not-a-run"
+    assert report["worker_execution_verified"] is False
+    coordinated_settings_reseal_rejected(
+        real_metadata_test_copy, monkeypatch, request, solver, key, value)
+    assert gate.digest(local_real_evidence) == REAL_V1_PIN
+
+
+@LOCAL_EVIDENCE
 def test_p2_capture_default_fields_without_solve(tmp_path, request):
     import osqp
     import clarabel
@@ -198,6 +246,7 @@ def test_p2_capture_default_fields_without_solve(tmp_path, request):
     request.node.user_properties.append(("p2_defaults", str(path)))
 
 
+@LOCAL_EVIDENCE
 def test_p2_full_effective_settings_observed_at_setup_without_solve(tmp_path, request, monkeypatch):
     import osqp
     import clarabel
@@ -235,9 +284,9 @@ def test_p2_full_effective_settings_observed_at_setup_without_solve(tmp_path, re
 @pytest.mark.parametrize("mutation", ["missing", "extra", "type", "requested-only", "effective-only",
                                      "before-only", "after-only"])
 def test_p2_settings_exact_membership_types_and_each_stage(
-    real_metadata_test_copy, monkeypatch, solver, mutation,
+    experiment, monkeypatch, solver, mutation,
 ):
-    result = real_metadata_test_copy
+    result = experiment
     report = gate.read_json(result)
     row = next(row for row in report["rows"] if row["solver"] == solver)
     raw = row["raw"]
@@ -269,9 +318,9 @@ def test_p2_settings_exact_membership_types_and_each_stage(
 
 @pytest.mark.parametrize("mutation", ["version", "module", "thread-env", "torch-thread"])
 def test_p2_runtime_and_thread_coordinated_reseal_rejected(
-    real_metadata_test_copy, monkeypatch, mutation,
+    experiment, monkeypatch, mutation,
 ):
-    result = real_metadata_test_copy
+    result = experiment
     report = gate.read_json(result)
     if mutation == "version":
         report["runtime"]["packages"]["osqp"] = "1.0.5"
@@ -297,37 +346,79 @@ def test_p2_runtime_and_thread_coordinated_reseal_rejected(
         gate.sys.setprofile(previous)
 
 
-def test_p2_v1_is_not_promoted_or_relabelled(monkeypatch):
-    assert gate.digest(REAL_V1) == REAL_V1_PIN
+@LOCAL_EVIDENCE
+def test_p2_v1_is_not_promoted_or_relabelled(monkeypatch, local_real_evidence):
     previous = forbid_solves(monkeypatch)
     try:
         with pytest.raises(ValueError, match="unsupported experiment"):
-            gate.replay(REAL_V1, REAL_V1_PIN)
+            gate.replay(local_real_evidence, REAL_V1_PIN)
     finally:
         gate.sys.setprofile(previous)
-    assert gate.read_json(REAL_V1)["version"] == "public-robustness-v1"
-    assert gate.digest(REAL_V1) == REAL_V1_PIN
+    assert gate.read_json(local_real_evidence)["version"] == "public-robustness-v1"
+    assert gate.digest(local_real_evidence) == REAL_V1_PIN
 
 
-def test_p2_wrong_installed_version_fails_before_worker_execution(monkeypatch):
-    original = gate.importlib.metadata.version
+@pytest.mark.parametrize("package", tuple(gate.PACKAGE_VERSIONS))
+def test_p2_wrong_installed_version_fails_before_worker_execution(monkeypatch, package):
+    """All metadata are controlled; no dependence on installed exact versions."""
     monkeypatch.setattr(gate.importlib.metadata, "version",
-                        lambda name: "1.0.5" if name == "osqp" else original(name))
-    with pytest.raises(ValueError, match="runtime versions.osqp"):
+                        lambda name: "unsupported-version" if name == package
+                        else gate.PACKAGE_VERSIONS[name])
+    with pytest.raises(ValueError, match=f"runtime versions.{package}"):
+        gate.runtime_identity()
+
+
+def test_p2_wrong_python_version_fails_before_module_probes(monkeypatch):
+    monkeypatch.setattr(gate.importlib.metadata, "version", gate.PACKAGE_VERSIONS.__getitem__)
+    monkeypatch.setattr(gate.sys, "version", "0.0.0 synthetic")
+    with pytest.raises(ValueError, match="runtime Python version"):
         gate.runtime_identity()
 
 
 def test_p2_wrong_worker_thread_environment_fails(monkeypatch):
+    import torch
+
+    for key, value in gate.THREAD_ENV.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setattr(torch, "get_num_threads", lambda: 1)
+    monkeypatch.setattr(torch, "get_num_interop_threads", lambda: 1)
     monkeypatch.setenv("OMP_NUM_THREADS", "2")
     with pytest.raises(ValueError, match="runtime threads.environment"):
         gate.worker_threads()
 
 
+@LOCAL_EVIDENCE
+def test_optin_observed_worker_thread_contract_without_solve(tmp_path, request):
+    import torch
+
+    torch.set_num_threads(1)
+    if torch.get_num_interop_threads() != 1:
+        torch.set_num_interop_threads(1)
+    receipt = {"kind": "local-thread-probe-not-a-worker-execution",
+               "runtime": gate.runtime_identity(), "threads": gate.worker_threads(),
+               "solve_calls": 0}
+    path = tmp_path / "local-thread-probe.json"
+    corpus.write_json(path, receipt)
+    gate.exact(gate.read_json(path), receipt, "local thread probe JSON readback")
+    request.node.user_properties.append(("p2_thread_probe", str(path)))
+
+
+@pytest.mark.parametrize("mutation", ["disabled", "missing", "wrong-bytes"])
+def test_optin_evidence_preflight_fail_loud_without_real_files(tmp_path, monkeypatch, mutation):
+    path = tmp_path / "absent-result.json"
+    monkeypatch.setenv(EVIDENCE_ENV, "0" if mutation == "disabled" else "1")
+    monkeypatch.setenv(EVIDENCE_PATH_ENV, str(path))
+    if mutation == "wrong-bytes":
+        path.write_bytes(b'{"kind":"synthetic-wrong-pin"}')
+    with pytest.raises(ValueError, match="requires|missing/unsafe|SHA256"):
+        pinned_real_evidence()
+
+
 @pytest.mark.parametrize("solver,key,value", P2_MUTATIONS)
 def test_p2_coordinated_worker_rows_without_contract_edit_rejected(
-    real_metadata_test_copy, solver, key, value,
+    experiment, solver, key, value,
 ):
-    result = real_metadata_test_copy
+    result = experiment
     report = gate.read_json(result)
     for row in report["rows"]:
         if row["solver"] == solver:
@@ -374,6 +465,17 @@ def baseline(tmp_path, monkeypatch):
 
 @pytest.fixture
 def experiment(baseline, tmp_path, monkeypatch):
+    import torch
+
+    # This double exercises serialization/replay, NOT the real runtime gate.
+    runtime = {"kind": "synthetic-runtime-double-not-an-execution-receipt",
+               "python": "synthetic", "packages": {"synthetic": "not-installed"},
+               "modules": {"osqp.ext_builtin": {"sha256": "synthetic-not-native-bytes"}}}
+    monkeypatch.setattr(gate, "runtime_identity", lambda: deepcopy(runtime))
+    monkeypatch.setattr(gate, "worker_threads", lambda: deepcopy(gate.THREAD_CONTRACT))
+    monkeypatch.setattr(torch, "set_num_threads", lambda value: None)
+    monkeypatch.setattr(torch, "set_num_interop_threads", lambda value: None)
+
     def saved_candidate(model, arm, core, saved_runner):
         """Planted unit KKT vectors, never a backend execution receipt."""
         import torch
@@ -523,6 +625,8 @@ def test_budget_exhaustion_has_full_failure_denominator(baseline, tmp_path, monk
         raise gate.subprocess.TimeoutExpired("synthetic budget control", 0.01)
 
     monkeypatch.setattr(gate.subprocess, "run", exhausted)
+    monkeypatch.setattr(gate, "runtime_identity",
+                        lambda: {"kind": "synthetic-budget-control-not-runtime-evidence"})
     result, code = gate.run(baseline, gate.digest(baseline), tmp_path / "exhausted", 180)
     report = gate.read_json(result)
     assert code == 2
@@ -541,6 +645,8 @@ def test_failed_worker_is_not_skipped_or_retried(baseline, tmp_path, monkeypatch
         return SimpleNamespace(returncode=7)
 
     monkeypatch.setattr(gate.subprocess, "run", failed)
+    monkeypatch.setattr(gate, "runtime_identity",
+                        lambda: {"kind": "synthetic-failed-worker-control-not-runtime-evidence"})
     result, code = gate.run(baseline, gate.digest(baseline), tmp_path / "failed", 180)
     report = gate.read_json(result)
     assert code == 2 and len(calls) == 3
@@ -651,17 +757,19 @@ def test_external_replay_receipt_roundtrip_and_sealed_inventory(experiment, tmp_
         replay_receipt(experiment, pin, output)
 
 
-def no_solve_units(artifact_root: Path) -> dict:
+def no_solve_units(artifact_root: Path, keyword: str | None = None) -> dict:
     """Run this suite directly: no general verifier's unrelated solve example."""
     root = runner.external(artifact_root)
     root.mkdir(parents=True, exist_ok=True)
     output = Path(tempfile.mkdtemp(prefix="p2-unit-", dir=root))
     paths = (Path(gate.__file__), Path(__file__), gate.ROOT / "docs/research/public-robustness.md")
     before = {str(path): gate.digest(path) for path in paths}
-    baseline_pin = gate.digest(REAL_V1.parent / "baseline/result.json")
+    evidence_enabled = os.environ.get(EVIDENCE_ENV) == "1"
+    original = None
     report = {"kind": "p2-no-solve-unit-verification-v2", "started_at": gate.now(),
-              "source_before": before, "original_result_sha256": gate.digest(REAL_V1),
-              "baseline_sha256": baseline_pin, "verdict": "RUNNING", "solver_calls": 0}
+              "source_before": before, "public_evidence_opt_in": evidence_enabled,
+              "original_result_sha256": None, "baseline_sha256": None,
+              "public_evidence_status": "NOT_REQUESTED", "verdict": "RUNNING", "solver_calls": 0}
     old_profile = gate.sys.getprofile()
     calls = []
 
@@ -672,11 +780,19 @@ def no_solve_units(artifact_root: Path) -> dict:
 
     gate.sys.setprofile(profile)
     try:
+        if evidence_enabled:
+            original = pinned_real_evidence()
+            report.update({"original_result_sha256": gate.digest(original),
+                           "baseline_sha256": gate.digest(original.parent / "baseline/result.json"),
+                           "public_evidence_status": "METADATA_ONLY_NOT_EXECUTION"})
         with (output / "pytest.log").open("x") as log, redirect_stdout(log), redirect_stderr(log):
-            code = pytest.main([
+            command = [
                 "-q", "-ra", "-o", f"cache_dir={output / 'pytest-cache'}",
                 "--basetemp", str(output / "pytest-tmp"), f"--junitxml={output / 'pytest.xml'}",
-                str(Path(__file__))])
+                str(Path(__file__))]
+            if keyword is not None:
+                command.extend(["-k", keyword])
+            code = pytest.main(command)
         report["exit_code"] = int(code)
         suites = ElementTree.parse(output / "pytest.xml").getroot().findall("testsuite")
         counts = {key: sum(int(suite.attrib.get(key, 0)) for suite in suites)
@@ -684,13 +800,18 @@ def no_solve_units(artifact_root: Path) -> dict:
         report["tests"] = counts
         report["source_after"] = {str(path): gate.digest(path) for path in paths}
         assert report["source_after"] == before
-        assert gate.digest(REAL_V1) == REAL_V1_PIN == report["original_result_sha256"]
-        assert gate.digest(REAL_V1.parent / "baseline/result.json") == baseline_pin
-        assert not calls and code == 0 and counts["tests"] > 0
-        assert counts["failures"] == counts["errors"] == counts["skipped"] == 0
+        if original is not None:
+            assert gate.digest(original) == REAL_V1_PIN == report["original_result_sha256"]
+            assert gate.digest(original.parent / "baseline/result.json") == BASELINE_PIN
+        assert not calls and code == 0 and counts["tests"] > counts["skipped"]
+        assert counts["failures"] == counts["errors"] == 0
+        if evidence_enabled:
+            assert counts["skipped"] == 0
+        report["passed"] = counts["tests"] - counts["skipped"]
         report["verdict"] = "PASS"
     except Exception as error:
-        report.update({"verdict": "FAIL", "error": str(error)})
+        report.update({"verdict": "FAIL", "error": {"type": type(error).__name__,
+                                                  "message": str(error)}})
         raise
     finally:
         gate.sys.setprofile(old_profile)
@@ -712,12 +833,15 @@ if __name__ == "__main__":
     cli.add_argument("--sha256")
     cli.add_argument("--output", type=Path)
     cli.add_argument("--unit-artifact-dir", type=Path)
+    cli.add_argument("--pytest-keyword", help="optional selected unit subset; actual counts retained")
     args = cli.parse_args()
     if args.unit_artifact_dir is not None:
         if any(value is not None for value in (args.check_result, args.sha256, args.output)):
             cli.error("unit and replay arguments are mutually exclusive")
-        no_solve_units(args.unit_artifact_dir)
+        no_solve_units(args.unit_artifact_dir, args.pytest_keyword)
     else:
+        if args.pytest_keyword is not None:
+            cli.error("--pytest-keyword requires --unit-artifact-dir")
         if any(value is None for value in (args.check_result, args.sha256, args.output)):
             cli.error("replay requires --check-result, --sha256 and --output")
         receipt = replay_receipt(args.check_result, args.sha256, args.output)

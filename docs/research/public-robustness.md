@@ -62,6 +62,85 @@ not worker receipts or a legal/numerical qualification artifact.
 
 ## P2 Evidence
 
+### Portable Test Boundary
+
+The default suite requires the declared test dependencies, not the producer's
+exact local Python/package/native-module pins or a mounted real-v1 corpus.
+Saved synthetic candidates and an explicitly labelled synthetic runtime double
+exercise serialization, all complete settings gates, coordinated reseals,
+denominators and numerical replay. The runtime double is confined to the test
+fixture; the producer contract is unchanged. It is not a runtime observation,
+worker execution receipt, real-model experiment or qualification.
+
+Only `OPENOPT_RUN_PUBLIC_EVIDENCE_TESTS=1` enables the real-v1 metadata-copy
+controls and native settings/runtime/thread setup probes. Without it those
+tests are explicitly skipped, not reported as passed. An enabled run with
+missing, unsafe or incorrectly pinned files fails loudly before testing;
+unsupported local runtime fails its producer contract. The optional
+`OPENOPT_PUBLIC_ROBUSTNESS_V1_RESULT` supplies a relocated result path, never a
+different pin. Full copied-member validation still occurs on replay.
+Copies carry `test_fixture_kind=test-only-metadata-copy-not-a-run` and
+`worker_execution_verified=false`; v2 metadata fabricated for a negative
+fixture does not establish execution of v2. Original v1 bytes remain unchanged.
+
+The direct external unit entry now works in both modes. Default verification
+does not read the local real-v1 path and records null real/baseline pins plus
+`public_evidence_status=NOT_REQUESTED`. Opt-in records pinned bytes and
+`METADATA_ONLY_NOT_EXECUTION`. Both retain actual pass/skip/failure counts, a
+zero-solve trap, source-before/after hashes and JSON readback. No full-repository
+portable-clone acceptance or native backend execution is inferred from this
+scoped suite.
+
+```bash
+sudo -n -u infra env CUDA_VISIBLE_DEVICES=-1 PYTHONPATH=. PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 /hf3fs-jd/data/tmp/openopt-validation-env/bin/python -B tests/test_experiment_public_robustness.py --unit-artifact-dir /hf3fs-jd/data/tmp/openopt-release-20261010/public-robustness/portable-default-new
+sudo -n -u infra env OPENOPT_RUN_PUBLIC_EVIDENCE_TESTS=1 CUDA_VISIBLE_DEVICES=-1 PYTHONPATH=. PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 /hf3fs-jd/data/tmp/openopt-validation-env/bin/python -B tests/test_experiment_public_robustness.py --unit-artifact-dir /hf3fs-jd/data/tmp/openopt-release-20261010/public-robustness/portable-optin-new
+```
+
+Portable verification, external root
+`/hf3fs-jd/data/tmp/openopt-release-20261010/public-robustness/`:
+
+- Default `portable-default-v2/p2-unit-m1tldfv2/verification.json`, SHA256
+  `8b9bc472b7253fb7e649a63432fd676e6b6aa7bba1cd05fda34fed34dc993579`,
+  finished `2026-10-10T10:48:55.932879+00:00`: 68 passed, nine explicit local
+  evidence/probe skips, zero failures/errors, 244.69 seconds.
+  `OPENOPT_PUBLIC_ROBUSTNESS_V1_RESULT=/no-such-mounted-corpus/result.json`
+  was deliberately set while evidence opt-in was zero; no local real files
+  or exact local runtime were required. Real/baseline pins are null.
+- Opt-in `portable-optin-v2/p2-unit-ga31eyj5/verification.json`, SHA256
+  `dab0c7346c123122e8e16b3edf5bfd1edffe0e94758afc9697f607301ccf3fcb`,
+  finished `2026-10-10T10:49:33.770906+00:00`: 77 passed, zero failures/
+  errors/skips, 282.51 seconds. Real/baseline bytes match the original pins.
+  This includes five metadata-only real coordinated settings mutations,
+  two native settings setup probes, actual thread/runtime observation and
+  refusal to promote the original v1 result, never new backend solves.
+- Enabled missing-path preflight
+  `portable-missing-v2/p2-unit-14dl958l/verification.json`, SHA256
+  `8211e6709d8fafbb58d3f435265aef8156df5cf60a0bd4863e57270b4b500374`,
+  is FAIL with ValueError and process exit 1; testing never started.
+  This is intentional negative evidence, not a skipped/successful suite.
+
+Both complete suites record solver_calls=0, before/after source equality and
+JSON readback, with actual summaries in `pytest.log` and counts in `pytest.xml`.
+Default tests retain all five coordinated settings mutations, 21 complete
+membership/type/stage controls, four synthetic runtime/thread reseals, five
+controlled installed-package version mismatch controls, a Python version
+control, worker-thread mismatch and three disabled/missing/wrong-byte evidence
+controls. Metadata version controls supply all other versions as test doubles;
+they do not require the host to match the producer's supported environment.
+
+Retained portability reds are `portable-default-v1/p2-unit-bbv6nvt1/`
+(68 passed, nine skipped, one error) and
+`portable-optin-v1/p2-unit-qjfo4d_6/` (77 passed, one error).
+The new Python-version negative initially replaced the whole `sys` object;
+the no-solve guard then could not restore its profiler at fixture teardown.
+Only `sys.version` is now replaced. No producer code or contract was changed.
+The final tested producer/test hashes are
+`91f8786f81bff6f6a32a5f0f2763c47e2e0b5846c0699a8eea503e37ee6ac88f` /
+`71d8216508ff91430884987ba6942c3aca67b1661a1d1a5b5e6004567d197e6f`.
+This evidence paragraph is a subsequent documentation-only update, not a
+replacement for either receipt's document hash. This is scoped portability
+evidence in the existing environment, not a full clone/version-matrix test.
+
 All evidence is under
 `/hf3fs-jd/data/tmp/openopt-release-20261010/public-robustness/`.
 Repair-before red is `p2-red-v1/tests-gpzft2hx/`: 5 failed, 1 passed, exit 1.
@@ -86,20 +165,20 @@ an absent monkeypatch fixture and raised NameError. The test block was moved
 back to its own test before the changed-source final verification.
 Neither failed receipt nor its fixture copies overwrite a real result.
 
-The direct unit entry runs the complete current scoped suite, uses external
+The historical direct unit entry ran the complete then-current scoped suite, used external
 pytest temporary data/logs/JUnit, traps Python solver entries, forbids backend
 solve calls during replay, verifies original real-result pins, and round-trips
 the final JSON. Existing unit workers now use planted saved candidates instead
 of real backend solves; they do not establish reference execution coverage.
 Setup-only probes construct workspaces without calling solve. Final-entry
-verification reports actual counts and zero solver_calls rather than treating
+verification reported actual counts and zero solver_calls rather than treating
 exit zero as qualification:
 
 ```bash
 sudo -n -u infra env CUDA_VISIBLE_DEVICES=-1 PYTHONPATH=. PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 PYTHONDONTWRITEBYTECODE=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 /hf3fs-jd/data/tmp/openopt-validation-env/bin/python -B tests/test_experiment_public_robustness.py --unit-artifact-dir /hf3fs-jd/data/tmp/openopt-release-20261010/public-robustness/p2-final-new
 ```
 
-Final changed-code receipt is
+Historical pre-portability changed-code receipt is
 `p2-final-v4/p2-unit-xs_u24tu/verification.json`, finished
 `2026-10-10T10:30:45.156300+00:00`, SHA256
 `68a562fd15eed185973dc04c890e51bcfd4e728870827c591546470af743f9f5`.
