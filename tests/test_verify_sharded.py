@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+from types import SimpleNamespace
 from xml.etree import ElementTree as ET
 
 import pytest
@@ -434,7 +435,8 @@ def test_combine_requires_exact_full_collection(nodes):
                             {"id": 1, "nodeids": nodes[:1], "tests": counts}])
 
 
-def test_cli_real_tiny_plan_run_check(mini_repo, tmp_path):
+@pytest.mark.parametrize("fixture_aware", [False, True])
+def test_cli_real_tiny_plan_run_check(mini_repo, tmp_path, fixture_aware):
     root = tmp_path / "cli"
     root.mkdir()
 
@@ -446,7 +448,8 @@ def test_cli_real_tiny_plan_run_check(mini_repo, tmp_path):
         return tool.command_logged(command, tool.ROOT, folder, 90,
                                    tool.cpu_env(tool.ROOT, folder))
 
-    invoke("plan", "--shards", "3", "--shard-timeout", "90")
+    extra = ("--fixture-aware", "--fixture-file", "tests/test_a.py") if fixture_aware else ()
+    invoke("plan", "--shards", "3", "--shard-timeout", "90", *extra)
     path = next((root / "outputs").glob("plan-*/plan.json"))
     pin = tool.digest(path)
     invoke("run", "--plan", str(path), "--plan-sha256", pin, "--workers", "3")
@@ -455,4 +458,375 @@ def test_cli_real_tiny_plan_run_check(mini_repo, tmp_path):
            "--report", str(report), "--report-sha256", tool.digest(report))
     audit = tool.read(next((root / "outputs").glob("check-*/acceptance.json")))
     assert audit["verdict"] == "PASS" and audit["tests"]["tests"] == 4
+    assert tool.read(path)["schema_version"] == (2 if fixture_aware else 1)
     assert git(mini_repo, "status", "--porcelain") == ""
+
+
+def freeze_test_file(repo, source, path="tests/test_a.py"):
+    (repo / path).write_text(source, encoding="utf-8")
+    git(repo, "add", path)
+    git(repo, "commit", "-m", "Freeze fixture dependency acceptance input")
+
+
+def test_fixture_components_transitive_cross_file_and_class(tmp_path):
+    nodes = ["tests/test_a.py::test_a", "tests/test_a.py::test_b",
+             "tests/test_b.py::test_c", "tests/test_c.py::TestC::test_d",
+             "tests/test_c.py::TestC::test_e", "tests/test_c.py::test_f"]
+    audit = {"contract": tool.FIXTURE_CONTRACT, "nodes": [
+        {"nodeid": node, "constraints": constraints} for node, constraints in zip(nodes, [
+            ["module:a", "session:shared"], ["module:a"], ["session:shared"],
+            ["class:c"], ["class:c"], [],
+        ])]}
+    groups = tool.fixture_groups(nodes, audit)
+    assert [group["nodeids"] for group in groups] == [nodes[:3], nodes[3:5], nodes[5:]]
+    assignments, _, unknown = tool.lpt(nodes, [], shards=3, components=groups)
+    assert unknown == nodes
+    assert all(item["nodeids"] for item in assignments)
+    assert len({node for item in assignments for node in item["nodeids"]}) == len(nodes)
+    assert max(item["predicted_test_s"] for item in assignments) == 3
+
+
+@pytest.mark.parametrize("source,reason", [
+    ('import pytest\n@pytest.fixture(scope=lambda **kw: "module")\n'
+     'def shared():\n    return 1\n', "dynamic_fixture_scope"),
+    ('import pytest\n@pytest.fixture\n'
+     'def shared(request):\n    return request.getfixturevalue("other")\n',
+     "dynamic_fixture_lookup"),
+    ('import pytest\n@pytest.fixture\n'
+     'def shared(request):\n    lookup = request\n    return lookup\n',
+     "unmodelled_fixture_request"),
+    ('pytest_plugins = ["unknown"]\n', "dynamic_fixture_environment"),
+    ('def pytest_generate_tests(metafunc):\n    pass\n', "dynamic_pytest_hook"),
+    ('def setup_module():\n    pass\n', "unmodelled_xunit_scope"),
+])
+def test_static_unknown_fixture_environments_fail_closed(tmp_path, source, reason):
+    path = tmp_path / "test_dynamic.py"
+    path.write_text(source)
+    with pytest.raises(tool.GateError, match=reason):
+        tool.static_fixture_file(path)
+
+
+def test_fixture_module_dependency_overbudget_saved_failure(mini_repo, tmp_path):
+    freeze_test_file(mini_repo,
+        'import pytest\n@pytest.fixture(scope="module")\n'
+        'def base():\n    return 1\n@pytest.fixture\n'
+        'def derived(base):\n    return base\n'
+        'def test_left(derived):\n    assert derived == 1\n'
+        'def test_right(derived):\n    assert derived == 1\n')
+    nodes = ["tests/test_a.py::test_left", "tests/test_a.py::test_right"]
+    history = xml(tmp_path / "module-cost.xml", nodes, seconds=160)
+    with pytest.raises(tool.GateError, match="fixture_group_prediction_exceeds_deadline"):
+        tool.plan_run(mini_repo, tmp_path / "module-plan", [history], shards=3,
+                      fixture_aware=True, fixture_files=["tests/test_a.py"])
+    path = next((tmp_path / "module-plan").glob("plan-*/plan.json"))
+    plan = tool.read(path)
+    assert plan["schema_version"] == 2 and plan["verdict"] == "FAIL"
+    assert "fixture_group_is_indivisible" in plan["error"]
+    group = next(group for group in plan["grouping"]["groups"] if nodes[0] in group["nodeids"])
+    assert group["nodeids"] == nodes
+    rows = plan["grouping"]["audit"]["nodes"]
+    assert all(any(entry["scope"] == "module" for entry in row["closure"])
+               for row in rows if row["nodeid"] in nodes)
+    assert any(item["predicted_test_s"] == 320 for item in plan["shards"])
+    assert not list((tmp_path / "module-plan").glob("**/shard-*"))
+    forged = copy.deepcopy(plan)
+    forged["verdict"] = "PASS"
+    for item in forged["shards"]:
+        item["predicted_test_s"] = 1
+        item["group_test_s"] = {key: 1 for key in item["group_test_s"]}
+    tool.save(path, forged)
+    with pytest.raises(tool.GateError, match="fixture_group_prediction_exceeds_deadline"):
+        tool.execute(mini_repo, path, tool.digest(path), tmp_path / "forged-fixture-run")
+    assert not list((tmp_path / "forged-fixture-run").glob("run-*/shard-*"))
+
+
+def test_fixture_session_dependency_joins_across_files(mini_repo, tmp_path):
+    freeze_test_file(mini_repo,
+        'import pytest\n@pytest.fixture(scope="session")\n'
+        'def common():\n    return 1\n@pytest.fixture\n'
+        'def indirect(common):\n    return common\n', "tests/conftest.py")
+    freeze_test_file(mini_repo, "def test_left(indirect):\n    assert indirect == 1\n")
+    freeze_test_file(mini_repo, "def test_right(common):\n    assert common == 1\n",
+                     "tests/check_b.py")
+    directory = tool.plan_run(mini_repo, tmp_path / "session-plan", [], shards=2,
+                              fixture_aware=True,
+                              fixture_files=["tests/check_b.py", "tests/test_a.py"])
+    plan = tool.read(directory / "plan.json")
+    group = next(group for group in plan["grouping"]["groups"]
+                 if "tests/test_a.py::test_left" in group["nodeids"])
+    assert group["nodeids"] == ["tests/check_b.py::test_right", "tests/test_a.py::test_left"]
+    assert any("owner:session" in constraint for constraint in group["constraints"])
+    tool.validate_plan(plan)
+
+
+@pytest.mark.parametrize("source,reason", [
+    ('import pytest\n@pytest.fixture(scope=lambda **kw: "module")\n'
+     'def shared():\n    return 1\n'
+     'def test_dynamic(shared):\n    assert shared == 1\n', "dynamic_fixture_scope"),
+    ('import pytest\n@pytest.fixture\n'
+     'def shared(request):\n    return request.getfixturevalue("tmp_path")\n'
+     'def test_dynamic(shared):\n    assert shared\n', "dynamic_fixture_lookup"),
+    ('def test_unknown(record_property):\n    assert record_property\n',
+     "unknown_builtin_fixture"),
+    ('import pytest\n@pytest.mark.parametrize("value", [1, 2], scope="module")\n'
+     'def test_scoped_parameter(value):\n    assert value\n', "nonfunction_param_scope"),
+    ('import pytest\n@pytest.fixture\n'
+     'def value(request):\n    return request.param\n'
+     '@pytest.mark.parametrize("value", [1, 2], indirect=True, scope="module")\n'
+     'def test_indirect_parameter(value):\n    assert value\n', "nonfunction_param_scope"),
+    ('def decorator(fn):\n    return fn\n'
+     '@decorator\n'
+     'def test_decorated():\n    assert True\n', "unknown_test_decorator"),
+    ('import pytest\npytest.fixture = lambda fn: fn\n'
+     '@pytest.fixture\n'
+     'def value():\n    return 1\n'
+     'def test_dynamic(value):\n    assert value\n', "dynamic_fixture_environment"),
+])
+def test_fixture_collection_unknown_saved_fail_no_admission(mini_repo, tmp_path, source, reason):
+    freeze_test_file(mini_repo, source)
+    with pytest.raises(tool.GateError, match="process_failed_rc"):
+        tool.plan_run(mini_repo, tmp_path / "unknown-plan", [], fixture_aware=True,
+                      fixture_files=["tests/test_a.py"])
+    plan_path = next((tmp_path / "unknown-plan").glob("plan-*/plan.json"))
+    failed = tool.read(plan_path)
+    collected = tool.read(plan_path.parent / "collection/collection.json")
+    assert failed["verdict"] == "FAIL" and reason in collected["fixture_error"]
+    assert collected["nodeids"] and not list(plan_path.parent.glob("shard-*"))
+    assert reason in (plan_path.parent / "collection/process.log").read_text()
+
+
+def test_fixture_cheap_nodes_overbudget_file_eight_shards_real_run_replay(mini_repo, tmp_path):
+    freeze_test_file(mini_repo,
+        'import pytest\n@pytest.fixture\n'
+        'def local_value():\n    return 1\n'
+        '@pytest.mark.parametrize("number", range(6))\n'
+        'def test_many(number, local_value, tmp_path_factory, pytestconfig):\n'
+        '    assert number >= 0 and local_value == 1\n'
+        '    first = tmp_path_factory.mktemp("same-prefix")\n'
+        '    second = tmp_path_factory.mktemp("same-prefix")\n'
+        '    assert first != second and first.parent == second.parent\n'
+        '    assert pytestconfig.getini("testpaths") == ["tests"]\n'
+        '    first.joinpath("owner").write_text(str(number))\n')
+    expensive_nodes = [f"tests/test_a.py::test_many[{number}]" for number in range(6)]
+    history = xml(tmp_path / "measured-cost.xml", expensive_nodes, seconds=60)
+    assert sum(row["time_s"] for row in tool.parse_junit(history)[0]) == 360
+    with pytest.raises(tool.GateError, match="file_prediction_exceeds_deadline"):
+        tool.plan_run(mini_repo, tmp_path / "old-file-plan", [history], shards=3)
+    directory = tool.plan_run(mini_repo, tmp_path / "fixture-plan", [history], shards=8,
+                              shard_timeout=90, fixture_aware=True,
+                              fixture_files=["tests/test_a.py"])
+    path = directory / "plan.json"
+    plan = tool.read(path)
+    assert plan["schema_version"] == 2 and plan["grouping"]["opt_in"] is True
+    assert plan["verdict"] == "PASS"
+    assert len(plan["shards"]) == len(plan["grouping"]["groups"]) == 8
+    assert len(plan["collection"]["nodeids"]) == 8
+    assert all(item["targets"] and item["nodeids"] for item in plan["shards"])
+    all_nodes = [node for item in plan["shards"] for node in item["nodeids"]]
+    assert sorted(all_nodes) == sorted(plan["collection"]["nodeids"])
+    assert len(all_nodes) == len(set(all_nodes))
+    assert max(item["predicted_test_s"] for item in plan["shards"]) == 60
+    assert set(plan["grouping"]["audit"]["isolated_builtins"]) == {
+        "tmp_path_factory", "pytestconfig"}
+    assert all(not any("tmp_path_factory" in value or "pytestconfig" in value
+                       for value in group["constraints"])
+               for group in plan["grouping"]["groups"])
+    assert plan["unknown_nodeids"] == [
+        "tests/check_b.py::TestB::test_custom_discovery", "tests/test_c.py::test_c"]
+    bad = copy.deepcopy(plan)
+    bad["grouping"]["groups"][0]["nodeids"].append(expensive_nodes[0])
+    with pytest.raises(tool.GateError, match="fixture_group_recompute_mismatch"):
+        tool.validate_plan(bad)
+    bad = copy.deepcopy(plan)
+    bad["shards"][0]["targets"].append(bad["shards"][1]["targets"][0])
+    with pytest.raises(tool.GateError, match="target_nodeid_conflict"):
+        tool.validate_plan(bad)
+    bad = copy.deepcopy(plan)
+    bad["grouping"]["opt_in"] = False
+    with pytest.raises(tool.GateError, match="opt_in_required"):
+        tool.validate_plan(bad)
+    bad = copy.deepcopy(plan)
+    bad["shards"][0]["group_test_s"] = {"0": 0}
+    with pytest.raises(tool.GateError, match="prediction_assignment_mismatch"):
+        tool.validate_plan(bad)
+    run_dir = tool.execute(mini_repo, path, tool.digest(path), tmp_path / "fixture-run", workers=3)
+    report_path = run_dir / "verification.json"
+    report = tool.read(report_path)
+    assert report["verdict"] == "PASS"
+    assert report["tests"] == {"tests": 8, "failures": 0, "errors": 0, "skipped": 1}
+    assert report["plan_schema_version"] == 2 and report["speedup"] is None
+    events = []
+    for item in report["shards"]:
+        process = tool.read(Path(item["artifact_dir"]) / "process.json",
+                            item["process_sha256"])
+        assert process["returncode"] == 0 and process["timeout"] is False
+        events.extend([(process["started_at"], 1), (process["finished_at"], -1)])
+    flying, peak = 0, 0
+    for _, change in sorted(events):
+        flying += change
+        peak = max(peak, flying)
+    assert flying == 0 and 1 <= peak <= 3
+    checked = tool.check(mini_repo, path, tool.digest(path), report_path,
+                         tool.digest(report_path), tmp_path / "fixture-check")
+    audit = tool.read(checked / "acceptance.json")
+    assert audit["verdict"] == "PASS" and audit["tests"] == report["tests"]
+    assert audit["source_consistency"]["verdict"] == "PASS"
+    assert git(mini_repo, "status", "--porcelain") == ""
+    private_dirs = [path for path in run_dir.glob("shard-*/tests-*/pytest-tmp/same-prefix*")
+                    if path.is_dir() and not path.is_symlink()]
+    assert len(private_dirs) == 12
+    assert len({path.parent for path in private_dirs}) == 6
+    assert sorted(path.joinpath("owner").read_text()
+                  for path in private_dirs if path.joinpath("owner").is_file()) == [
+                      str(number) for number in range(6)]
+
+
+def test_fixture_audit_drift_and_sidecar_tamper_stop_before_admission(mini_repo, tmp_path):
+    directory = tool.plan_run(mini_repo, tmp_path / "audit-plan", [], fixture_aware=True,
+                              fixture_files=["tests/test_a.py"])
+    path = directory / "plan.json"
+    plan = tool.read(path)
+    sidecar = Path(plan["collection"]["path"])
+    collection = tool.read(sidecar)
+    collection["fixture_audit"]["nodes"][0]["constraints"].append("fixture:forged")
+    collection["fixture_audit"]["nodes"][0]["constraints"].sort()
+    tool.save(sidecar, collection)
+    with pytest.raises(tool.GateError, match="hash_mismatch"):
+        tool.execute(mini_repo, path, tool.digest(path), tmp_path / "sidecar-run")
+    assert not list((tmp_path / "sidecar-run").glob("run-*/shard-*"))
+    plan["collection"]["sha256"] = tool.digest(sidecar)
+    plan["grouping"]["audit"] = collection["fixture_audit"]
+    plan["grouping"]["groups"] = tool.fixture_groups(
+        collection["nodeids"], collection["fixture_audit"])
+    plan["shards"], plan["history"], plan["unknown_nodeids"] = tool.lpt(
+        collection["nodeids"], [], shards=3, components=plan["grouping"]["groups"])
+    tool.save(path, plan)
+    with pytest.raises(tool.GateError, match="fixture_audit_drift"):
+        tool.execute(mini_repo, path, tool.digest(path), tmp_path / "forged-audit-run")
+    assert not list((tmp_path / "forged-audit-run").glob("run-*/shard-*"))
+
+
+def test_fixture_selection_preserves_unaudited_wholefiles(mini_repo, tmp_path):
+    freeze_test_file(mini_repo,
+        'import pytest\n@pytest.fixture\n'
+        'def local(request):\n    request.node.user_properties.append(("fixture", "wholefile"))\n'
+        'def test_whole_one(local):\n    assert local is None\n'
+        'def test_whole_two(local):\n    assert local is None\n', "tests/test_c.py")
+    directory = tool.plan_run(mini_repo, tmp_path / "narrow-plan", [], shards=3,
+                              fixture_aware=True, fixture_files=["tests/test_a.py"])
+    plan = tool.read(directory / "plan.json")
+    rows = plan["grouping"]["audit"]["nodes"]
+    assert all(not row["audited"] for row in rows
+               if row["nodeid"].startswith("tests/test_c.py::"))
+    group = next(group for group in plan["grouping"]["groups"]
+                 if "tests/test_c.py::test_whole_one" in group["nodeids"])
+    assert group["nodeids"] == ["tests/test_c.py::test_whole_one",
+                               "tests/test_c.py::test_whole_two"]
+    target = next(item for item in plan["shards"]
+                  if "tests/test_c.py::test_whole_one" in item["nodeids"])
+    assert "tests/test_c.py" in target["targets"]
+    tool.validate_plan(plan)
+
+
+def test_fixture_session_edge_outside_selection_rejected(mini_repo, tmp_path):
+    freeze_test_file(mini_repo,
+        'import pytest\n@pytest.fixture(scope="session")\n'
+        'def common():\n    return 1\n', "tests/conftest.py")
+    freeze_test_file(mini_repo, "def test_left(common):\n    assert common == 1\n")
+    freeze_test_file(mini_repo, "def test_right(common):\n    assert common == 1\n",
+                     "tests/check_b.py")
+    with pytest.raises(tool.GateError, match="process_failed_rc"):
+        tool.plan_run(mini_repo, tmp_path / "boundary-plan", [], fixture_aware=True,
+                      fixture_files=["tests/test_a.py"])
+    path = next((tmp_path / "boundary-plan").glob("plan-*/plan.json"))
+    collection = tool.read(path.parent / "collection/collection.json")
+    assert "session_dependency_outside_fixture_selection" in collection["fixture_error"]
+    assert "tests/check_b.py::test_right" in collection["fixture_error"]
+    assert tool.read(path)["verdict"] == "FAIL"
+
+
+@pytest.mark.parametrize("selection", [[], ["tests/absent.py"],
+                                      ["tests/test_a.py", "tests/test_a.py"]])
+def test_fixture_explicit_selection_required(mini_repo, tmp_path, selection):
+    with pytest.raises(tool.GateError):
+        tool.plan_run(mini_repo, tmp_path / "selection-plan", [], fixture_aware=True,
+                      fixture_files=selection)
+    path = next((tmp_path / "selection-plan").glob("plan-*/plan.json"))
+    assert tool.read(path)["verdict"] == "FAIL"
+    assert not list(path.parent.glob("shard-*"))
+
+
+@pytest.mark.parametrize("name,module,scope", [
+    ("tmp_path_factory", "_pytest.tmpdir", "session"),
+    ("pytestconfig", "_pytest.fixtures", "session"),
+])
+def test_builtin_isolation_identity_and_hash_gate(name, module, scope, tmp_path, monkeypatch):
+    import importlib
+
+    official = getattr(importlib.import_module(module), name)
+    function = official._get_wrapped_function()
+    path = Path(function.__code__.co_filename)
+    fixture = SimpleNamespace(func=function, scope=scope)
+    accepted = tool.builtin_isolation(name, fixture, path, pytest.__version__, pytest.__file__)
+    assert accepted["origin"] == str(path.resolve())
+    assert accepted["sha256"] == tool.digest(path)
+    assert accepted["scope"] == "session" and accepted["module"] == module
+    fixture.scope = "module"
+    with pytest.raises(tool.GateError, match="builtin_isolation_not_qualified"):
+        tool.builtin_isolation(name, fixture, path, pytest.__version__, pytest.__file__)
+    fixture.scope = scope
+    with pytest.raises(tool.GateError, match="builtin_isolation_not_qualified"):
+        tool.builtin_isolation(name, fixture, tmp_path / "forged.py",
+                               pytest.__version__, pytest.__file__)
+    with pytest.raises(tool.GateError, match="builtin_isolation_not_qualified"):
+        tool.builtin_isolation(name, fixture, path, "unqualified", pytest.__file__)
+    monkeypatch.setattr(tool, "digest", lambda ignored: "unqualified-source-hash")
+    with pytest.raises(tool.GateError, match="builtin_isolation_not_qualified"):
+        tool.builtin_isolation(name, fixture, path, pytest.__version__, pytest.__file__)
+
+
+@pytest.mark.parametrize("source,reason", [
+    ('def test_temp(tmp_path_factory):\n'
+     '    tmp_path_factory.mktemp("same", numbered=False)\n', "builtin_temp_not_unique"),
+    ('def test_temp(tmp_path_factory):\n'
+     '    factory = tmp_path_factory\n', "builtin_isolation_usage_unproven"),
+    ('def test_config(pytestconfig):\n'
+     '    pytestconfig.option.verbose = 9\n', "builtin_isolation_usage_unproven"),
+    ('def test_config(pytestconfig):\n'
+     '    pytestconfig.addinivalue_line("usefixtures", "shared")\n',
+     "builtin_config_not_readonly"),
+    ('def test_config(pytestconfig):\n'
+     '    pytestconfig.getini("testpaths").append("shared")\n',
+     "builtin_config_result_may_escape"),
+    ('def test_config(pytestconfig):\n'
+     '    config_value = pytestconfig.getini("testpaths")\n',
+     "builtin_config_result_may_escape"),
+])
+def test_builtin_isolation_unsafe_usage_rejected(mini_repo, tmp_path, source, reason):
+    freeze_test_file(mini_repo, source)
+    with pytest.raises(tool.GateError, match="process_failed_rc"):
+        tool.plan_run(mini_repo, tmp_path / "unsafe-builtin-plan", [], fixture_aware=True,
+                      fixture_files=["tests/test_a.py"])
+    path = next((tmp_path / "unsafe-builtin-plan").glob("plan-*/plan.json"))
+    collection = tool.read(path.parent / "collection/collection.json")
+    assert reason in collection["fixture_error"]
+    assert tool.read(path)["verdict"] == "FAIL"
+
+
+def test_user_fixture_named_builtin_is_never_exempt(mini_repo, tmp_path):
+    freeze_test_file(mini_repo,
+        'import pytest\n@pytest.fixture(scope="session")\n'
+        'def tmp_path_factory():\n    return 7\n', "tests/conftest.py")
+    freeze_test_file(mini_repo,
+        "def test_left(tmp_path_factory):\n    assert tmp_path_factory == 7\n")
+    freeze_test_file(mini_repo,
+        "def test_right(tmp_path_factory):\n    assert tmp_path_factory == 7\n",
+        "tests/check_b.py")
+    with pytest.raises(tool.GateError, match="process_failed_rc"):
+        tool.plan_run(mini_repo, tmp_path / "shadowed-plan", [], fixture_aware=True,
+                      fixture_files=["tests/test_a.py"])
+    path = next((tmp_path / "shadowed-plan").glob("plan-*/plan.json"))
+    collection = tool.read(path.parent / "collection/collection.json")
+    assert any(reason in collection["fixture_error"] for reason in (
+        "unresolved_or_overridden_fixture", "session_dependency_outside_fixture_selection"))
+    assert tool.read(path)["verdict"] == "FAIL"
