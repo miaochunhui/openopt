@@ -105,6 +105,29 @@ entry. These are not promoted to DONE.
 
 ## Release4 Current Stop Gates
 
+The newest operational source/evidence is the 22:55 +08:00 section of
+`handoff/release4-20261010.md`; older bullets below are historical snapshots.
+Clean main73613fc passed same-source smoke80/four local CUDA skips,
+report148/zero skips, renderer independent38/31 negatives/zero false accepts,
+HSD author110/one local CUDA skip plus original96/zero skips, bounded reader
+author126 plus independent144/zero skips, and installed wheel62 modules/0BSD.
+Portable sparse original52/zero skips and no-solve replay passed; its harness
+repair was subsequently integrated as `4ec39bf`, not retroactively substituted
+into those source coordinates. A permission-helper argument-order incident
+remains separately unresolved; no numerical PASS closes it.
+
+Pending development is real fixed13 schema2 producer independent review,
+strict sparse CUDA producer/independent review and cluster execution,
+PSD/exponential cone primitives, followed by actual broader solver integration.
+The new primitives alone will not close general SDP/exponential solver scope.
+Commercial discovery remains SDK0/4 and zero licensed solves as of 22:44;
+applicable runtime/licenses/disclosure rights remain external prerequisites.
+Research Git synchronization and shared docs-site onboarding are separate:
+Gitee is reachable at old master8def56e; no new push occurred. Shared registry
+incremental merge/access scope and managed publication/readback remain pending.
+Current-source whole regression, true multi-GPU scaling and general
+commercial/universal qualification remain unfinished. Goal stays active.
+
 Current detailed handoff: `handoff/release4-20261010.md`. The v4 renderer is
 implemented and independently reviewed, but its current external report is
 an intermediate historical-source projection, not final release acceptance.
