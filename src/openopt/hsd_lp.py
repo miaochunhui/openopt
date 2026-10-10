@@ -787,6 +787,7 @@ class PreparedHSDLP:
             raise RuntimeError("HSD loaded source binding entry rejected before prepare")
         self._source_buffers = entry()
         self._binding_entry = entry
+        self._binding_entry_code = entry.__code__
         if type(config) is not HSDLPConfig or set(vars(config)) != set(HSDLPConfig.__dataclass_fields__):
             raise TypeError("config must be HSDLPConfig")
         device = config.validate()
@@ -898,9 +899,16 @@ class PreparedHSDLP:
 
     @torch.no_grad()
     def solve(self, *, feasible_base: object | None = None) -> HSDLPResult:
+        from types import FunctionType as TrustedFunctionType
+
         binding = object.__getattribute__(self, "_binding_entry")
-        if _loaded_binding is not binding:
-            raise RuntimeError("HSD loaded source binding entry changed before solve")
+        expected_code = object.__getattribute__(self, "_binding_entry_code")
+        # Check the executable before invoking it, not through its own helpers.
+        if (type(binding) is not TrustedFunctionType or _loaded_binding is not binding
+                or binding.__code__ is not expected_code
+                or binding.__globals__ is not globals() or binding.__closure__ is not None
+                or binding.__defaults__ != (None,) or binding.__kwdefaults__ is not None):
+            raise RuntimeError("HSD loaded source binding entry code changed before solve")
         binding(object.__getattribute__(self, "_source_buffers"))
         self._integrity()
         c, p = self.config, self._original
@@ -1004,6 +1012,11 @@ class PreparedHSDLP:
                 x = s = y = None
                 break
             previous_primal, previous_recession = primal_good, recession_good
+        if (type(binding) is not TrustedFunctionType or _loaded_binding is not binding
+                or binding.__code__ is not expected_code
+                or binding.__globals__ is not globals() or binding.__closure__ is not None
+                or binding.__defaults__ != (None,) or binding.__kwdefaults__ is not None):
+            raise RuntimeError("HSD loaded source binding entry code changed after solve")
         binding(object.__getattribute__(self, "_source_buffers"))
         self._integrity()
         settings = asdict(c)
