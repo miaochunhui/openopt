@@ -344,3 +344,57 @@ explicit CUDA skips in 6.48 seconds, source consistency PASS.
 Append the two final dedicated `pytest.xml` inputs after earlier overlapping
 histories when replanning final source. Do not sum these overlapping test
 rounds or use their passing exit codes as final full-repository qualification.
+
+## Clean Plan And Public V2 Handoff
+
+Code/test commit `48e12046714e44c36942f162215f688ad9572db5` was clean when
+the real proof-file plan was generated:
+`clean-proof-budget-v5/plan-_39j_uig/plan.json`, SHA256
+`aa9cc541d06de2ce6dbce2639dc675e700073593f25af18bad92c921344f1024`.
+Full collection is 3310 nodes, source consistency PASS over 269 files.
+Selected proof-file audit succeeds, with 68 nodes and zero unknown proof
+costs, but plan verdict is FAIL:
+`fixture_group_prediction_exceeds_deadline`, group 59, exactly 41 dependent
+nodes, 334.420 seconds against 300. Only user `produced(module)` constrains
+that group; the qualified builtin factory is not a grouping edge. No shards
+were admitted. This is a clean-source budget rejection, not a full test run.
+
+Public robustness source `08f3eac` was inspected in an independent clean
+acceptance worktree with the delivered sharder cherry-picked, commit
+`9b043e7c525bc53328294adfa9a025fc9e0d19f4`. No existing source file there was
+edited and no public tests executed. Its complete 3535-node collection
+includes exactly 77 public nodes. Explicit public-file opt-in retains FAIL:
+`clean-public-audit-v5/plan-qf9valrj/collection/collection.json`,
+`unmodelled_fixture_request` at
+`tests/test_experiment_public_robustness.py:201`. This is the exact first
+static rejection, not proof of all other constraints passing. Five visible
+user fixture declarations (`local_real_evidence`,
+`no_solver_calls_in_this_suite`, `real_metadata_test_copy`, `baseline`,
+`experiment`) are function-scoped; nevertheless node-local reporting through
+`request`, custom `LOCAL_EVIDENCE` decorators and helper side effects remain
+outside the current isolation contract. Do not claim those 77 independent
+groups have been admitted merely because fixture scope is function.
+
+The coordinator's real histories, under
+`/hf3fs-jd/data/tmp/openopt-release-20261010/public-robustness/`, are:
+`portable-default-v2/p2-unit-m1tldfv2/pytest.xml`, 68 passes and nine explicit
+historical/local-evidence skips, leaf sum 244.085 seconds, SHA256
+`bb3228fe76b5ca2a412bdc4b9268ca9b96f6e4f4d9d85f606dbc82a38a1631d2`;
+`portable-optin-v2/p2-unit-ga31eyj5/pytest.xml`, 77 passes, leaf sum
+281.862 seconds, SHA256
+`0c43af485678ac00e735edeed6a0e13bfcf4a754b6507c790a91c14b0fe03998`.
+These are distinct from roughly 245/283-second verification walls.
+Use the history matching the actual evidence mode, rather than treating
+skipped observations as measured opt-in execution costs.
+
+Default whole-file cost ingestion is recorded in
+`clean-public-wholefile-v5/plan-6dm57u3a/plan.json`, SHA256
+`1304e8f2024f5dc7f754f1075d5d3eb9a9167784b84da988b32a6738259ce499`:
+the public file stays intact at 244.085 seconds, source consistency PASS.
+This cost-focused 32-partition plan supplied only the public history, leaving
+3458 unknown nodes. Its PASS does not authorize final dispatch or claim
+complete cost coverage. Keep the public file whole by default, review its
+node-local reporting/isolation separately if splitting is still needed,
+append all actual final-source histories and replan after owner cost repairs.
+No deadline, wrapper, fixture owner file, runtime package or cluster object
+was changed to obtain these observations.
