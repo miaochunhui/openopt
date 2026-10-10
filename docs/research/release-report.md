@@ -273,8 +273,11 @@ run/output paths, result mirror, execution artifacts and all sidecars are
 hash-checked and rechecked under the existing no-follow snapshot rules.
 
 Fixed thirteen additionally requires `rotated_cuda_bundle` and
-`rotated_cuda_pins`. The receipt must be mode `accept`, bind the explicit
-pins manifest digest, and carry a valid auditor digest. Numeric-only replay
+`rotated_cuda_pins`. Success now requires the strict acceptance schema version
+2 and the separate caller authority described below. Unversioned/old success
+receipts are unsupported, not backfilled or silently treated as trusted.
+The receipt must be mode `accept`, bind the explicit pins manifest and actual
+numeric bundle bytes, and bind a caller-authorized committed auditor digest. Numeric-only replay
 or seal receipts do not substitute for accept. The complete bundle must
 match its explicit caller pins, versioned algorithm, execution source and
 the exact ten positive / three expected-rejection denominator. Every
@@ -333,3 +336,130 @@ at `report-rsoc-extension/final-controls-v4/tests-458s5_wi`; before/after
 source consistency was PASS. The unchanged whole-file clean-source rerun
 is handed off under `report-rsoc-extension/clean-final-v5`; its verification
 JSON and complete JUnit, not this planned coordinate, decide acceptance.
+
+## RSOC Binding Repair V2
+
+The independent frozen review `1ad740a741a31c19171f60ea7760e2a74ffc9254`
+reproduced six false accepts in subject
+`2d29ee949c510d3a29a2d976aebbb5c0d7447f89`. Its 32 strict tests and original
+red receipts are retained unchanged in the separate independent worktree.
+This three-file repair does not change numerical auditors or qualify their
+algorithms. It does not manufacture an acceptance from old metric flags.
+
+Fixed13 success has exactly these JSON keys:
+
+```text
+schema_version=2, verdict=PASS, mode=accept, checked_at,
+pins_sha256, bundle_sha256, auditor_sha256, audit_commit,
+audit_runtime={python,implementation}, certified=false, qualified=false,
+false_accept_count=0, commercial=UNVERIFIED, performance=UNVERIFIED
+```
+
+Schema/counters must be actual JSON integers, not booleans or integral floats.
+The genuine numerical accept producer must emit these fields during its new
+checked accept execution, including the actual serialized bundle SHA256.
+An operator must not add these fields to a previous receipt. In particular,
+auditor commit `0160ba1d48558b33d33c54009ccfdf1fff98ae29` is read-only here;
+its current acceptance format lacks this v2 binding and is therefore not an
+accepted success input. Independent mathematical review remains separate.
+
+76 success has exactly the existing schema1 keys `schema_version`, `verdict`,
+`checked_at`, `commercial`, `performance`, `tests`, `source_commit`, `qualified`,
+`remote_attestation`, `execution`, `inputs`, `members`, plus an optional nonempty
+`scope` string. Unknown fields, conflicting certified/qualified claims and
+false-accept declarations reject, even after caller rehashing. It still uses
+its existing separately pinned historical numerical receipt, not new math.
+
+Fixed13 requires an additional trusted caller descriptor, separate from the
+rehashed input manifest:
+
+```text
+generate(manifest, manifest_sha256,
+         rsoc_authority={"path": ABSOLUTE_3FS_AUTHORITY, "sha256": CALLER_PIN})
+--rsoc-authority ABSOLUTE_3FS_AUTHORITY --rsoc-authority-sha256 CALLER_PIN
+```
+
+The authority file has exactly:
+
+```json
+{
+  "schema_version": 1,
+  "receipts": {
+    "rotated_cuda": {
+      "acceptance_sha256": "CALLER_REVIEWED_NEW_ACCEPTANCE_HASH",
+      "bundle_sha256": "CALLER_REVIEWED_ACTUAL_BUNDLE_HASH",
+      "auditor": {
+        "commit": "FULL_CALLER_AUTHORIZED_GIT_COMMIT",
+        "path": "ABSOLUTE_3FS_AUDITOR_SOURCE_COPY",
+        "sha256": "CALLER_REVIEWED_AUDITOR_SOURCE_HASH",
+        "bytes": 123
+      }
+    }
+  }
+}
+```
+
+Values shown are placeholders, not issued evidence. The caller must obtain
+the authority pin independently of the mutable producer/input payloads.
+Acceptance bytes match its authority pin; bundle descriptor, acceptance
+bundle pin and authority bundle pin must all match. Auditor bytes and size
+must match authority and acceptance, and equal
+`git show COMMIT:scripts/accept_rotated_cuda.py` from local committed Git.
+The audit commit must match the bundle source as well. Missing Git commit,
+source bytes, authority, hash, bundle or any other dependency rejects loudly.
+No source is executed. No hash is generated implicitly from a new checkout.
+Authority/source paths remain private and use the same no-follow bounded
+read/recheck rules. An authority without fixed13 success is rejected as unused.
+FAIL-only and omitted optional roles need no authority and keep old behavior.
+
+The private report bundle records the external authority descriptor. Public
+pages do not disclose authority paths or raw archive data. This is caller
+authority binding, not a signature, proof of independence, provenance of an
+adversarial caller, remote attestation or independent arithmetic. A malicious
+caller who changes every externally trusted pin is outside that boundary.
+
+Acceptance and numeric bundle success schemas reject explicit conflict fields.
+The bundle supports the existing minimal fixture shape or the complete
+versioned auditor shape (scope/runtime/telemetry count/GPU UUID together), not
+an arbitrary superset. Boolean checks do not establish correctness on their
+own: the independently accepted bundle bytes are the authority. The renderer
+does not recompute, solve, import an artifact program or issue acceptance.
+
+Owner tests retain real rehashed internal/JUnit/membership controls; their
+synthetic caller deliberately repins changed bundles for internal checks so
+stale outer hashes cannot mask a weakened inner gate. New controls cover the
+original conflicting fields, zero auditor digest, metric bundle drift with
+unchanged acceptance, missing/stale authority, changed source bytes and a
+coordinated fake-source hash which still must fail committed-Git comparison.
+Synthetic v2 CLI write/check is explicitly contract evidence, not real v2
+numerical qualification. The real historical old fixed13 receipt rejects in
+API and actual CLI without writing output; original files remain untouched.
+Real76 retains deterministic CLI/check/readback with no current-source upgrade.
+
+Retained first development failure:
+`/hf3fs-jd/data/tmp/openopt-release-20261010/report-binding-repair/first-development/tests-xf3c2_l0/verification.json`:
+two failures/two passes, 14.58s. The base renderer commit lacked the numerical
+auditor path in Git. The synthetic fixture now takes the explicitly named
+committed `0160ba1d` bytes instead; this is not qualification of that auditor.
+Development v2 at `development-v2/tests-kvpjvke2/verification.json` has 143
+passes/no skip/failure/error, 217.76s and stationary source consistency PASS;
+source was dirty, so it is not clean-freeze acceptance. Final clean/source
+receipts and unchanged original-suite outcome are supplied in the handoff.
+Old independent positives assume unsupported fixed13 success; that expected
+contract incompatibility must never be disguised as a green 32-test replay.
+
+Original32 replay entry, from this repair worktree:
+
+```bash
+sudo -n -u infra env CUDA_VISIBLE_DEVICES=-1 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:. OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 /hf3fs-jd/data/tmp/openopt-validation-env/bin/python -B tests/test_render_release_report.py --replay-original-review --artifact-dir /hf3fs-jd/data/tmp/openopt-release-20261010/report-binding-repair/original32
+```
+
+This checks the independent test bytes against the submitted `1ad740a` Git
+blob and executes that exact file, without copying or changing assertions.
+The test ROOT is explicitly routed to this repair tree so actual CLI cases
+do not mistakenly execute the old renderer. The original subject byte-pin
+test consequently rejects the new source, as it should. Receipts preserve
+all 32 collection/JUnit identities, failures, exit code and clean repair
+snapshot. This is a developer compatibility replay, not new independent
+signoff. Its `CONTRACT_INCOMPATIBLE` is nonzero, not PASS. Independent review
+of a genuine new versioned accept plus caller authority remains necessary.

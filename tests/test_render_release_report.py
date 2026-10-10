@@ -2,15 +2,57 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+import argparse
+from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
+import time
 
 import pytest
 from xml.etree import ElementTree as ET
 
 from scripts import render_release_report as report
+
+RSOC_AUTHORITIES = {}
+AUDITOR_FIXTURE_COMMIT = "0160ba1d48558b33d33c54009ccfdf1fff98ae29"
+
+
+def rsoc_generate(path, pin):
+    return report.generate(path, pin, rsoc_authority=RSOC_AUTHORITIES.get(path))
+
+
+def rsoc_cli_authority(path):
+    authority = RSOC_AUTHORITIES.get(path)
+    return [] if authority is None else ["--rsoc-authority", authority["path"],
+                                        "--rsoc-authority-sha256", authority["sha256"]]
+
+
+def bind_synthetic_authority(path, records):
+    """Synthetic caller fixture, not an issued numerical qualification.
+
+    Only the caller fixture explicitly repins; ordinary mutations never do.
+    Auditor bytes come from committed repository Git, never artifact execution.
+    """
+    selected = {row["id"]: row for row in json.loads(path.read_bytes())["inputs"]}
+    process = subprocess.run(["git", "show", AUDITOR_FIXTURE_COMMIT + ":scripts/accept_rotated_cuda.py"],
+                             cwd=report.ROOT, capture_output=True, check=False)
+    assert process.returncode == 0, "trusted committed fixture source unavailable"
+    source = path.parent / "caller-auditor-source.py"
+    source.write_bytes(process.stdout)
+    value = {"schema_version": 1, "receipts": {"rotated_cuda": {
+        "acceptance_sha256": selected["rotated_cuda_acceptance"]["sha256"],
+        "bundle_sha256": selected["rotated_cuda_bundle"]["sha256"],
+        "auditor": {"commit": AUDITOR_FIXTURE_COMMIT, "path": str(source),
+                    "sha256": report.sha(process.stdout), "bytes": len(process.stdout)},
+    }}}
+    descriptor = save(path.parent / "rsoc-authority.json", value)
+    RSOC_AUTHORITIES[path] = {key: descriptor[key] for key in ("path", "sha256")}
+    return value
 
 
 def save(path, value):
@@ -762,12 +804,19 @@ def rsoc_fixture(path, total):
                   "performance": "UNVERIFIED", "caller_pins": pins, "sidecars": sidecars,
                   "numeric_cases": numeric, "execution": execution,
                   "source": {"execution_commit": run["source_sha"], "execution_tree": "d" * 40,
-                             "audit_commit": "e" * 40, "scope_sha256": scope}}
+                             "audit_commit": AUDITOR_FIXTURE_COMMIT, "scope_sha256": scope}}
         optional_record(path, prefix + "_bundle", bundle)
         selected = next(row for row in json.loads(path.read_bytes())["inputs"]
                         if row["id"] == prefix + "_pins")
-        evidence = {"verdict": "PASS", "mode": "accept", "pins_sha256": selected["sha256"],
-                    "auditor_sha256": report.sha(b"synthetic auditor")}
+        committed = subprocess.run(["git", "show", AUDITOR_FIXTURE_COMMIT + ":scripts/accept_rotated_cuda.py"],
+                                   cwd=report.ROOT, capture_output=True, check=False)
+        assert committed.returncode == 0
+        bundle_descriptor = next(row for row in json.loads(path.read_bytes())["inputs"]
+                                 if row["id"] == prefix + "_bundle")
+        evidence = {"schema_version": 2, "verdict": "PASS", "mode": "accept", "pins_sha256": selected["sha256"],
+                    "bundle_sha256": bundle_descriptor["sha256"], "audit_commit": AUDITOR_FIXTURE_COMMIT,
+                    "auditor_sha256": report.sha(committed.stdout), "certified": False, "qualified": False,
+                    "false_accept_count": 0, "audit_runtime": {"python": "fixture", "implementation": "fixture"}}
     else:
         evidence = {"schema_version": 1, "verdict": "RSOC_EXTREMES_REPLAY_PASS", "tests": counts,
                     "source_commit": run["source_sha"], "qualified": False,
@@ -779,6 +828,8 @@ def rsoc_fixture(path, total):
     evidence.update(checked_at="2026-10-10T10:00:00+00:00",
                     commercial="UNVERIFIED", performance="UNVERIFIED")
     pin = optional_record(path, role, evidence)
+    if total == 13:
+        bind_synthetic_authority(path, {role: evidence})
     return pin, {role: evidence, prefix + "_run": run, prefix + "_result": result,
                  prefix + "_junit": ET.tostring(junit),
                  **({prefix + "_bundle": bundle, prefix + "_pins": pins} if total == 13 else {})}
@@ -790,8 +841,8 @@ def test_rsoc_complete_receipt_projection_deterministic_and_historical(inputs, t
     pin, _ = rsoc_fixture(path, total)
     before = {item["path"]: Path(item["path"]).read_bytes()
               for item in json.loads(path.read_bytes())["inputs"]}
-    files = report.generate(path, pin)
-    assert files == report.generate(path, pin)
+    files = rsoc_generate(path, pin)
+    assert files == rsoc_generate(path, pin)
     assert before == {name: Path(name).read_bytes() for name in before}
     prefix = "rotated_cuda" if total == 13 else "rsoc_extremes"
     scalars = json.loads(files["summary.json"])["scalars"]
@@ -868,8 +919,13 @@ def test_rsoc_rehashed_false_receipt_rejected(inputs, total, mutation):
                           if row["id"] == prefix + "_pins")
         records[role]["pins_sha256"] = descriptor["sha256"]
         reseal(path, records, role)
+        reseal(path, records, record_role)
+        records[role]["bundle_sha256"] = next(row["sha256"] for row in json.loads(path.read_bytes())["inputs"]
+                                              if row["id"] == record_role)
+        reseal(path, records, role)
+        bind_synthetic_authority(path, records)
     with pytest.raises(report.Rejected):
-        report.generate(path, reseal(path, records, record_role))
+        rsoc_generate(path, reseal(path, records, record_role))
 
 
 @pytest.mark.parametrize("mutation", ["top_only", "seal_only", "numeric_replay", "hidden_check",
@@ -895,8 +951,13 @@ def test_fixed13_top_pass_and_hidden_math_do_not_qualify(inputs, mutation):
         records[role]["pins_sha256"] = "0" * 64
     if mutation != "top_only":
         reseal(path, records, "rotated_cuda_bundle")
+        records[role]["bundle_sha256"] = next(row["sha256"] for row in json.loads(path.read_bytes())["inputs"]
+                                              if row["id"] == "rotated_cuda_bundle")
+    reseal(path, records, role)
+    if mutation != "top_only":
+        bind_synthetic_authority(path, records)
     with pytest.raises(report.Rejected):
-        report.generate(path, reseal(path, records, role))
+        rsoc_generate(path, reseal(path, records, role))
 
 
 def test_rsoc_omitted_and_failed_roles_never_imply_full_release(inputs):
@@ -925,7 +986,7 @@ def test_rsoc_false_current_source_rejected(inputs, total):
     with_source_gate(records)
     reseal(path, records, "cpu")
     with pytest.raises(report.Rejected, match="rsoc_current_source_mismatch"):
-        report.generate(path, reseal(path, records, "metadata"))
+        rsoc_generate(path, reseal(path, records, "metadata"))
 
 
 @pytest.mark.parametrize("total", [13, 76])
@@ -942,8 +1003,8 @@ def test_rsoc_current_source_requires_matching_clean_cpu_snapshot(inputs, total)
     records["cpu"]["source"]["sha256"] = records[prefix + "_run"]["source_hashes"]
     records["cpu"]["source_consistency"]["files"] = len(records["cpu"]["source"]["sha256"])
     reseal(path, records, "cpu")
-    files = report.generate(path, reseal(path, records, "metadata"))
-    assert files == report.generate(path, report.sha(path.read_bytes()))
+    files = rsoc_generate(path, reseal(path, records, "metadata"))
+    assert files == rsoc_generate(path, report.sha(path.read_bytes()))
     scalars = json.loads(files["summary.json"])["scalars"]
     assert scalars[prefix + "_source_relation"] == "current"
     assert scalars["commercial_status"] == scalars["online_status"] == "UNVERIFIED"
@@ -966,14 +1027,20 @@ def test_rsoc_rehashed_invalid_receipt_cli_rejects_with_evidence(inputs, total, 
     else:
         value["numeric_cases" if total == 13 else "members"].pop()
     pin = reseal(path, records, role)
+    if total == 13:
+        records["rotated_cuda_acceptance"]["bundle_sha256"] = next(
+            row["sha256"] for row in json.loads(path.read_bytes())["inputs"] if row["id"] == role)
+        pin = reseal(path, records, "rotated_cuda_acceptance")
+        bind_synthetic_authority(path, records)
     with pytest.raises(report.Rejected) as error:
-        report.generate(path, pin)
+        rsoc_generate(path, pin)
     expected = ("rsoc_fixed13_bundle_contract" if total == 13 else "rsoc_extremes_contract"
                 ) if mutation == "denominator" else "rsoc_numeric_membership"
     assert error.value.code == expected
     output = path.parent / "rejected-render"
     command = [sys.executable, "-B", str(report.ROOT / "scripts/render_release_report.py"),
-               "--manifest", str(path), "--manifest-sha256", pin, "--output-dir", str(output)]
+               "--manifest", str(path), "--manifest-sha256", pin, "--output-dir", str(output),
+               *rsoc_cli_authority(path)]
     result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=30)
     (path.parent / "rsoc-negative-cli.log").write_text(result.stdout + result.stderr)
     assert result.returncode == 1
@@ -1020,12 +1087,49 @@ def test_real_pinned_rsoc_archives_project_only(inputs):
     manifest["inputs"].extend({"id": role, "path": str(target), "sha256": pin}
                               for role, (target, pin) in selections.items())
     pin = save(path, manifest)["sha256"]
+    with pytest.raises(report.Rejected, match="rsoc_fixed13_success_schema_unsupported"):
+        report.generate(path, pin)
+    old_output = path.parent / "unsupported-old-fixed13"
+    old_command = [sys.executable, "-B", str(report.ROOT / "scripts/render_release_report.py"),
+                   "--manifest", str(path), "--manifest-sha256", pin, "--output-dir", str(old_output)]
+    old_result = subprocess.run(old_command, capture_output=True, text=True, check=False)
+    assert old_result.returncode == 1 and not old_output.exists()
+    assert "code=rsoc_fixed13_success_schema_unsupported" in old_result.stderr
+    save(path.parent / "historical-fixed13-unsupported.json", {
+        "verdict": "UNSUPPORTED_OLD_SUCCESS", "acceptance_sha256": selections["rotated_cuda_acceptance"][1],
+        "bundle_sha256": selections["rotated_cuda_bundle"][1], "cli_returncode": old_result.returncode,
+        "first_failure": "rsoc_fixed13_success_schema_unsupported", "backfilled": False,
+        "cuda_execution": False, "qualified": False,
+    })
+    mutated = json.loads(selections["rotated_cuda_bundle"][0].read_bytes())
+    mutated["numeric_cases"][0]["metrics"]["signed_duality_gap"] = "999999999"
+    copy = save(path.parent / "old-fixed13-mutated-bundle.json", mutated)
+    bundle_row = next(item for item in manifest["inputs"] if item["id"] == "rotated_cuda_bundle")
+    bundle_row.update(path=copy["path"], sha256=copy["sha256"])
+    mutated_pin = save(path, manifest)["sha256"]
+    with pytest.raises(report.Rejected, match="rsoc_fixed13_success_schema_unsupported"):
+        report.generate(path, mutated_pin)
+    mutated_command = [sys.executable, "-B", str(report.ROOT / "scripts/render_release_report.py"),
+                       "--manifest", str(path), "--manifest-sha256", mutated_pin,
+                       "--output-dir", str(path.parent / "rejected-real-metric-drift")]
+    rejected = subprocess.run(mutated_command, capture_output=True, text=True, check=False)
+    assert rejected.returncode == 1 and "rsoc_fixed13_success_schema_unsupported" in rejected.stderr
+    assert not (path.parent / "rejected-real-metric-drift").exists()
+    save(path.parent / "real-bundle-drift-rejected.json", {
+        "verdict": "REJECTED", "acceptance_sha256_unchanged": selections["rotated_cuda_acceptance"][1],
+        "original_bundle_sha256": selections["rotated_cuda_bundle"][1], "modified_bundle_sha256": copy["sha256"],
+        "api_rejected": True, "cli_returncode": rejected.returncode,
+        "first_failure": "rsoc_fixed13_success_schema_unsupported", "backfilled": False,
+        "cuda_execution": False, "qualified": False,
+    })
+    manifest["inputs"] = [item for item in manifest["inputs"] if not item["id"].startswith("rotated_cuda_")]
+    pin = save(path, manifest)["sha256"]
     files = report.generate(path, pin)
     assert files == report.generate(path, pin)
     scalars = json.loads(files["summary.json"])["scalars"]
-    assert scalars["rsoc_extremes_tests"] == 76 and scalars["rotated_cuda_tests"] == 13
-    assert scalars["rsoc_extremes_status"] == scalars["rotated_cuda_status"] == "PASS"
-    assert scalars["rsoc_extremes_source_relation"] == scalars["rotated_cuda_source_relation"] == "historical"
+    assert scalars["rsoc_extremes_tests"] == 76 and "rotated_cuda_tests" not in scalars
+    assert scalars["rsoc_extremes_status"] == "PASS"
+    assert scalars["rsoc_extremes_source_relation"] == "historical"
     assert scalars["online_status"] == scalars["commercial_status"] == "UNVERIFIED"
     output = path.parent / "historical-render"
     report.write_bundle(output, files)
@@ -1041,7 +1145,7 @@ def test_real_pinned_rsoc_archives_project_only(inputs):
         "verdict": "PASS", "scope": "caller-pinned historical receipt projection only",
         "cuda_execution": False, "qualified": False,
         "cli_returncode": result.returncode,
-        "counts": {"rotated_cuda": 13, "rsoc_extremes": 76},
+        "counts": {"rsoc_extremes": 76}, "fixed13": "UNSUPPORTED_OLD_SUCCESS",
         "receipts": {role: {"path": str(target), "sha256": pin}
                      for role, (target, pin) in selections.items()},
         "public_manifest_sha256": report.sha(files["manifest.json"]),
@@ -1057,6 +1161,138 @@ def test_real_minimal_auditor_fail_is_visible_without_success_fields(inputs, rol
     prefix = role.removesuffix("_acceptance")
     assert json.loads(files["summary.json"])["scalars"][prefix + "_status"] == "FAIL"
     assert b"/private/not-public" not in files["benchmark-report-v4.html"]
+
+
+@pytest.mark.parametrize("total,field,value", [
+    (13, "qualified", True), (13, "certified", True), (13, "false_accept_count", 1),
+    (13, "false_accept_count", False), (76, "certified", True), (76, "false_accept_count", 1),
+    (76, "qualified", True), (13, "extra", False), (76, "extra", False),
+    (13, "schema_version", 2.0), (76, "schema_version", True),
+])
+def test_rsoc_strict_success_schema_conflicting_flags_resealed(inputs, total, field, value):
+    path, _, _ = inputs
+    pin, records = rsoc_fixture(path, total)
+    assert rsoc_generate(path, pin)
+    role = ("rotated_cuda" if total == 13 else "rsoc_extremes") + "_acceptance"
+    records[role][field] = value
+    pin = reseal(path, records, role)
+    if total == 13:
+        bind_synthetic_authority(path, records)
+    with pytest.raises(report.Rejected):
+        rsoc_generate(path, pin)
+
+
+@pytest.mark.parametrize("mutation", ["missing", "old_schema", "bad_descriptor", "stale_authority",
+    "acceptance", "bundle", "auditor_zero", "auditor_bytes", "auditor_commit", "source_rehashed",
+    "uncommitted_source", "authority_rehashed_not_repinned", "source_missing"])
+def test_fixed13_caller_authority_resealed_mutations_fail_closed(inputs, mutation, request):
+    path, _, _ = inputs
+    pin, records = rsoc_fixture(path, 13)
+    assert rsoc_generate(path, pin)
+    descriptor = deepcopy(RSOC_AUTHORITIES[path])
+    authority_path = Path(descriptor["path"])
+    authority = json.loads(authority_path.read_bytes())
+    entry = authority["receipts"]["rotated_cuda"]
+    acceptance, bundle = records["rotated_cuda_acceptance"], records["rotated_cuda_bundle"]
+    if mutation == "missing":
+        descriptor = None
+    elif mutation == "old_schema":
+        acceptance.pop("schema_version")
+        pin = reseal(path, records, "rotated_cuda_acceptance")
+    elif mutation == "bad_descriptor":
+        descriptor["extra"] = True
+    elif mutation == "stale_authority":
+        descriptor["sha256"] = "0" * 64
+    elif mutation == "acceptance":
+        acceptance["checked_at"] = "2026-10-10T11:00:00+00:00"
+        pin = reseal(path, records, "rotated_cuda_acceptance")
+    elif mutation == "bundle":
+        bundle["numeric_cases"][0]["metrics"] = {"signed_duality_gap": "999999999"}
+        pin = reseal(path, records, "rotated_cuda_bundle")
+    elif mutation == "auditor_zero":
+        acceptance["auditor_sha256"] = "0" * 64
+        pin = reseal(path, records, "rotated_cuda_acceptance")
+        entry["acceptance_sha256"] = next(row["sha256"] for row in json.loads(path.read_bytes())["inputs"]
+                                            if row["id"] == "rotated_cuda_acceptance")
+        descriptor["sha256"] = save(authority_path, authority)["sha256"]
+    elif mutation in ("auditor_bytes", "auditor_commit"):
+        entry["auditor"]["bytes" if mutation == "auditor_bytes" else "commit"] = (
+            entry["auditor"]["bytes"] + 1 if mutation == "auditor_bytes" else "f" * 40)
+        descriptor["sha256"] = save(authority_path, authority)["sha256"]
+    elif mutation in ("source_rehashed", "uncommitted_source"):
+        payload = b"raise RuntimeError(\"MUST NEVER EXECUTE ARTIFACT SOURCE\")\n"
+        Path(entry["auditor"]["path"]).write_bytes(payload)
+        if mutation == "uncommitted_source":
+            entry["auditor"].update(sha256=report.sha(payload), bytes=len(payload))
+            acceptance["auditor_sha256"] = report.sha(payload)
+            pin = reseal(path, records, "rotated_cuda_acceptance")
+            entry["acceptance_sha256"] = next(row["sha256"] for row in json.loads(path.read_bytes())["inputs"]
+                                                if row["id"] == "rotated_cuda_acceptance")
+            descriptor["sha256"] = save(authority_path, authority)["sha256"]
+    elif mutation == "source_missing":
+        entry["auditor"]["path"] = str(path.parent / "never-created.py")
+        descriptor["sha256"] = save(authority_path, authority)["sha256"]
+    else:
+        entry["auditor"]["bytes"] += 1
+        save(authority_path, authority)
+    with pytest.raises(report.Rejected) as error:
+        report.generate(path, pin, rsoc_authority=descriptor)
+    save(path.parent / "binding-negative.json", {"verdict": "REJECTED", "mutation": mutation,
+        "first_failure": error.value.code, "manifest_sha256": pin, "authority": descriptor,
+        "artifact_source_executed": False, "cuda_execution": False, "qualified": False})
+    request.node.user_properties.append(("report_binding_negative", str(path.parent / "binding-negative.json")))
+    if mutation == "bundle":
+        assert error.value.code == "rsoc_fixed13_bundle_binding"
+    if mutation == "uncommitted_source":
+        assert error.value.code == "rsoc_fixed13_committed_auditor_source"
+
+
+def test_fixed13_v2_explicit_caller_cli_write_check_and_no_authority_rejection(inputs):
+    path, _, _ = inputs
+    pin, _ = rsoc_fixture(path, 13)
+    output = path.parent / "v2-caller-render"
+    command = [sys.executable, "-B", str(report.ROOT / "scripts/render_release_report.py"),
+               "--manifest", str(path), "--manifest-sha256", pin, "--output-dir", str(output)]
+    absent = subprocess.run(command, capture_output=True, text=True, check=False)
+    assert absent.returncode == 1 and not output.exists()
+    assert "rsoc_fixed13_authority_required" in absent.stderr
+    written = subprocess.run([*command, *rsoc_cli_authority(path)], capture_output=True, text=True, check=False)
+    assert written.returncode == 0
+    checked = subprocess.run([*command, *rsoc_cli_authority(path), "--check"],
+                             capture_output=True, text=True, check=False)
+    assert checked.returncode == 0
+    files = rsoc_generate(path, pin)
+    assert {p.name: p.read_bytes() for p in output.iterdir()} == files
+    save(path.parent / "synthetic-v2-cli.json", {"verdict": "SYNTHETIC_CONTRACT_PASS",
+        "without_authority_returncode": absent.returncode, "write_returncode": written.returncode,
+        "check_returncode": checked.returncode, "manifest_sha256": pin,
+        "authority": RSOC_AUTHORITIES[path], "cuda_execution": False, "qualified": False})
+
+
+@pytest.mark.parametrize("field,value", [("qualified", True), ("false_accept_count", 1),
+                                       ("unknown", False), ("schema_version", True)])
+def test_fixed13_bundle_schema_rejects_coordinated_caller_repins(inputs, field, value):
+    path, _, _ = inputs
+    _, records = rsoc_fixture(path, 13)
+    records["rotated_cuda_bundle"][field] = value
+    reseal(path, records, "rotated_cuda_bundle")
+    records["rotated_cuda_acceptance"]["bundle_sha256"] = next(
+        row["sha256"] for row in json.loads(path.read_bytes())["inputs"] if row["id"] == "rotated_cuda_bundle")
+    pin = reseal(path, records, "rotated_cuda_acceptance")
+    bind_synthetic_authority(path, records)
+    with pytest.raises(report.Rejected, match="rsoc_fixed13_bundle_schema"):
+        rsoc_generate(path, pin)
+
+
+def test_fixed13_unused_authority_rejected_without_upgrade(inputs):
+    path, _, _ = inputs
+    _, records = rsoc_fixture(path, 13)
+    records["rotated_cuda_acceptance"] = {"verdict": "FAIL", "checked_at": "2026-10-10T10:00:00+00:00"}
+    pin = reseal(path, records, "rotated_cuda_acceptance")
+    with pytest.raises(report.Rejected, match="rsoc_unused_authority"):
+        rsoc_generate(path, pin)
+    files = report.generate(path, pin)
+    assert json.loads(files["summary.json"])["scalars"]["rotated_cuda_status"] == "FAIL"
 
 
 def scan_submission_with_existing_gate(paths=None, source_root=None):
@@ -1091,12 +1327,91 @@ def scan_submission_with_existing_gate(paths=None, source_root=None):
           "literal_hits=0 scanner_selftest=PASS")
 
 
+def replay_original_review(artifact_root):
+    """Run exact submitted reviewer bytes against this repaired renderer.
+
+    Only test ROOT is routed to the repair tree for its CLI subprocesses. No
+    assertion or subject pin is changed. Expected contract-incompatibility
+    failures remain real failures, never used as repaired qualification.
+    """
+    from scripts.verify import source_snapshot, check_source_consistency
+
+    frozen_root = Path("/data/dev/openopt-wt-release4-20261010-rsoc-report-independent")
+    target = frozen_root / "tests/test_rsoc_report_independent.py"
+    commit = "1ad740a741a31c19171f60ea7760e2a74ffc9254"
+    committed = subprocess.run(["git", "show", commit + ":tests/test_rsoc_report_independent.py"],
+                               cwd=report.ROOT, capture_output=True, check=False)
+    assert committed.returncode == 0 and committed.stdout == target.read_bytes(), "original reviewer byte drift"
+    artifact_root = report.shared_path(artifact_root, "review")
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    directory = Path(tempfile.mkdtemp(prefix="original32-", dir=artifact_root))
+    before, started = source_snapshot(report.ROOT), time.perf_counter()
+    receipt = {"schema_version": 1, "verdict": "RUNNING", "reviewer_commit": commit,
+               "reviewer_sha256": report.sha(committed.stdout), "repair_source": before,
+               "started_at": datetime.now(timezone.utc).isoformat(), "cuda_execution": False,
+               "assertions_changed": False, "test_root_routed_for_current_cli": True}
+    expected = []
+
+    class FrozenReview:
+        def pytest_collection_modifyitems(self, items):
+            for item in items:
+                assert Path(item.module.__file__).resolve() == target.resolve()
+                assert item.module.renderer is report, "original review imported old renderer"
+                item.module.ROOT = report.ROOT
+                expected.append(item.nodeid)
+
+    os.environ.update(PYTEST_DISABLE_PLUGIN_AUTOLOAD="1", OPENOPT_RUN_RSOC_REPORT_EVIDENCE_TESTS="1",
+                      PYTHONDONTWRITEBYTECODE="1", CUDA_VISIBLE_DEVICES="-1")
+    junit = directory / "pytest.xml"
+    try:
+        with (directory / "pytest.log").open("x", encoding="utf-8") as stream:
+            previous_out, previous_err = sys.stdout, sys.stderr
+            try:
+                sys.stdout = sys.stderr = stream
+                rc = int(pytest.main(["--import-mode=importlib", "-q", "-ra", "--rootdir", str(frozen_root),
+                    "-o", "cache_dir=" + str(directory / "pytest-cache"), "--basetemp", str(directory / "pytest-tmp"),
+                    "--junitxml=" + str(junit), str(target)], plugins=[FrozenReview()]))
+            finally:
+                sys.stdout, sys.stderr = previous_out, previous_err
+        cases = list(ET.parse(junit).getroot().iter("testcase"))
+        observed = ["tests/test_rsoc_report_independent.py::" + case.get("name", "") for case in cases]
+        normalized = [item[item.index("tests/test_rsoc_report_independent.py::"):] for item in expected]
+        assert len(normalized) == len(set(normalized)) == len(observed) == len(set(observed)) == 32
+        assert set(normalized) == set(observed), "original32 collection/JUnit membership"
+        counts = {"tests": len(cases), "failures": sum(c.find("failure") is not None for c in cases),
+                  "errors": sum(c.find("error") is not None for c in cases),
+                  "skipped": sum(c.find("skipped") is not None for c in cases)}
+        consistency = check_source_consistency(before, source_snapshot(report.ROOT))
+        assert consistency["verdict"] == "PASS"
+        receipt.update(verdict="CONTRACT_INCOMPATIBLE" if rc else "PASS", pytest_returncode=rc, tests=counts,
+            membership={"verdict": "PASS", "expected": normalized, "observed": observed},
+            source_consistency=consistency, failed_nodeids=[name for name, case in zip(observed, cases)
+                if case.find("failure") is not None or case.find("error") is not None],
+            junit={"path": str(junit), "sha256": report.sha(junit.read_bytes())})
+    except Exception as error:
+        receipt.update(verdict="ERROR", error=type(error).__name__)
+        raise
+    finally:
+        receipt.update(finished_at=datetime.now(timezone.utc).isoformat(), wall_seconds=time.perf_counter() - started)
+        output = directory / "original-review.json"
+        save(output, receipt)
+        print("ORIGINAL_RSOC_REVIEW verdict=" + receipt["verdict"] + " receipt=" + str(output)
+              + " sha256=" + report.sha(output.read_bytes()), flush=True)
+    return rc
+
+
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="Safe explicit-file submission scan")
-    parser.add_argument("--scan-submission", required=True, action="store_true")
+    parser.add_argument("--scan-submission", action="store_true")
+    parser.add_argument("--replay-original-review", action="store_true")
+    parser.add_argument("--artifact-dir", type=Path)
     parser.add_argument("--path", action="append")
     parser.add_argument("--source-root", type=Path)
     args = parser.parse_args()
+    if args.replay_original_review:
+        assert not args.scan_submission and not args.path and args.source_root is None and args.artifact_dir is not None
+        raise SystemExit(replay_original_review(args.artifact_dir))
+    assert args.scan_submission and args.artifact_dir is None
     scan_submission_with_existing_gate(args.path, args.source_root)

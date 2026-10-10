@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import subprocess
 import sys
 import unicodedata
 from urllib.parse import unquote
@@ -58,6 +59,16 @@ STATUS = frozenset({
     "infeasible", "unbounded", "NOT_QUALIFIED", "UNQUALIFIED",
 })
 MAX_BYTES = 16 * 1024 * 1024
+FIXED13_ACCEPT_KEYS = frozenset({
+    "schema_version", "verdict", "mode", "checked_at", "pins_sha256", "bundle_sha256",
+    "auditor_sha256", "audit_commit", "audit_runtime", "certified", "qualified",
+    "false_accept_count", "commercial", "performance",
+})
+EXTREMES_ACCEPT_KEYS = frozenset({
+    "schema_version", "verdict", "checked_at", "commercial", "performance",
+    "tests", "source_commit", "qualified", "remote_attestation", "execution",
+    "inputs", "members",
+})
 LEAKS = (
     re.compile(r"[a-z][a-z0-9+.-]*://|(?<!:)//[a-z0-9]|"
                r"\b(?:\d{1,3}\.){3}\d{1,3}\b|"
@@ -321,7 +332,7 @@ class StaticPage(HTMLParser):
 
 
 class Report:
-    def __init__(self, manifest: Path, manifest_sha256: str):
+    def __init__(self, manifest: Path, manifest_sha256: str, *, rsoc_authority=None):
         require(isinstance(manifest_sha256, str) and HASH.fullmatch(manifest_sha256),
                 "invalid_manifest_pin", "manifest")
         self.snapshots = {}
@@ -351,6 +362,25 @@ class Report:
             self.descriptors[name] = item
             self.records[name] = payload if name in XML_ROLES else parse(payload, name)
         require(REQUIRED <= self.records.keys(), "missing_required_input", "inputs")
+        self.rsoc_authority = None
+        self.rsoc_authority_descriptor = None
+        if rsoc_authority is not None:
+            require(isinstance(rsoc_authority, dict) and set(rsoc_authority) == {"path", "sha256"},
+                    "rsoc_authority_descriptor", "authority")
+            authority_path = shared_path(rsoc_authority["path"], "authority")
+            require(authority_path not in paths and authority_path != self.manifest_path,
+                    "rsoc_authority_not_separate", "authority")
+            self.rsoc_authority = parse(self.input(authority_path, rsoc_authority["sha256"], "authority"),
+                                        "authority")
+            self.rsoc_authority_descriptor = dict(rsoc_authority)
+            authority = self.rsoc_authority
+            require(set(authority) == {"schema_version", "receipts"}
+                    and type(authority["schema_version"]) is int and authority["schema_version"] == 1
+                    and isinstance(authority["receipts"], dict)
+                    and set(authority["receipts"]) == {"rotated_cuda"},
+                    "rsoc_authority_schema", "authority")
+            require(self.records.get("rotated_cuda_acceptance", {}).get("verdict") == "PASS",
+                    "rsoc_unused_authority", "authority")
         self.scalars, self.provenance, self.claims = {}, {}, []
 
     def input(self, path, digest, coordinate):
@@ -759,6 +789,24 @@ class Report:
             return
         require(evidence.get("commercial") == evidence.get("performance") == "UNVERIFIED",
                 "rsoc_qualification_overclaim", role)
+        if total == 13:
+            require(set(evidence) == FIXED13_ACCEPT_KEYS
+                    and type(evidence.get("schema_version")) is int and evidence["schema_version"] == 2,
+                    "rsoc_fixed13_success_schema_unsupported", role)
+            require(evidence["qualified"] is False and evidence["certified"] is False
+                    and type(evidence["false_accept_count"]) is int and evidence["false_accept_count"] == 0,
+                    "rsoc_qualification_overclaim", role)
+            runtime = evidence["audit_runtime"]
+            require(isinstance(runtime, dict) and set(runtime) == {"python", "implementation"}
+                    and all(isinstance(value, str) and value for value in runtime.values()),
+                    "rsoc_audit_runtime_schema", role)
+        else:
+            require(set(evidence) in (EXTREMES_ACCEPT_KEYS, EXTREMES_ACCEPT_KEYS | {"scope"})
+                    and type(evidence.get("schema_version")) is int and evidence["schema_version"] == 1,
+                    "rsoc_extremes_success_schema", role)
+            if "scope" in evidence:
+                require(isinstance(evidence["scope"], str) and bool(evidence["scope"]),
+                        "rsoc_extremes_success_schema", role)
         names = {name: prefix + "_" + name for name in ("run", "result", "junit")}
         if total == 13:
             names.update(bundle=prefix + "_bundle", pins=prefix + "_pins")
@@ -809,6 +857,14 @@ class Report:
                     and isinstance(evidence.get("auditor_sha256"), str)
                     and HASH.fullmatch(evidence["auditor_sha256"]),
                     "rsoc_fixed13_accept_receipt", role)
+            self.fixed13_authority(evidence, bundle, names["bundle"], role)
+            basic_bundle_keys = {"schema_version", "algorithm", "verdict", "denominator", "certified",
+                "old_proof_authority", "commercial", "performance", "caller_pins", "sidecars",
+                "numeric_cases", "execution", "source"}
+            require(set(bundle) in (basic_bundle_keys, basic_bundle_keys | {
+                "scope", "runtime", "telemetry_samples", "gpu_uuid"})
+                    and type(bundle.get("schema_version")) is int,
+                    "rsoc_fixed13_bundle_schema", role)
             require(bundle.get("schema_version") == 1
                     and bundle.get("algorithm") == "fixed13_original_rational_decimal_v1"
                     and bundle.get("verdict") == "PASS"
@@ -957,6 +1013,48 @@ class Report:
             isinstance(name, str) and name and not name.startswith("/")
             and ".." not in name.split("/") and isinstance(digest, str) and HASH.fullmatch(digest)
             for name, digest in values.items()), "rsoc_source_hashes", role)
+
+    def fixed13_authority(self, evidence, bundle, bundle_role, role):
+        """Check caller-selected byte authority, never execute supplied source.
+
+        This binds a receipt to its bundle and committed auditor source. The
+        caller must independently authorize these pins; it is not attestation.
+        """
+        require(self.rsoc_authority is not None, "rsoc_fixed13_authority_required", role)
+        authority = self.rsoc_authority["receipts"]["rotated_cuda"]
+        require(isinstance(authority, dict) and set(authority) == {
+            "acceptance_sha256", "bundle_sha256", "auditor"}, "rsoc_fixed13_authority_schema", role)
+        require(authority["acceptance_sha256"] == self.descriptors[role]["sha256"]
+                and isinstance(authority["acceptance_sha256"], str)
+                and HASH.fullmatch(authority["acceptance_sha256"]),
+                "rsoc_fixed13_acceptance_authority_mismatch", role)
+        require(isinstance(evidence["bundle_sha256"], str) and HASH.fullmatch(evidence["bundle_sha256"])
+                and authority["bundle_sha256"] == evidence["bundle_sha256"]
+                == self.descriptors[bundle_role]["sha256"], "rsoc_fixed13_bundle_binding", role)
+        auditor = authority["auditor"]
+        require(isinstance(auditor, dict) and set(auditor) == {"commit", "path", "sha256", "bytes"}
+                and isinstance(auditor["commit"], str) and COMMIT.fullmatch(auditor["commit"])
+                and type(auditor["bytes"]) is int and 0 < auditor["bytes"] <= MAX_BYTES
+                and auditor["sha256"] == evidence["auditor_sha256"]
+                and auditor["commit"] == evidence["audit_commit"]
+                == bundle.get("source", {}).get("audit_commit"),
+                "rsoc_fixed13_auditor_authority_mismatch", role)
+        auditor_path = shared_path(auditor["path"], role)
+        require(auditor_path != self.manifest_path and auditor_path not in {
+            shared_path(item["path"], role) for item in self.descriptors.values()
+        } and auditor_path != shared_path(self.rsoc_authority_descriptor["path"], role),
+            "rsoc_fixed13_auditor_separate_source", role)
+        payload = self.input(auditor_path, auditor["sha256"], role)
+        require(len(payload) == auditor["bytes"], "rsoc_fixed13_auditor_source_bytes", role)
+        try:
+            kind = subprocess.run(["git", "cat-file", "-t", auditor["commit"]], cwd=ROOT,
+                                  capture_output=True, check=False)
+            committed = subprocess.run(["git", "show", auditor["commit"] + ":scripts/accept_rotated_cuda.py"],
+                                       cwd=ROOT, capture_output=True, check=False)
+        except OSError as error:
+            raise Rejected("rsoc_fixed13_trusted_git_unavailable", role) from error
+        require(kind.returncode == committed.returncode == 0 and kind.stdout.strip() == b"commit"
+                and committed.stdout == payload, "rsoc_fixed13_committed_auditor_source", role)
 
     def rsoc_originals(self, originals, role, root):
         require(isinstance(originals, list) and originals, "rsoc_original_pins_missing", role)
@@ -1365,14 +1463,16 @@ summary {{ padding:.7rem 0; cursor:pointer; min-height:44px; }} code {{ overflow
             "numerical_source_sha": self.manifest["source_sha"],
             "doc_source_sha": self.records["metadata"].get("doc_source_sha"),
         }
+        if self.rsoc_authority_descriptor is not None:
+            private["rsoc_authority"] = self.rsoc_authority_descriptor
         pages["report-bundle.json"] = encoded(private)
         self.unchanged()
         return pages
 
 
-def generate(manifest, manifest_sha256):
+def generate(manifest, manifest_sha256, *, rsoc_authority=None):
     """Return a small byte bundle; callers decide any authorized repo writes."""
-    return Report(manifest, manifest_sha256).build()
+    return Report(manifest, manifest_sha256, rsoc_authority=rsoc_authority).build()
 
 
 def rsoc_identities(total):
@@ -1404,7 +1504,7 @@ def rsoc_identities(total):
 
 def prepare_inputs(output, inputs, source_sha, modified_at, doc_source_sha=None,
                    regression_scope="intermediate_snapshot", cpu_binding_kind="scope_only",
-                   cpu_binding_value=None):
+                   cpu_binding_value=None, *, rsoc_authority=None):
     """Prepare explicit pinned inputs, never infer a latest run."""
     require(isinstance(source_sha, str) and COMMIT.fullmatch(source_sha),
             "invalid_source_sha", "prepare")
@@ -1446,7 +1546,7 @@ def prepare_inputs(output, inputs, source_sha, modified_at, doc_source_sha=None,
                 "inputs": descriptors}
     write_bundle(output, {"metadata.json": meta_payload, "input-manifest.json": encoded(manifest)})
     pin = sha(encoded(manifest))
-    generate(output / "input-manifest.json", pin)
+    generate(output / "input-manifest.json", pin, rsoc_authority=rsoc_authority)
     return output / "input-manifest.json", pin
 
 
@@ -1487,6 +1587,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--manifest-sha256")
+    parser.add_argument("--rsoc-authority", type=Path)
+    parser.add_argument("--rsoc-authority-sha256")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--prepare-inputs", action="store_true")
@@ -1501,6 +1603,10 @@ def main(argv=None):
     parser.add_argument("--cpu-binding-value")
     args = parser.parse_args(argv)
     try:
+        require((args.rsoc_authority is None) == (args.rsoc_authority_sha256 is None),
+                "rsoc_authority_cli_pair", "cli")
+        authority = None if args.rsoc_authority is None else {
+            "path": str(args.rsoc_authority), "sha256": args.rsoc_authority_sha256}
         if args.prepare_inputs:
             require(not args.check and args.manifest is None and args.manifest_sha256 is None
                     and args.input and args.source_sha and args.modified_at,
@@ -1508,23 +1614,31 @@ def main(argv=None):
             path, pin = prepare_inputs(
                 args.output_dir, args.input, args.source_sha, args.modified_at,
                 args.doc_source_sha, args.regression_scope,
-                args.cpu_binding_kind, args.cpu_binding_value)
+                args.cpu_binding_kind, args.cpu_binding_value, rsoc_authority=authority)
             print(f"RELEASE_REPORT_INPUT verdict=PREPARED manifest={path} sha256={pin}")
             return 0
         require(args.manifest is not None and args.manifest_sha256 is not None
                 and not args.input and args.source_sha is None and args.modified_at is None
                 and args.doc_source_sha is None and args.cpu_binding_value is None,
                 "invalid_render_cli", "cli")
-        files = generate(args.manifest, args.manifest_sha256)
-        require(files == generate(args.manifest, args.manifest_sha256), "nondeterministic_output", "render")
+        files = generate(args.manifest, args.manifest_sha256, rsoc_authority=authority)
+        require(files == generate(args.manifest, args.manifest_sha256, rsoc_authority=authority),
+                "nondeterministic_output", "render")
         output = shared_path(args.output_dir, "output")
         inputs = {shared_path(item["path"], "input")
                   for item in parse(read(shared_path(args.manifest, "manifest"), "manifest")[0],
                                     "manifest")["inputs"]}
         inputs.add(shared_path(args.manifest, "manifest"))
+        if authority is not None:
+            inputs.add(shared_path(authority["path"], "authority"))
+            authority_bytes = read(shared_path(authority["path"], "authority"), "authority")[0]
+            require(sha(authority_bytes) == authority["sha256"], "changed_hash", "authority")
+            value = parse(authority_bytes, "authority")
+            inputs.add(shared_path(value["receipts"]["rotated_cuda"]["auditor"]["path"], "authority"))
         require(not any(path.is_relative_to(output) for path in inputs), "output_contains_input", "output")
         write_bundle(output, files, args.check)
-        require(files == generate(args.manifest, args.manifest_sha256), "snapshot_race", "final_recheck")
+        require(files == generate(args.manifest, args.manifest_sha256, rsoc_authority=authority),
+                "snapshot_race", "final_recheck")
         print(f"RELEASE_REPORT verdict=PASS files={len(files)} deterministic=true "
               f"source_sha={parse(files['summary.json'], 'summary')['source_sha']} "
               "online=UNVERIFIED commercial=UNVERIFIED")
