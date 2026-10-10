@@ -8,20 +8,24 @@ the production contract review remains FAIL. No production helper is an oracle.
 from __future__ import annotations
 
 import argparse
+import ast
 from collections import Counter
 from dataclasses import fields
 from datetime import datetime, timezone
 from fractions import Fraction
 import hashlib
+import io
 import json
 import math
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import time
+import traceback
 from xml.etree import ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -31,12 +35,92 @@ if __name__ == "__main__":
     bootstrap.add_argument("--owner-root")
     bootstrap.add_argument("--owner-commit")
     bootstrap.add_argument("--operator-sha256")
+    bootstrap.add_argument("--owner-source-sha256")
+    bootstrap.add_argument("--reviewer-commit")
+    bootstrap.add_argument("--reviewer-source-sha256")
     options, _ = bootstrap.parse_known_args()
     supplied = (options.owner_root, options.owner_commit, options.operator_sha256)
     if any(value is not None for value in supplied):
-        if not all(value is not None for value in supplied):
-            bootstrap.error("owner-root/owner-commit/operator-sha256 must be supplied together")
-        os.environ.update(dict(zip(OWNER_ENV, supplied)))
+        for key, value in zip(OWNER_ENV, supplied):
+            if value is not None:
+                os.environ[key] = value
+    for field, key in (
+        ("owner_source_sha256", "OPENOPT_SPARSE_OWNER_SOURCE_SHA256"),
+        ("reviewer_commit", "OPENOPT_SPARSE_REVIEWER_COMMIT"),
+        ("reviewer_source_sha256", "OPENOPT_SPARSE_REVIEWER_SOURCE_SHA256"),
+    ):
+        value = getattr(options, field)
+        if value is not None:
+            os.environ[key] = value
+
+
+def git_bytes(root, *args, input_bytes=None):
+    process = subprocess.run(["git", "-C", str(root), *args], input=input_bytes,
+                             capture_output=True, timeout=30, check=False)
+    if process.returncode:
+        raise ValueError(f"source Git query failed rc={process.returncode}")
+    return process.stdout
+
+
+def source_snapshot(root):
+    """Bind all actual members, independently of the subject's verifier."""
+    root = Path(root)
+    names = sorted(set(git_bytes(
+        root, "ls-files", "--cached", "--others", "--exclude-standard", "-z"
+    ).decode().split("\0")) - {""})
+    hashes = {}
+    for name in names:
+        path = root / name
+        if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(root):
+            raise ValueError(f"unsafe source member: {name}")
+        hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    if not hashes:
+        raise ValueError("empty source membership")
+    return {"commit": git_bytes(root, "rev-parse", "HEAD").decode().strip(),
+            "tree": git_bytes(root, "rev-parse", "HEAD^{tree}").decode().strip(),
+            "clean": git_bytes(root, "status", "--porcelain", "--untracked-files=all") == b"",
+            "sha256": hashes}
+
+
+def source_pin(snapshot):
+    payload = json.dumps(snapshot["sha256"], sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def committed_members(root, snapshot):
+    """One batch reads Git blobs; clean/skip-worktree labels alone are not pins."""
+    commit = snapshot["commit"]
+    names = sorted(set(git_bytes(root, "ls-files", "-z").decode().split("\0")) - {""})
+    queries = "".join(f"{commit}:{name}\n" for name in names).encode()
+    stream = io.BytesIO(git_bytes(root, "cat-file", "--batch", input_bytes=queries))
+    if set(names) != set(snapshot["sha256"]):
+        raise ValueError("committed/current source membership mismatch")
+    for name in names:
+        header = stream.readline().split()
+        if len(header) != 3 or header[1] != b"blob":
+            raise ValueError(f"committed blob unavailable: {name}")
+        payload = stream.read(int(header[2]))
+        if stream.read(1) != b"\n":
+            raise ValueError("invalid Git blob framing")
+        if hashlib.sha256(payload).hexdigest() != snapshot["sha256"][name]:
+            raise ValueError(f"committed/current source bytes mismatch: {name}")
+    if stream.read():
+        raise ValueError("extra Git blob output")
+
+
+def bound_source(root, commit, pin=None):
+    if not isinstance(commit, str) or not re.fullmatch("[0-9a-f]{40}", commit):
+        raise ValueError("caller source commit must be full lowercase hex")
+    snapshot = source_snapshot(root)
+    if snapshot["commit"] != commit:
+        raise ValueError("caller-pinned source full commit mismatch")
+    if not snapshot["clean"]:
+        raise ValueError("caller-pinned source must be clean")
+    committed_members(root, snapshot)
+    if pin is not None and (not re.fullmatch("[0-9a-f]{64}", pin)
+                            or source_pin(snapshot) != pin):
+        raise ValueError("caller-pinned source membership SHA mismatch")
+    return snapshot
 
 
 def owner_selection():
@@ -56,18 +140,18 @@ def owner_selection():
         raise ValueError("owner operators source cannot escape or be a symlink")
     if hashlib.sha256(module.read_bytes()).hexdigest() != pin:
         raise ValueError("caller-pinned owner operators bytes mismatch")
-    actual = subprocess.run(["git", "rev-parse", "HEAD"], cwd=path,
-                            capture_output=True, text=True, check=True).stdout.strip()
-    if actual != commit:
-        raise ValueError("caller-pinned owner full commit mismatch")
-    status = subprocess.run(["git", "status", "--porcelain"], cwd=path,
-                            capture_output=True, text=True, check=True).stdout
-    if status.strip():
-        raise ValueError("caller-pinned owner must be clean")
+    bound_source(path, commit, os.environ.get("OPENOPT_SPARSE_OWNER_SOURCE_SHA256"))
     return path, commit, pin
 
 
-OWNER_ROOT, OWNER_COMMIT, OPERATOR_PIN = owner_selection()
+SELECTION_ERROR = None
+try:
+    OWNER_ROOT, OWNER_COMMIT, OPERATOR_PIN = owner_selection()
+except Exception as error:
+    if __name__ != "__main__":
+        raise
+    SELECTION_ERROR = error
+    OWNER_ROOT, OWNER_COMMIT, OPERATOR_PIN = ROOT, None, None
 sys.path[:0] = [str(OWNER_ROOT / "src"), str(ROOT)]
 
 import numpy as np
@@ -79,6 +163,7 @@ import openopt.operators as operators
 TEST = "tests/test_sparse_contract_independent.py"
 DOC = "docs/research/sparse-contract-independent.md"
 BASE = "c9616c4199e3cd9859dd007cd752862baec7c127"
+REPAIR_BASE = "204934bc36284a40b8407b4e2fb68fa0d88184f0"
 PINS = {
     "src/openopt/operators.py": "4d9a57fafc3dc1a77d7c61ffcd9e4dbdba15a020c310ddd78f8a37ff5b0615e5",
     "src/openopt/qp.py": "955d741317e5de1c5743f6e6bc65406ba14560f9a8b4c989afe6d11a1fc58e40",
@@ -486,7 +571,8 @@ def test_collection_negative_controls(case):
 
 def loaded_binding():
     path = Path(operators.__file__).resolve(strict=True)
-    pin = OPERATOR_PIN or PINS["src/openopt/operators.py"]
+    owner = source_snapshot(OWNER_ROOT)
+    pin = OPERATOR_PIN or owner["sha256"]["src/openopt/operators.py"]
     assert path == OWNER_ROOT / "src/openopt/operators.py" and sha(path) == pin
     for function in (operators.prepare_operator_qp, operators.solve_operator_qp):
         assert Path(function.__code__.co_filename).resolve() == path
@@ -495,8 +581,9 @@ def loaded_binding():
 
 
 def test_actual_source_and_cpu_thread_boundary(monkeypatch):
-    assert all(sha(ROOT / path) == pin for path, pin in PINS.items())
-    assert loaded_binding()["sha256"] == (OPERATOR_PIN or PINS["src/openopt/operators.py"])
+    owner = source_snapshot(OWNER_ROOT)
+    assert bound_source(OWNER_ROOT, OWNER_COMMIT or owner["commit"]) == owner
+    assert loaded_binding()["sha256"] == (OPERATOR_PIN or owner["sha256"]["src/openopt/operators.py"])
     assert os.environ["CUDA_VISIBLE_DEVICES"] == "-1"
     assert all(os.environ[key] == "1" for key in THREADS)
     assert torch.get_num_threads() == 1
@@ -514,6 +601,99 @@ def environment(directory):
     return env
 
 
+def immutable_math():
+    """Exact original function/decorator text, not merely equal test counts."""
+    baseline = git_bytes(ROOT, "show", f"{REPAIR_BASE}:{TEST}").decode()
+    current = (ROOT / TEST).read_text()
+
+    def blocks(text):
+        lines = text.splitlines(keepends=True)
+        result = {}
+        for node in ast.parse(text).body:
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            if node.name == "test_actual_source_and_cpu_thread_boundary":
+                continue
+            if node.name.startswith("test_") or node.name in (
+                "tensor_bytes", "decoded", "freeze", "input_checks", "f", "dot", "threshold",
+                "original_checks", "global_tolerance_interval", "problem", "represented",
+                "sparse_problem", "config_dict", "observe", "matches", "forbid_dense", "membership",
+            ):
+                start = min([node.lineno] + [item.lineno for item in node.decorator_list])
+                result[node.name] = "".join(lines[start - 1:node.end_lineno])
+        return result
+
+    original, actual = blocks(baseline), blocks(current)
+    if original != actual:
+        raise ValueError("original mathematical functions/assertions changed")
+    return {"verdict": "PASS", "functions": len(original),
+            "sha256": hashlib.sha256(json.dumps(original, sort_keys=True).encode()).hexdigest()}
+
+
+def scope_check(base):
+    if not isinstance(base, str) or not re.fullmatch("[0-9a-f]{40}", base):
+        raise ValueError("scope base must be a full Git commit")
+    paths = set(git_bytes(ROOT, "diff", "--name-only", base, "HEAD").decode().splitlines())
+    if not paths or paths != {TEST, DOC}:
+        raise ValueError("development write scope differs from exact test/doc paths")
+    return {"base": base, "paths": sorted(paths), "verdict": "PASS"}
+
+
+def caller_binding(development=False):
+    if SELECTION_ERROR is not None:
+        raise SELECTION_ERROR
+    if not all(os.environ.get(key) for key in OWNER_ENV):
+        raise ValueError("explicit caller owner root/commit/operator SHA required")
+    reviewer_commit = os.environ.get("OPENOPT_SPARSE_REVIEWER_COMMIT")
+    reviewer_pin = os.environ.get("OPENOPT_SPARSE_REVIEWER_SOURCE_SHA256")
+    owner_pin = os.environ.get("OPENOPT_SPARSE_OWNER_SOURCE_SHA256")
+    if not reviewer_pin or not owner_pin:
+        raise ValueError("explicit caller reviewer/owner source membership SHA required")
+    owner = bound_source(OWNER_ROOT, OWNER_COMMIT, owner_pin)
+    if development:
+        reviewer = source_snapshot(ROOT)
+        if reviewer["commit"] != reviewer_commit or source_pin(reviewer) != reviewer_pin:
+            raise ValueError("development caller reviewer identity mismatch")
+    else:
+        reviewer = bound_source(ROOT, reviewer_commit, reviewer_pin)
+    return {"reviewer_root": str(ROOT), "reviewer_commit": reviewer_commit,
+            "reviewer_source_sha256": reviewer_pin, "owner_root": str(OWNER_ROOT),
+            "owner_commit": OWNER_COMMIT, "owner_source_sha256": owner_pin,
+            "operator_sha256": OPERATOR_PIN, "development": development,
+            "math": immutable_math()}
+
+
+def external_directory(path, *, existing=False):
+    raw = Path(path)
+    if not raw.is_absolute() or ".." in raw.parts:
+        raise ValueError("evidence requires absolute external path without traversal")
+    path = raw.resolve(strict=existing)
+    if (not path.is_relative_to(Path("/hf3fs-jd/data/tmp").resolve())
+            or any(path.is_relative_to(repo) for repo in (ROOT, OWNER_ROOT))):
+        raise ValueError("evidence must be external to reviewer/owner on authorized 3FS tmp")
+    return path
+
+
+def terminal_failure(directory, error, stage, name="receipt.json"):
+    """Never replace a prior receipt or turn a harness exception into acceptance."""
+    frame = traceback.extract_tb(error.__traceback__)
+    last = frame[-1] if frame else None
+    report = {"schema_version": 2, "checked_at": datetime.now(timezone.utc).isoformat(),
+              "evidence_verdict": "FAIL", "review_verdict": "UNVERIFIED",
+              "accept_sparse_contract": False, "returncode": 2, "stage": stage,
+              "first_cause": {"type": type(error).__name__, "message": str(error),
+                              "file": last.filename if last else None,
+                              "line": last.lineno if last else None},
+              "historical_fail_requalified": False, "audit_solver_calls": 0}
+    write_json(directory / name, report)
+    with (directory / (Path(name).stem + "-failure.log")).open("x") as stream:
+        stream.write("".join(traceback.format_exception(type(error), error, error.__traceback__)))
+        stream.write("\nreturncode=2\n")
+    print(f"SPARSE_REVIEW evidence=FAIL review=UNVERIFIED stage={stage} "
+          f"cause={type(error).__name__} receipt={directory / name}", flush=True)
+    return report
+
+
 def collect(directory, name):
     command = [sys.executable, "-B", "-m", "pytest", "--collect-only", "-q",
                "-o", f"cache_dir={directory / (name + '-cache')}", TEST]
@@ -529,17 +709,29 @@ def collect(directory, name):
 
 
 def audit_artifacts(directory, name="replay.json", require_clean=True):
+    directory = external_directory(directory, existing=True)
+    if Path(name).name != name or not name.endswith(".json"):
+        raise ValueError("receipt-name must be a simple new JSON filename")
+    if (directory / name).exists():
+        raise ValueError("immutable receipt already exists")
+    try:
+        return audit_body(directory, name, require_clean)
+    except Exception as error:
+        return terminal_failure(directory, error, "audit", name)
+
+
+def audit_body(directory, name, require_clean):
     """No solves: replay original bytes, Fraction metrics, membership and source."""
-    from scripts.verify import check_source_consistency, source_snapshot
-    directory = Path(directory).resolve(strict=True)
-    if not directory.is_relative_to(Path("/hf3fs-jd/data/tmp").resolve()):
-        raise ValueError("review evidence must be external on the authorized 3FS tmp")
+    from scripts.verify import check_source_consistency
+    binding = caller_binding(development=not require_clean)
     started = time.monotonic()
     current = source_snapshot(ROOT)
     owner_current = source_snapshot(OWNER_ROOT)
     execution = json.loads((directory / "execution.json").read_bytes())
+    assert execution["schema_version"] == 2, "historical v1 execution not requalified"
+    assert execution["caller_binding"] == binding, "execution caller identity mismatch"
     artifacts = Path(execution["verification_path"]).parent.resolve(strict=True)
-    assert artifacts.is_relative_to(directory)
+    assert artifacts.is_relative_to(directory) and not artifacts.is_symlink()
     verification = json.loads((artifacts / "verification.json").read_bytes())
     tree = ET.parse(artifacts / "pytest.xml").getroot()
     cases = list(tree.iter("testcase"))
@@ -559,22 +751,20 @@ def audit_artifacts(directory, name="replay.json", require_clean=True):
             assert all(int(suite.get(key)) == sum(c.find(tag) is not None for c in leaves)
                        for key, tag in (("failures", "failure"), ("errors", "error"), ("skipped", "skipped")))
     source = check_source_consistency(execution["source_before"], current)
-    assert source["verdict"] == "PASS"
-    assert check_source_consistency(verification["source"], current)["verdict"] == "PASS"
+    assert source["verdict"] == "PASS", "reviewer full source changed"
+    assert check_source_consistency(verification["source"], current)["verdict"] == "PASS", "verifier source changed"
     assert execution["source_after"] == current
     assert execution["owner_selection"] == {
         "root": str(OWNER_ROOT), "caller_commit": OWNER_COMMIT, "caller_operator_sha256": OPERATOR_PIN}
     owner_consistency = check_source_consistency(execution["owner_before"], owner_current)
-    assert owner_consistency["verdict"] == "PASS" and execution["owner_after"] == owner_current
+    assert owner_consistency["verdict"] == "PASS" and execution["owner_after"] == owner_current, "owner full source changed"
     if OWNER_COMMIT is not None:
         assert owner_current["clean"] and owner_current["commit"] == OWNER_COMMIT
         assert owner_current["sha256"]["src/openopt/operators.py"] == OPERATOR_PIN
-    assert all(current["sha256"][key] == pin for key, pin in PINS.items())
     if require_clean:
         assert current["clean"] and execution["source_before"]["clean"] and verification["source"]["clean"]
-        change = subprocess.run(["git", "diff", "--name-only", BASE, "HEAD"], cwd=ROOT,
-                                capture_output=True, text=True, check=True)
-        assert set(change.stdout.splitlines()) == {TEST, DOC}
+    if execution["development_scope"] is not None:
+        assert scope_check(execution["development_scope"]["base"]) == execution["development_scope"]
     assert verification["targets"] == [TEST] and verification["coverage"] == "explicit_targets"
     assert execution["returncode"] == (1 if counts["failures"] or counts["errors"] else 0)
     assert verification["verdict"] == ("FAIL" if execution["returncode"] else "PASS")
@@ -611,12 +801,13 @@ def audit_artifacts(directory, name="replay.json", require_clean=True):
         "cast-zero-row": 3, "nonfinite-negative": 4,
     }
     receipt = {
-        "schema_version": 1, "checked_at": datetime.now(timezone.utc).isoformat(),
+        "schema_version": 2, "checked_at": datetime.now(timezone.utc).isoformat(),
         "evidence_verdict": "PASS", "review_verdict": "FAIL" if mismatches else "PASS",
         "accept_sparse_contract": not bool(mismatches), "source": current,
         "owner_source": owner_current, "owner_source_consistency": owner_consistency,
         "owner_selection": execution["owner_selection"],
         "source_consistency": source, "loaded": loaded_binding(), "tests": counts,
+        "caller_binding": binding, "development_scope": execution["development_scope"],
         "passes": counts["tests"] - counts["failures"], "membership": differences,
         "collection_nodeids": selected, "junit_nodeids": actual,
         "collection_sha256": sha(directory / "collection.json"), "junit_sha256": sha(artifacts / "pytest.xml"),
@@ -633,6 +824,7 @@ def audit_artifacts(directory, name="replay.json", require_clean=True):
                     "thread_environment": {key: os.environ.get(key) for key in THREADS}},
         "gpu_execution": "UNVERIFIED", "commercial_qualification": False,
         "historical_fail_requalified": False,
+        "returncode": 1 if mismatches else 0,
     }
     write_json(directory / name, receipt)
     print(f"SPARSE_REVIEW evidence=PASS review={receipt['review_verdict']} "
@@ -640,76 +832,145 @@ def audit_artifacts(directory, name="replay.json", require_clean=True):
     return receipt
 
 
-def run(artifact_root, development=False):
-    from scripts.verify import source_snapshot
-    root = Path(artifact_root).resolve()
-    assert root.is_relative_to(Path("/hf3fs-jd/data/tmp").resolve()) and not root.is_relative_to(ROOT)
+def run(artifact_root, development=False, scope_base=None):
+    root = external_directory(artifact_root)
     root.mkdir(parents=True, exist_ok=True)
     directory = Path(tempfile.mkdtemp(prefix="review-", dir=root))
-    source_before = source_snapshot(ROOT)
-    owner_before = source_snapshot(OWNER_ROOT)
-    if not development and not source_before["clean"]:
-        raise ValueError("final review requires frozen clean source; --development keeps dirty evidence explicit")
-    nodes = collect(directory, "collection")
-    write_json(directory / "collection.json", {"nodeids": nodes, "source": source_before})
-    command = [sys.executable, "-B", "scripts/verify.py", "tests", "--artifact-dir", str(directory),
-               "--target", TEST]
-    start = time.monotonic()
-    with (directory / "run.log").open("x", encoding="utf-8") as log:
-        log.write(f"command={command!r}\n")
-        log.flush()
-        result = subprocess.run(command, cwd=ROOT, env=environment(directory),
-                                stdout=log, stderr=subprocess.STDOUT, timeout=170, check=False)
-        log.write(f"\nreturncode={result.returncode}\n")
-    reports = list(directory.glob("tests-*/verification.json"))
-    assert len(reports) == 1
-    write_json(directory / "execution.json", {
-        "command": command, "returncode": result.returncode, "wall_seconds": time.monotonic() - start,
-        "verification_path": str(reports[0]), "source_before": source_before,
-        "source_after": source_snapshot(ROOT), "development": development,
-        "owner_selection": {"root": str(OWNER_ROOT), "caller_commit": OWNER_COMMIT,
-                            "caller_operator_sha256": OPERATOR_PIN},
-        "owner_before": owner_before, "owner_after": source_snapshot(OWNER_ROOT),
-    })
+    stage = "caller_binding"
+    try:
+        binding = caller_binding(development)
+        source_before = source_snapshot(ROOT)
+        owner_before = source_snapshot(OWNER_ROOT)
+        scope = scope_check(scope_base) if scope_base else None
+        stage = "collection"
+        nodes = collect(directory, "collection")
+        write_json(directory / "collection.json", {"nodeids": nodes, "source": source_before})
+        command = [sys.executable, "-B", "scripts/verify.py", "tests", "--artifact-dir", str(directory),
+                   "--target", TEST]
+        stage = "pytest"
+        start = time.monotonic()
+        with (directory / "run.log").open("x", encoding="utf-8") as log:
+            log.write(f"command={command!r}\n")
+            log.flush()
+            result = subprocess.run(command, cwd=ROOT, env=environment(directory),
+                                    stdout=log, stderr=subprocess.STDOUT, timeout=170, check=False)
+            log.write(f"\nreturncode={result.returncode}\n")
+        reports = list(directory.glob("tests-*/verification.json"))
+        assert len(reports) == 1, "verifier terminal JSON missing or ambiguous"
+        write_json(directory / "execution.json", {
+            "schema_version": 2, "caller_binding": binding, "development_scope": scope,
+            "command": command, "returncode": result.returncode, "wall_seconds": time.monotonic() - start,
+            "verification_path": str(reports[0]), "source_before": source_before,
+            "source_after": source_snapshot(ROOT), "development": development,
+            "owner_selection": {"root": str(OWNER_ROOT), "caller_commit": OWNER_COMMIT,
+                                "caller_operator_sha256": OPERATOR_PIN},
+            "owner_before": owner_before, "owner_after": source_snapshot(OWNER_ROOT),
+        })
+    except Exception as error:
+        terminal_failure(directory, error, stage)
+        return 2
     receipt = audit_artifacts(directory, "receipt.json", require_clean=not development)
-    return 1 if receipt["review_verdict"] == "FAIL" else 0
+    return receipt["returncode"]
 
 
-def entry_controls(artifact_root):
+def selection_args():
+    return ["--owner-root", str(OWNER_ROOT), "--owner-commit", OWNER_COMMIT,
+            "--operator-sha256", OPERATOR_PIN,
+            "--owner-source-sha256", os.environ["OPENOPT_SPARSE_OWNER_SOURCE_SHA256"],
+            "--reviewer-commit", os.environ["OPENOPT_SPARSE_REVIEWER_COMMIT"],
+            "--reviewer-source-sha256", os.environ["OPENOPT_SPARSE_REVIEWER_SOURCE_SHA256"]]
+
+
+def entry_controls(artifact_root, completed=None, development=False):
     """Actual no-solve CLI negatives; retain stderr/rc and prove no run artifacts."""
-    from scripts.verify import check_source_consistency, source_snapshot
-    root = Path(artifact_root).resolve()
-    assert root.is_relative_to(Path("/hf3fs-jd/data/tmp").resolve()) and not root.is_relative_to(ROOT)
+    from scripts.verify import check_source_consistency
+    caller_binding(development)
+    root = external_directory(artifact_root)
     root.mkdir(parents=True, exist_ok=True)
     directory = Path(tempfile.mkdtemp(prefix="entry-", dir=root))
     before = source_snapshot(ROOT)
-    common = ["--owner-root", str(ROOT), "--owner-commit", before["commit"],
-              "--operator-sha256", PINS["src/openopt/operators.py"]]
+    common = selection_args()
     variants = {
-        "partial": (["--owner-root", str(ROOT)], "must be supplied together"),
-        "wrong-sha": (common[:-1] + ["0" * 64], "operators bytes mismatch"),
-        "wrong-commit": (["--owner-root", str(ROOT), "--owner-commit", "0" * 40,
-                          "--operator-sha256", PINS["src/openopt/operators.py"]], "full commit mismatch"),
+        "partial": (common[:2], "must be supplied together"),
+        "wrong-sha": ([*common[:5], "0" * 64, *common[6:]], "operators bytes mismatch"),
+        "wrong-commit": ([*common[:3], "0" * 40, *common[4:]], "full commit mismatch"),
+        "wrong-owner-membership": ([*common[:7], "0" * 64, *common[8:]], "membership SHA mismatch"),
+        "wrong-reviewer-membership": ([*common[:-1], "0" * 64], "reviewer identity mismatch"
+                                      if development else "membership SHA mismatch"),
+        "wrong-scope": ([*common, "--scope-base", BASE], "write scope differs"),
     }
     results = {}
     for name, (selection, reason) in variants.items():
         target = directory / name
         command = [sys.executable, "-B", str(ROOT / TEST), "--run", "--artifact-dir", str(target), *selection]
-        result = subprocess.run(command, cwd=ROOT, env=environment(directory),
+        if development:
+            command.append("--development")
+        child_env = environment(directory)
+        for key in (*OWNER_ENV, "OPENOPT_SPARSE_OWNER_SOURCE_SHA256",
+                    "OPENOPT_SPARSE_REVIEWER_COMMIT", "OPENOPT_SPARSE_REVIEWER_SOURCE_SHA256"):
+            child_env.pop(key, None)
+        result = subprocess.run(command, cwd=ROOT, env=child_env,
                                 capture_output=True, text=True, timeout=30, check=False)
         log = directory / (name + ".log")
         with log.open("x", encoding="utf-8") as stream:
             stream.write(f"command={command!r}\n" + result.stdout + result.stderr
                          + f"\nreturncode={result.returncode}\n")
-        assert result.returncode != 0 and reason in result.stdout + result.stderr
-        assert not target.exists(), "invalid caller identity reached run/solve"
+        receipts = list(target.glob("review-*/receipt.json"))
+        assert len(receipts) == 1 and result.returncode == 2
+        terminal = json.loads(receipts[0].read_bytes())
+        assert terminal["evidence_verdict"] == "FAIL" and terminal["accept_sparse_contract"] is False
+        assert reason in terminal["first_cause"]["message"], terminal
+        assert not list(target.glob("review-*/tests-*")), "invalid identity reached pytest/solve"
         results[name] = {"returncode": result.returncode, "reason": reason,
-                         "log": str(log), "log_sha256": sha(log), "solver_calls": 0}
+                         "log": str(log), "log_sha256": sha(log), "solver_calls": 0,
+                         "receipt": str(receipts[0]), "receipt_sha256": sha(receipts[0])}
+    if completed is not None:
+        completed = external_directory(completed, existing=True)
+        baseline = json.loads((completed / "receipt.json").read_bytes())
+        assert baseline["evidence_verdict"] == baseline["review_verdict"] == "PASS"
+        for name in ("drop-collection", "coordinated-drop", "wrong-owner-snapshot"):
+            target = directory / name
+            shutil.copytree(completed, target)
+            execution = json.loads((target / "execution.json").read_bytes())
+            old_artifacts = Path(execution["verification_path"]).parent
+            artifacts = target / old_artifacts.name
+            execution["verification_path"] = str(artifacts / "verification.json")
+            collection = json.loads((target / "collection.json").read_bytes())
+            if name == "wrong-owner-snapshot":
+                execution["owner_before"]["sha256"]["src/openopt/operators.py"] = "0" * 64
+            else:
+                collection["nodeids"].pop()
+                if name == "coordinated-drop":
+                    tree = ET.parse(artifacts / "pytest.xml")
+                    leaf = next(s for s in tree.iter("testsuite") if s.findall("testcase"))
+                    leaf.remove(leaf.findall("testcase")[-1])
+                    leaf.set("tests", str(len(leaf.findall("testcase"))))
+                    tree.write(artifacts / "pytest.xml")
+            # These are new mutation copies; old original observations/receipts stay immutable.
+            (target / "execution.json").write_text(json.dumps(execution))
+            (target / "collection.json").write_text(json.dumps(collection))
+            command = [sys.executable, "-B", str(ROOT / TEST), "--audit-artifacts", str(target),
+                       "--receipt-name", "negative.json", *common]
+            if development:
+                command.append("--development")
+            result = subprocess.run(command, cwd=ROOT, env=environment(directory),
+                                    capture_output=True, text=True, timeout=45, check=False)
+            log = directory / (name + ".log")
+            with log.open("x") as stream:
+                stream.write(result.stdout + result.stderr + f"\nreturncode={result.returncode}\n")
+            receipt = target / "negative.json"
+            terminal = json.loads(receipt.read_bytes())
+            assert result.returncode == 2 and terminal["evidence_verdict"] == "FAIL"
+            assert terminal["stage"] == "audit" and not terminal["accept_sparse_contract"]
+            results[name] = {"returncode": result.returncode, "receipt": str(receipt),
+                             "receipt_sha256": sha(receipt), "log": str(log),
+                             "log_sha256": sha(log), "solver_calls": 0,
+                             "first_cause": terminal["first_cause"]}
     after = source_snapshot(ROOT)
     consistency = check_source_consistency(before, after)
     assert consistency["verdict"] == "PASS"
     path = directory / "receipt.json"
-    write_json(path, {"schema_version": 1, "verdict": "PASS",
+    write_json(path, {"schema_version": 2, "verdict": "PASS",
                       "checked_at": datetime.now(timezone.utc).isoformat(),
                       "source": before, "source_consistency": consistency,
                       "controls": results, "solver_calls": 0})
@@ -717,31 +978,154 @@ def entry_controls(artifact_root):
     return 0
 
 
-def main(argv=None):
+def describe_source(owner_root=None):
+    snapshot = source_snapshot(ROOT)
+    value = {"reviewer_root": str(ROOT), "reviewer_commit": snapshot["commit"],
+             "reviewer_source_sha256": source_pin(snapshot), "clean": snapshot["clean"],
+             "math": immutable_math()}
+    if owner_root is not None:
+        owner_root = Path(owner_root).resolve(strict=True)
+        owner = source_snapshot(owner_root)
+        committed_members(owner_root, owner)
+        value.update(owner_root=str(owner_root), owner_commit=owner["commit"],
+                     owner_source_sha256=source_pin(owner),
+                     operator_sha256=owner["sha256"]["src/openopt/operators.py"])
+    print(json.dumps(value, sort_keys=True, indent=2), flush=True)
+    return 0
+
+
+def diagnose_historical(run_directory, output):
+    """Read old red bytes, never replay or promote a schema-v1 failed run."""
+    run_directory = external_directory(run_directory, existing=True)
+    output = external_directory(output)
+    output.mkdir(parents=True, exist_ok=True)
+    directory = Path(tempfile.mkdtemp(prefix="history-", dir=output))
+    execution_path = run_directory / "execution.json"
+    execution = json.loads(execution_path.read_bytes())
+    verification_path = Path(execution["verification_path"])
+    assert verification_path.is_relative_to(run_directory)
+    verification = json.loads(verification_path.read_bytes())
+    junit = verification_path.parent / "pytest.xml"
+    cases = list(ET.parse(junit).getroot().iter("testcase"))
+    collection_path = run_directory / "collection.json"
+    nodes = json.loads(collection_path.read_bytes())["nodeids"]
+    actual = [c.get("classname").replace(".", "/") + ".py::" + c.get("name") for c in cases]
+    membership(nodes, actual)
+    counts = {"tests": len(cases), **{
+        key: sum(c.find(tag) is not None for c in cases)
+        for key, tag in (("failures", "failure"), ("errors", "error"), ("skipped", "skipped"))
+    }}
+    assert counts == {"tests": 52, "failures": 1, "errors": 0, "skipped": 0}
+    failed = [c.get("name") for c in cases if c.find("failure") is not None]
+    assert failed == ["test_actual_source_and_cpu_thread_boundary"]
+    assert execution["returncode"] == 1 and verification["verdict"] == "FAIL"
+    mismatches = {name: {"historical": pin, "actual": execution["source_after"]["sha256"].get(name)}
+                  for name, pin in PINS.items() if execution["source_after"]["sha256"].get(name) != pin}
+    assert mismatches and not (run_directory / "receipt.json").exists()
+    path = directory / "receipt.json"
+    write_json(path, {"schema_version": 2, "checked_at": datetime.now(timezone.utc).isoformat(),
+                      "evidence_verdict": "HISTORICAL_HARNESS_FAIL_RETAINED",
+                      "review_verdict": "UNVERIFIED", "accept_sparse_contract": False,
+                      "pytest_counts": counts, "pytest_returncode": execution["returncode"],
+                      "failed_nodes": failed, "terminal_audit_returncode": "NOT_RECORDED",
+                      "reported_first_cause": "historical reviewer PINS assertion; obsolete scope gate also incompatible",
+                      "historical_pin_mismatches": mismatches,
+                      "inputs": {str(p): sha(p) for p in (
+                          execution_path, verification_path, junit, collection_path)},
+                      "historical_fail_requalified": False, "solver_calls": 0})
+    print(f"SPARSE_HISTORY verdict=FAIL_RETAINED receipt={path}", flush=True)
+    return 0
+
+
+def scan_source(artifact_root):
+    """Existing authorized literal scanner, without printing credential values."""
+    import importlib.util
+    root = external_directory(artifact_root)
+    root.mkdir(parents=True, exist_ok=True)
+    spec = importlib.util.spec_from_file_location(
+        "sparse_safe_scanner", "/data/dev/infra/ops/dsh/scan-secrets-precommit.py")
+    scanner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(scanner)
+    needles = scanner.read_needles(argparse.Namespace(
+        secret_hex=None, secrets_file=None, no_needle=False,
+        needle_from=str(Path.home() / ".config/dsh-n600-token")))
+    if not needles:
+        raise ValueError("authorized credential scan needle unavailable")
+    paths = [str(ROOT / TEST), str(ROOT / DOC)]
+    literal, _ = scanner.scan_literal(paths, needles)
+    pattern = re.compile(r"BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY|IDENTIFIED" r" BY|"
+                         r"(?i:password|token|secret)\s*[\"\x27]?\s*[:=]\s*[\"\x27][^\"\x27\s]{6,}[\"\x27]")
+    shape = sum(bool(pattern.search(Path(path).read_text())) for path in paths)
+    report = {"verdict": "PASS" if literal == shape == 0 else "FAIL",
+              "literal_hits": literal, "shape_hits": shape, "files": {p: sha(p) for p in paths}}
+    write_json(root / "source-security-scan.json", report)
+    print(f"SPARSE_SCOPE_SCAN verdict={report['verdict']} literal={literal} shape={shape}", flush=True)
+    return 0 if report["verdict"] == "PASS" else 1
+
+
+def main_body(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--run", action="store_true")
     mode.add_argument("--audit-artifacts", type=Path)
     mode.add_argument("--entry-controls", action="store_true")
+    mode.add_argument("--describe-source", action="store_true")
+    mode.add_argument("--historical-diagnosis", type=Path)
+    mode.add_argument("--scan-only", action="store_true")
     parser.add_argument("--artifact-dir", type=Path)
     parser.add_argument("--development", action="store_true")
     parser.add_argument("--receipt-name", default="replay.json")
     parser.add_argument("--owner-root", type=Path, help="explicit clean local owner worktree")
     parser.add_argument("--owner-commit", help="caller full 40-hex owner commit")
     parser.add_argument("--operator-sha256", help="caller full 64-hex operators source hash")
+    parser.add_argument("--owner-source-sha256")
+    parser.add_argument("--reviewer-commit")
+    parser.add_argument("--reviewer-source-sha256")
+    parser.add_argument("--scope-base", help="optional explicit development diff base, not an execution ancestry rule")
+    parser.add_argument("--control-run", type=Path, help="new schema-v2 completed run for coordinated no-solve negatives")
     args = parser.parse_args(argv)
+    if args.describe_source:
+        return describe_source(args.owner_root)
+    if args.historical_diagnosis:
+        if args.artifact_dir is None:
+            parser.error("historical diagnosis requires artifact-dir")
+        return diagnose_historical(args.historical_diagnosis, args.artifact_dir)
+    if args.scan_only:
+        return scan_source(args.artifact_dir)
     if args.entry_controls:
         if args.artifact_dir is None:
             parser.error("--entry-controls requires --artifact-dir")
-        return entry_controls(args.artifact_dir)
+        return entry_controls(args.artifact_dir, args.control_run, args.development)
     if args.run:
         if args.artifact_dir is None:
             parser.error("--run requires --artifact-dir")
-        return run(args.artifact_dir, args.development)
+        return run(args.artifact_dir, args.development, args.scope_base)
     if Path(args.receipt_name).name != args.receipt_name or not args.receipt_name.endswith(".json"):
         parser.error("receipt-name must be a simple new JSON filename")
-    audit_artifacts(args.audit_artifacts, args.receipt_name)
-    return 0
+    receipt = audit_artifacts(args.audit_artifacts, args.receipt_name, require_clean=not args.development)
+    return receipt["returncode"]
+
+
+def main(argv=None):
+    try:
+        return main_body(argv)
+    except Exception as error:
+        parser = argparse.ArgumentParser(add_help=False)
+        parser.add_argument("--artifact-dir", type=Path)
+        parser.add_argument("--audit-artifacts", type=Path)
+        options, _ = parser.parse_known_args(argv)
+        selected = options.artifact_dir or options.audit_artifacts
+        if selected is None:
+            print(f"SPARSE_ENTRY evidence=FAIL cause={type(error).__name__}: {error}", flush=True)
+            return 2
+        try:
+            root = external_directory(selected)
+        except Exception:
+            root = Path("/hf3fs-jd/data/tmp/openopt-release-20261010/sparse-portable-repair/entry-failures").resolve()
+        root.mkdir(parents=True, exist_ok=True)
+        directory = Path(tempfile.mkdtemp(prefix="command-failure-", dir=root))
+        terminal_failure(directory, error, "entry")
+        return 2
 
 
 if __name__ == "__main__":

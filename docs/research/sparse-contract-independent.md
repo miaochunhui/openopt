@@ -1,5 +1,84 @@
 # Independent Sparse Contract Review
 
+## Portable Repair V2
+
+This section supersedes only the historical entry/ancestry rules below.
+The repair tree starts at full `204934bc36284a40b8407b4e2fb68fa0d88184f0`.
+Only this test/document pair changes; production and all numerical assertions
+are read-only. Twenty-eight original mathematical/test function blocks,
+including decorators, are checked against exact original text. The original
+52 collection identities remain unchanged. Only the source-boundary test
+replaces obsolete historical pins with committed/current caller source checks.
+The original Fraction `1e-7` formulas, input bytes and expected outcomes stay.
+
+The chair's historical `chair-204934b-sparse-independent-v1/review-ka0g1cl6`
+is actually 51 pass/one source-boundary fail in JUnit, not 52 pass.
+Its later audit also failed on old reviewer PINS. This is a harness FAIL,
+not numerical qualification. The original artifacts are immutable.
+`--historical-diagnosis OLD_RUN --artifact-dir NEW_EXTERNAL_DIR` records
+the actual JUnit, byte hashes and obsolete source mismatches without solving
+or requalifying schema-v1 execution. Original 36/16 production FAIL and
+clean bounded 52 PASS on owner `03666821` remain separate historical evidence.
+
+Execution schema v2 requires explicit caller owner root/full commit/operator
+SHA plus full owner and reviewer source-membership SHA/full reviewer commit.
+`--describe-source --owner-root ABSOLUTE_OWNER` reads actual source candidates;
+the caller must independently inspect/select them. Source-membership SHA is
+SHA256 of the full path-to-byte-hash map encoded using sorted JSON keys with
+compact separators. Every current member is compared with its Git blob,
+not merely a clean label. Caller Git pins freeze actual bytes, not correctness.
+No historical production pin is required to remain unchanged.
+
+Run flags are `--run --artifact-dir NEW_EXTERNAL_DIR --owner-root ROOT
+--owner-commit FULL40 --operator-sha256 FULL64 --owner-source-sha256 FULL64
+--reviewer-commit FULL40 --reviewer-source-sha256 FULL64`.
+Replay uses the identical caller selection with `--audit-artifacts RUN_DIR`
+and a new `--receipt-name`. Both reviewer and owner full membership are
+rechecked before/after; fresh collection and JUnit require exact two-way
+membership. Root/byte/module location and original mathematical function text
+are checked independently of the subject verifier.
+
+Development scope is a separate optional `--scope-base FULL40` exact test/doc
+diff check. It is never an execution ancestry assumption, so an integrated
+main reviewer can run without claiming a two-file diff from an old baseline.
+`--development` explicitly permits dirty reviewer evidence, never owner
+drift; final evidence requires clean committed caller bytes.
+
+Actual CLI negatives use `--entry-controls --control-run V2_RUN
+--artifact-dir NEW_EXTERNAL_DIR` plus the same caller tuple. They test partial
+selection, wrong operator/commit/full owner or reviewer membership, wrong
+development scope, and copied coordinated collection/JUnit truncation or
+owner-snapshot mutation. Originals are not modified and audit calls solve zero.
+They do not add/remove any of the original 52 pytest nodes.
+
+All run/audit/entry failures have nonzero exit and immutable terminal JSON
+with stage, exception type/message/file/line and separate traceback log.
+Evidence failure means `review_verdict=UNVERIFIED` and acceptance false,
+not a production FAIL inferred from an invalid harness. Prior v1 runs are
+rejected rather than silently migrated. Source/CLI authenticity is bounded
+local byte provenance, not remote attestation or a hostile-process sandbox.
+
+Portable repair evidence root is
+`/hf3fs-jd/data/tmp/openopt-release-20261010/sparse-portable-repair`.
+Pre-smoke `pre-smoke/smoke-yiplv2km/verification.json` records 80 pass/four
+explicit local CUDA skips. Development
+`development-v1/review-00zmh6cg/receipt.json` records 52 pass/zero failures,
+errors or skips, 12 actual QP calls, six analytic CG cases and exact
+collection/JUnit/full reviewer-owner source equality. The original 28
+mathematical/test function blocks hash to
+`76b87ca7e7d3981bd449eaf39df155d90a97c09f46939e765fe9e5c9200e3545`.
+Development is dirty provenance, not clean acceptance.
+
+`entry-development-v1/entry-51vsfszk/receipt.json` records nine independent
+CLI/audit negatives, all rejected with exit 2 and terminal first-cause JSON;
+zero solves. Historical chair evidence is independently recorded at
+`history-v2/history-5a80ach0/receipt.json`: 51/1, no error/skip, old source
+assertion retained. The first historical-diagnosis development attempt had
+incorrectly expected all 52 green; actual JUnit disproved that expectation.
+The subsequent diagnosis changed only that count assumption and did not
+rewrite any original input/result. Clean source runs and replay use new
+external directories after this document is frozen, handed off separately.
+
 ## Scope And Oracle
 
 This independent tree starts at `c9616c4199e3cd9859dd007cd752862baec7c127`.
