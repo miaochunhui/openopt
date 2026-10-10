@@ -1,4 +1,4 @@
-"""Independent c18300a review; unchanged Nash assertions, read-only profiling.
+"""Portable caller-pinned c18300a-byte review, unchanged Nash assertions.
 
 Synthetic LP/QP workers are real CPU solves, not public/GPU qualification.
 No numerical entry is wrapped by the acceptance observer. Interface probes
@@ -7,6 +7,9 @@ and loaded-object mutations are separate controls, never the positive run.
 
 from contextlib import contextmanager
 from copy import deepcopy
+import argparse
+from collections import Counter
+from datetime import datetime, timezone
 import hashlib
 import importlib.util
 import json
@@ -15,25 +18,36 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from types import CodeType
+from xml.etree import ElementTree as ET
 
 import pytest
 
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 from scripts import public_qp_corpus as corpus
 from scripts import qualify_public_qp as producer
 
-ROOT = Path(__file__).resolve().parents[1]
 FREEZE = "c18300a53a255f1be2d887430490ddf9d9fbd9b9"
 RUNNER_PIN = "e0b65c9f0fd3070a90ac2082d059c85e98e8ee6fff21371732f1fc25a51fb25b"
-NASH = Path(
+NASH = Path(os.environ.get(
+    "OPENOPT_PUBLIC_AUDIT_NASH_FILE",
     "/data/dev/openopt-wt-release4-20261010-public-v3-independent-nash/"
-    "tests/test_public_v3_binding_independent.py"
-)
+    "tests/test_public_v3_binding_independent.py")).resolve()
 NASH_PIN = "7d2262e7d1550800dddcb72b53341dc9b02efe44a8d62d58feaebe521da7995e"
 ARTIFACT_ROOT = Path(
     "/hf3fs-jd/data/tmp/openopt-release-20261010/public-loaded-repair-independent"
 ).resolve()
 OPT_IN = "OPENOPT_RUN_PUBLIC_V3_INDEPENDENT_TESTS"
+OWNER_ROOT = Path(os.environ.get(
+    "OPENOPT_PUBLIC_AUDIT_OWNER_ROOT",
+    "/data/dev/openopt-wt-release4-20261010-public-v3-loaded-binding-repair")).resolve()
+OWNER_COMMIT = os.environ.get("OPENOPT_PUBLIC_AUDIT_OWNER_COMMIT", FREEZE)
+EXTERNAL_SELECTION = os.environ.get("OPENOPT_PUBLIC_AUDIT_ARTIFACT_ROOT")
+if EXTERNAL_SELECTION:
+    ARTIFACT_ROOT = Path(EXTERNAL_SELECTION).resolve()
 
 
 def sha(path):
@@ -42,6 +56,57 @@ def sha(path):
 
 def write(path, value):
     corpus.write_json(Path(path), value)
+
+
+def git(root, *args):
+    result = subprocess.run(["git", *args], cwd=root, capture_output=True, timeout=20)
+    if result.returncode:
+        raise ValueError(f"caller Git query failed rc={result.returncode}")
+    return result.stdout
+
+
+def source_snapshot(root):
+    """Read actual Git and source bytes without calling a subject verifier."""
+    names = git(root, "ls-files", "--cached", "--others", "--exclude-standard", "-z")
+    hashes = {}
+    for name in sorted(set(names.decode().split("\0")) - {""}):
+        path = root / name
+        if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(root):
+            raise ValueError(f"unsafe source member: {name}")
+        hashes[name] = sha(path)
+    if not hashes:
+        raise ValueError("empty caller source snapshot")
+    return {
+        "commit": git(root, "rev-parse", "HEAD").decode().strip(),
+        "tree": git(root, "rev-parse", "HEAD^{tree}").decode().strip(),
+        "clean": git(root, "status", "--porcelain") == b"", "sha256": hashes,
+    }
+
+
+def owner_selection(root, commit):
+    """An explicit Git caller pin plus original reviewed bytes, not ancestry."""
+    if (not isinstance(commit, str) or len(commit) != 40
+            or any(char not in "0123456789abcdef" for char in commit)):
+        raise ValueError("full caller owner commit required")
+    if git(root, "rev-parse", "HEAD").decode().strip() != commit:
+        raise ValueError("caller owner commit mismatch")
+    snapshot = source_snapshot(root)
+    if not snapshot["clean"]:
+        raise ValueError("caller owner must be clean")
+    for name, (relative, expected) in nash.EXECUTION_SOURCES.items():
+        raw = git(root, "show", f"{commit}:{relative}")
+        if hashlib.sha256(raw).hexdigest() != expected:
+            raise ValueError(f"caller owner differs from reviewed source: {name}")
+        if (root / relative).read_bytes() != raw or (ROOT / relative).read_bytes() != raw:
+            raise ValueError(f"caller/current source bytes mismatch: {name}")
+    return snapshot
+
+
+def external_selection(root):
+    root = Path(root).resolve()
+    if any(root.is_relative_to(repo) for repo in (ROOT, OWNER_ROOT, NASH.parents[1])):
+        raise ValueError("audit artifacts must be outside all source repositories")
+    return root
 
 
 assert sha(NASH) == NASH_PIN, "unchanged reviewer source pin required"
@@ -68,6 +133,20 @@ for name, value in vars(nash).copy().items():
 
 @pytest.fixture(scope="module", autouse=True)
 def collected_contract(request, tmp_path_factory):
+    owner = owner_selection(OWNER_ROOT, OWNER_COMMIT)
+    base = external_selection(tmp_path_factory.getbasetemp())
+    if EXTERNAL_SELECTION and not base.is_relative_to(ARTIFACT_ROOT):
+        raise ValueError("pytest temporary root differs from caller artifact selection")
+    # Bind the unchanged external_root function to this actual invocation.
+    nash.ARTIFACT_ROOT = base
+    selected_env = {
+        "OPENOPT_PUBLIC_AUDIT_ARTIFACT_ROOT": str(base),
+        "OPENOPT_PUBLIC_AUDIT_OWNER_ROOT": str(OWNER_ROOT),
+        "OPENOPT_PUBLIC_AUDIT_OWNER_COMMIT": OWNER_COMMIT,
+        "OPENOPT_PUBLIC_AUDIT_NASH_FILE": str(NASH),
+    }
+    previous = {key: os.environ.get(key) for key in selected_env}
+    os.environ.update(selected_env)
     nodes = [item.nodeid for item in request.session.items
              if Path(str(item.path)).resolve() == Path(__file__).resolve()]
     assert nodes and len(nodes) == len(set(nodes)), "nonempty exact review collection required"
@@ -76,9 +155,19 @@ def collected_contract(request, tmp_path_factory):
         "schema_version": 1, "nodeids": nodes, "collected": len(nodes),
         "original_suite_sha256": NASH_PIN, "review_sha256": sha(__file__),
         "runner_sha256": RUNNER_PIN, "production_freeze": FREEZE,
+        "caller_owner_root": str(OWNER_ROOT), "caller_owner": owner,
+        "actual_temporary_root": str(base),
         "actual_opt_in": os.environ.get(OPT_IN) == "1",
         "scope": "test collection inventory, not a terminal verdict or qualification",
     })
+    yield
+    assert owner_selection(OWNER_ROOT, OWNER_COMMIT) == owner
+    assert sha(NASH) == NASH_PIN
+    for key, value in previous.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
 
 
 @contextmanager
@@ -160,6 +249,8 @@ def readonly_observer():
 
 
 def observe_worker(output, pin, index):
+    owner_selection(OWNER_ROOT, OWNER_COMMIT)
+    external_selection(ARTIFACT_ROOT)
     output = nash.external_root(output)
     with readonly_observer() as events:
         code = producer.v3_worker(output, pin, index)
@@ -178,6 +269,8 @@ def observe_worker(output, pin, index):
 
 def execute(frozen, output):
     """Only redirect orchestration to this observer; worker logic stays unchanged."""
+    owner_selection(OWNER_ROOT, OWNER_COMMIT)
+    external_selection(ARTIFACT_ROOT)
     nash.external_root(output)
     original = subprocess.run
 
@@ -202,7 +295,7 @@ def execute(frozen, output):
 
 
 @pytest.fixture(scope="module")
-def own_execution(tmp_path_factory):
+def own_execution(tmp_path_factory, collected_contract):
     if os.environ.get(OPT_IN) != "1":
         pytest.skip(f"actual CPU workers require {OPT_IN}=1; not acceptance")
     root = nash.external_root(tmp_path_factory.mktemp("independent-own-execution"))
@@ -238,12 +331,20 @@ def own_execution(tmp_path_factory):
 
 def test_frozen_selection_and_original_assertions_are_unchanged():
     assert sha(NASH) == NASH_PIN
-    process = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
-                             capture_output=True, text=True, check=True)
-    assert subprocess.run(
-        ["git", "merge-base", "--is-ancestor", FREEZE, process.stdout.strip()],
-        cwd=ROOT, capture_output=True, check=False,
-    ).returncode == 0
+    selected = owner_selection(OWNER_ROOT, OWNER_COMMIT)
+    assert selected["commit"] == OWNER_COMMIT and selected["clean"] is True
+    with pytest.raises(ValueError, match="caller owner commit mismatch"):
+        owner_selection(OWNER_ROOT, "0" * 40)
+    with pytest.raises(ValueError, match="full caller owner commit"):
+        owner_selection(OWNER_ROOT, OWNER_COMMIT[:7])
+    for path in (ROOT, OWNER_ROOT, NASH.parents[1]):
+        with pytest.raises(ValueError, match="outside all source repositories"):
+            external_selection(path)
+    for path in (nash.ARTIFACT_ROOT.parent / "outside-caller-root", ROOT / "forbidden-audit"):
+        with pytest.raises(ValueError, match="independent audit artifacts"):
+            nash.external_root(path)
+    assert nash.external_root(nash.ARTIFACT_ROOT / "controlled-probe") == (
+        nash.ARTIFACT_ROOT / "controlled-probe")
     assert sha(producer.__file__) == RUNNER_PIN
     assert set(nash.EXECUTION_SOURCES) == set(LEGACY_PINS)
     assert {key: value for key, value in nash.EXECUTION_SOURCES.items() if key != "runner.py"} == {
@@ -417,7 +518,161 @@ def scan(argv):
     return 0 if literal == shape == 0 else 1
 
 
+def review_cli(argv):
+    """Collect and run all 84 unchanged identities with explicit caller pins."""
+    import signal
+
+    parser = argparse.ArgumentParser(description=review_cli.__doc__)
+    parser.add_argument("--review", action="store_true", required=True)
+    parser.add_argument("--owner-root", type=Path, required=True)
+    parser.add_argument("--owner-commit", required=True)
+    parser.add_argument("--artifact-dir", type=Path, required=True)
+    args = parser.parse_args(argv)
+    owner_root = args.owner_root.resolve()
+    if owner_root != OWNER_ROOT or args.owner_commit != OWNER_COMMIT:
+        raise ValueError("explicit CLI caller selection differs from inherited owner pin")
+    base = external_selection(args.artifact_dir)
+    if base.is_relative_to(owner_root):
+        raise ValueError("artifacts inside caller owner")
+    base.mkdir(parents=True, exist_ok=True)
+    output = Path(tempfile.mkdtemp(prefix="review-", dir=base))
+    receipt = {
+        "schema_version": 1, "verdict": "RUNNING",
+        "started_at": datetime.now(timezone.utc).isoformat(), "first_failure": None,
+        "qualification": "bounded synthetic CPU review only; no public/GPU/performance claim",
+        "owner_root": str(owner_root), "owner_commit": args.owner_commit,
+        "original_suite_sha256": NASH_PIN, "review_sha256": sha(__file__),
+        "runner_sha256": RUNNER_PIN, "tests": None,
+    }
+    started = time.monotonic()
+    env = {
+        **os.environ, **producer.V3_ENV, OPT_IN: "1",
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", "PYTEST_ADDOPTS": "", "PYTEST_PLUGINS": "",
+        "PYTHONDONTWRITEBYTECODE": "1", "TMPDIR": str(output),
+        "PYTHONPATH": os.pathsep.join(map(str, (ROOT, ROOT / "src", ROOT / "benchmarks"))),
+        "OPENOPT_PUBLIC_AUDIT_OWNER_ROOT": str(owner_root),
+        "OPENOPT_PUBLIC_AUDIT_OWNER_COMMIT": args.owner_commit,
+        "OPENOPT_PUBLIC_AUDIT_NASH_FILE": str(NASH),
+        "OPENOPT_PUBLIC_AUDIT_ARTIFACT_ROOT": str(output),
+    }
+    for name in ("OPENOPT_SHARD_COLLECTION", "OPENOPT_SHARD_GROUPING",
+                 "OPENOPT_SHARD_FIXTURE_FILES"):
+        env.pop(name, None)
+
+    def logged(command, name, timeout, stage_env):
+        status = {"command": command, "timeout_s": timeout, "timeout": False}
+        with (output / f"{name}.log").open("x") as log:
+            log.write(f"command={command!r}\n")
+            log.flush()
+            process = subprocess.Popen(command, cwd=ROOT, env=stage_env, stdout=log,
+                                       stderr=subprocess.STDOUT, start_new_session=True)
+            try:
+                status["returncode"] = process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                status["timeout"] = True
+                os.killpg(process.pid, signal.SIGKILL)
+                status["returncode"] = process.wait()
+            finally:
+                log.write(f"\nreturncode={status['returncode']} timeout={status['timeout']}\n")
+        status["log_sha256"] = sha(output / f"{name}.log")
+        receipt[name + "_process"] = status
+        if status["timeout"]:
+            raise ValueError(f"owned {name} process group timed out")
+        return status["returncode"]
+
+    try:
+        receipt["owner"] = owner_selection(owner_root, args.owner_commit)
+        receipt["reviewer"] = source_snapshot(ROOT)
+        if not receipt["reviewer"]["clean"]:
+            raise ValueError("review CLI requires clean frozen reviewer")
+        target = "tests/test_public_loaded_repair_independent.py"
+        collection_env = {**env, "OPENOPT_SHARD_COLLECTION": str(output / "collection.json")}
+        assert logged([
+            sys.executable, "-B", "-m", "pytest", "--collect-only", "-q",
+            "-p", "scripts.verify_sharded", "-o", "addopts=",
+            "-o", f"cache_dir={output / 'collection-cache'}", target,
+        ], "collection", 30, collection_env) == 0
+        nodes = corpus.read_json(output / "collection.json")["nodeids"]
+        assert len(nodes) == len(set(nodes)) == 84
+        receipt["collection"] = {"nodeids": nodes, "sha256": sha(output / "collection.json")}
+        code = logged([
+            sys.executable, "-B", str(ROOT / "scripts/verify.py"), "tests",
+            "--target", target, "--artifact-dir", str(output / "verification"),
+        ], "verification", 179, env)
+        reports = list((output / "verification").glob("tests-*/verification.json"))
+        assert len(reports) == 1
+        verification = reports[0]
+        junit = verification.parent / "pytest.xml"
+        cases = ET.parse(junit).getroot().findall(".//testcase")
+        expected = Counter((node.split("::", 1)[0][:-3].replace("/", "."),
+                            node.split("::", 1)[1]) for node in nodes)
+        actual = Counter((case.attrib["classname"], case.attrib["name"]) for case in cases)
+        counts = {
+            "tests": len(cases), "failures": sum(case.find("failure") is not None for case in cases),
+            "errors": sum(case.find("error") is not None for case in cases),
+            "skipped": sum(case.find("skipped") is not None for case in cases),
+        }
+        receipt.update(
+            tests=counts, missing=sorted((expected - actual).elements()),
+            extra=sorted((actual - expected).elements()),
+            failed_nodeids=[f"{case.attrib['classname']}::{case.attrib['name']}" for case in cases
+                            if case.find("failure") is not None or case.find("error") is not None],
+            verification=str(verification), verification_sha256=sha(verification),
+            junit=str(junit), junit_sha256=sha(junit),
+            leafsum_s=sum(float(case.attrib.get("time", 0)) for case in cases),
+        )
+        report = corpus.read_json(verification)
+        inventory = verification.parent / "pytest-tmp/public-loaded-collection.json"
+        collected = corpus.read_json(inventory)
+        assert collected["nodeids"] == nodes and collected["collected"] == 84
+        assert collected["actual_opt_in"] is True
+        assert collected["caller_owner"] == receipt["owner"]
+        assert collected["original_suite_sha256"] == NASH_PIN
+        assert collected["runner_sha256"] == RUNNER_PIN
+        assert collected["review_sha256"] == sha(__file__)
+        receipt["executed_collection"] = {"path": str(inventory), "sha256": sha(inventory)}
+        assert source_snapshot(ROOT) == receipt["reviewer"]
+        assert owner_selection(owner_root, args.owner_commit) == receipt["owner"]
+        assert sha(NASH) == NASH_PIN
+        receipt["source_consistency"] = "PASS"
+        assert code == 0 and report["verdict"] == "PASS"
+        assert report["source_consistency"]["verdict"] == "PASS"
+        assert report["tests"] == counts == {"tests": 84, "failures": 0, "errors": 0, "skipped": 0}
+        assert not receipt["missing"] and not receipt["extra"]
+        assert all(count == 1 for count in actual.values())
+        positive = [case for case in cases if case.attrib["name"] ==
+                    "test_actual_own_lp_qp_all_backends_modes_original_model_and_calls"]
+        assert len(positive) == 1
+        properties = {prop.attrib["name"]: prop.attrib["value"]
+                      for prop in positive[0].findall("./properties/property")}
+        replay = Path(properties["independent_replay_path"])
+        assert replay.resolve().is_relative_to(output)
+        assert sha(replay) == properties["independent_replay_sha256"]
+        checked = corpus.read_json(replay)
+        assert checked["numerically_replayed"] == 12 and checked["solve_calls"] == 0
+        assert checked["numeric_verdict"] == "PASS" and checked["public_qualified_count"] == 0
+        assert [properties[name] for name in (
+            "workspace_calls", "nested_native_calls", "refinement_proposals")] == ["12", "4", "4"]
+        receipt["positive"] = {
+            "workspace_calls": 12, "nested_native_calls": 4, "refinement_proposals": 4,
+            "replay": str(replay), "replay_sha256": sha(replay),
+            "numerically_replayed": 12, "replay_solve_calls": 0,
+        }
+        receipt["verdict"] = "PASS"
+    except Exception as error:
+        receipt.update(verdict="FAIL", first_failure=f"{type(error).__name__}: {error}")
+    finally:
+        receipt.update(finished_at=datetime.now(timezone.utc).isoformat(),
+                       wall_s=time.monotonic() - started)
+        write(output / "receipt.json", receipt)
+        print(f"PUBLIC_PORTABLE_REVIEW verdict={receipt['verdict']} "
+              f"receipt={output / 'receipt.json'} sha256={sha(output / 'receipt.json')}", flush=True)
+    return 0 if receipt["verdict"] == "PASS" else 1
+
+
 if __name__ == "__main__":
+    if "--review" in sys.argv:
+        raise SystemExit(review_cli(sys.argv[1:]))
     if "--scan-only" in sys.argv:
         raise SystemExit(scan(sys.argv[1:]))
     if len(sys.argv) == 5 and sys.argv[1] == "--observe-worker":

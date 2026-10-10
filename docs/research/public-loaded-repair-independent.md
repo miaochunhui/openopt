@@ -2,7 +2,7 @@
 
 ## Frozen Target And Scope
 
-Target c18300a53a255f1be2d887430490ddf9d9fbd9b9, qualifier SHA256
+Reviewed production bytes at c18300a53a255f1be2d887430490ddf9d9fbd9b9, qualifier SHA256
 e0b65c9f0fd3070a90ac2082d059c85e98e8ee6fff21371732f1fc25a51fb25b.
 Only the new independent test and this document are writable. The producer,
 main, existing Nash review, cluster, GPU, dependencies and infra are read-only.
@@ -15,7 +15,13 @@ tests/test_public_v3_binding_independent.py, SHA256
 Its original 72 tests are imported as the same function objects. Parametrized
 negative expectations and the loaded/restored counterexample are not edited.
 The imported module's explicit target root, freeze and qualifier caller pin
-select this repair. The other six source pins are unchanged. This is a new
+select this repair. The other six source pins are unchanged. The portable
+review caller explicitly selects a clean owner root and full Git commit;
+all seven original reviewed source files must match that commit's Git blobs
+and current reviewer bytes exactly. Cherry-pick ancestry is not a source-byte
+oracle and is not required. Wrong/short caller commit, dirty owner, altered
+Git blob, current source mismatch and cached foreign producer still reject.
+This is a new
 review harness, not a retrospective rewrite of the old 0152d6d evidence.
 
 Old source-pin mismatch is reproduced as an interface probe. The old observer
@@ -65,8 +71,13 @@ evidence, not this review's full denominator.
 
 ## Execution And Limits
 
-Artifacts are external under
+The historical artifacts remain external under
 /hf3fs-jd/data/tmp/openopt-release-20261010/public-loaded-repair-independent/.
+New artifacts may use a different caller-selected external root. The unchanged
+Nash `external_root` function is bound to the actual pytest basetemp before
+fixtures run, and that same root is explicitly passed to observation workers.
+Escaping it or writing inside current/owner/Nash repositories still rejects.
+This changes invocation selection, not path-check logic or numerical gates.
 The actual worker opt-in is OPENOPT_RUN_PUBLIC_V3_INDEPENDENT_TESTS=1.
 Missing opt-in explicitly skips actual controls, not acceptance. Missing or
 different native runtime after opting in fails, without installing or
@@ -76,7 +87,10 @@ are fixed to one.
 The review depends on the pinned unchanged Nash file at its explicitly named
 local path. Absence or mutation fails loudly, not silently reducing coverage.
 This local dependency is intentional for the requested unchanged-function
-review and does not pretend to be a portable distributed suite.
+review. A relocated unchanged file may be selected with
+`OPENOPT_PUBLIC_AUDIT_NASH_FILE`; its exact original SHA remains mandatory.
+The review still requires those original bytes and the declared native runtime,
+not an arbitrary file or substituted observer.
 
 Use the existing validation interpreter with scripts/verify.py tests,
 --target tests/test_public_loaded_repair_independent.py and a fresh external
@@ -137,3 +151,60 @@ verdict. Complete collection is 84 nodes: original 72 unchanged assertions,
 nine live loaded negatives and three harness/target-selection controls.
 The full clean run must report 84 passed, zero failures/errors/skips and
 source_consistency PASS before bounded scope signoff.
+
+## Portable Harness Repair
+
+The main-tree original receipt is retained unchanged at
+`/hf3fs-jd/data/tmp/openopt-release-20261010/resume-chair-afb1f9b-public-independent-v1/tests-8jis3w8w/verification.json`,
+SHA256 `355f2abc6a484ab287cc2d82488dfef6c43e8157a034b458ad3565a1cb04caee`.
+It records one failure, 58 passes, 25 errors, zero skips in 8.77 pytest seconds.
+The selected c18300a commit is not an ancestor after cherry-pick integration,
+despite exact reviewed production bytes. The old fixed artifact prefix rejects
+the caller's different actual basetemp, causing fixture errors before solves.
+These are harness portability failures, not evidence of numerical acceptance;
+neither that FAIL nor the old original 72/observer 83+1 failures is relabelled.
+
+Repair write set is only this document and its test in
+`/data/dev/openopt-wt-release4-20261010-public-portable-audit`, from clean
+`afb1f9bc19acd40fef9c656c7e7ce2c45db43511`. All original Nash test function
+objects and their numerical assertions/negative controls remain unchanged.
+The full collection stays exactly 84, not a reduced or skipped denominator.
+The harness self-check additionally exercises incorrect/short Git caller
+pins, source-repository destinations and paths outside actual basetemp.
+
+The machine entry requires explicit CLI and inherited caller agreement.
+Its ordinary tests may use default clean c18300a owner for compatibility,
+but final current-source acceptance must choose the actual clean owner.
+
+```bash
+sudo -n -u infra env CUDA_VISIBLE_DEVICES=-1 PYTHONDONTWRITEBYTECODE=1 \
+  OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+  OPENOPT_PUBLIC_AUDIT_OWNER_ROOT=/data/dev/openopt \
+  OPENOPT_PUBLIC_AUDIT_OWNER_COMMIT=afb1f9bc19acd40fef9c656c7e7ce2c45db43511 \
+  /hf3fs-jd/data/tmp/openopt-validation-env/bin/python -B \
+  /data/dev/openopt-wt-release4-20261010-public-portable-audit/tests/test_public_loaded_repair_independent.py \
+  --review --owner-root /data/dev/openopt \
+  --owner-commit afb1f9bc19acd40fef9c656c7e7ce2c45db43511 \
+  --artifact-dir /hf3fs-jd/data/tmp/openopt-release-20261010/public-portable-audit/clean-full-v1
+```
+
+The clean reviewer must be committed before this entry runs. Its fresh
+`review-*/receipt.json` records actual 84 identities, complete JUnit counts,
+missing/extra multisets, original/producer/reviewer/caller pins, full source
+before/after, independent 12-row numerical replay with zero solve calls and
+real 12 workspace/four OSQP/four refinement observations. Inner verification,
+outer and actually executed collection, JUnit, logs and replay have byte pins.
+Every failure retains a non-PASS terminal receipt and original failed identities.
+The verification timeout remains 179 seconds; a timeout kills only the owned
+process group and is FAIL, not a retry or acceptance.
+
+Scope remains synthetic CPU loaded-source/numerical regression, not an actual
+public corpus, CUDA, commercial qualification, performance or remote attestation.
+Main integration requires a new caller-selected current-source receipt.
+
+The repair preflight is
+`public-portable-audit/preflight-v1/tests-j5ebtz2z/verification.json`: eleven
+passed, zero failures/errors/skips, 6.62 pytest seconds, source-consistency
+PASS. It exercises current caller pin/byte selection and the nine live loaded
+negatives in a different output prefix. This is development evidence only;
+the complete clean receipt is separately produced by the entry above.
