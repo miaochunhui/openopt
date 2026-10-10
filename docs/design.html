@@ -39,6 +39,13 @@ use SCIP/HiGHS under equivalent formulations and budgets.</p>
 regression tests validate current code. The exact-snapshot check is a separate
 tool, not a permanent ban on independent algorithm changes. Wheel validation
 checks the module set and solves a synthetic problem from an isolated install.</p>
+<p>The first independent fix closes a durable-service publication race.
+Successful terminal readers validate the result and enforce its divergence
+circuit before reporting readiness; admission also rechecks the circuit after
+online solving. Fenced rejected results still cannot open circuits. Numerical
+solvers and their parameters are unchanged. An audited reset fences replay of
+the same divergence evidence inside the circuit transaction, while new
+divergence evidence may still open the route.</p>
 <h2>Maintenance And Release</h2>
 <p>Private deployment, proprietary data, credentials, commercial PDFs and
 historical results are excluded. Results and logs stay outside the worktree.

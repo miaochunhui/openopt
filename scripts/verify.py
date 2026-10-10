@@ -99,6 +99,13 @@ def run(mode: str, artifact_root: Path, require_cuda: bool, targets: list[str] |
 
         report["cuda_available"] = torch.cuda.is_available()
         report["cuda_runtime"] = torch.version.cuda
+        report["hardware"] = {
+            "cpu_count": os.cpu_count(),
+            "gpu_names": [
+                torch.cuda.get_device_name(index)
+                for index in range(torch.cuda.device_count())
+            ] if report["cuda_available"] else [],
+        }
         if require_cuda and not report["cuda_available"]:
             raise RuntimeError("CUDA verification requested but CUDA is unavailable")
         targets = targets or (SMOKE_TESTS if mode == "smoke" else ["tests"])

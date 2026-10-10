@@ -8,7 +8,8 @@ Migration date: 2026-10-10 (Asia/Shanghai).
 - Source commit: `a0300f07efaf9669e18d236f71c739490d3afe2a`.
 - Destination: `/data/dev/openopt`, remote `git@gitee.com:sdfwefqaa/openopt.git`.
 - Method: a new, independently reviewed snapshot, not a mirror of source history.
-- All `src/openpo` Python files are preserved byte-for-byte.
+- All `src/openpo` Python files are preserved byte-for-byte in the initial
+  import commit. Independent fixes are separate follow-up commits.
 - Selected source tests, synthetic benchmark tools and MPO specifications are
   preserved byte-for-byte. The complete machine-readable lists and SHA256
   digests are in `migration-manifest.json`.
@@ -48,7 +49,7 @@ respective licenses and are installed separately, not vendored.
 ## Reproduction
 
 ```bash
-python3 scripts/migrate_openpo.py --check
+python3 scripts/migrate_openpo.py --provenance
 python3 scripts/iteration_gate.py smoke
 python3 scripts/verify.py
 ```
@@ -75,3 +76,5 @@ durable shadow service: a divergent job becomes `SUCCEEDED` before its route
 circuit is persisted. A deterministic delayed-publication regression reproduces
 the race. The initial commit preserves imported source bytes; the following
 maintenance commit fixes this issue only in openopt, without changing optimizer.
+Audited circuit resets also fence delayed publication or replay of the same
+divergence evidence; a new divergence can still open the circuit.

@@ -572,6 +572,20 @@ class SQLiteCertificationPolicyStore:
             ).fetchone()
             if existing is not None:
                 return False
+            # A late publisher or terminal reader must not undo an audited
+            # reset of this evidence. New divergence evidence still opens.
+            reset = connection.execute(
+                """
+                SELECT * FROM circuit_resets
+                WHERE route_key = ? AND policy_sha256 = ?
+                    AND circuit_evidence_sha256 = ?
+                ORDER BY reset_id DESC LIMIT 1
+                """,
+                (route_key, policy_sha256, evidence_sha256),
+            ).fetchone()
+            if reset is not None:
+                self._circuit_reset(reset)
+                return False
             connection.execute(
                 """
                 INSERT INTO route_circuits(

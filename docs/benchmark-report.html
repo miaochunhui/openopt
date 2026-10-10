@@ -24,6 +24,27 @@ failures, skips, dependency versions and whether CUDA is available.</p>
 projection, solver and constraint contracts. Full verification includes the
 complete migrated test suite and byte-level provenance checks. GPU skips mean
 that GPU cases were not verified; CPU passes must not be relabeled GPU passes.</p>
+<h2>Verified Extraction / 2026-10-10</h2>
+<p>The independent service fixes passed the complete local regression at
+06:46:21 UTC: <strong>1068 passed, zero failures, zero errors, zero skips</strong>.
+The run recorded 125 upstream OSQP deprecation warnings. Deterministic tests
+cover delayed divergence publication and audited-reset replay; the pre-fix
+failures are retained with the verification artifacts.</p>
+<p>Python 3.10.20; PyTorch 2.8.0+cu128; CUDA runtime 12.8; NumPy 2.2.6;
+SciPy 1.15.3; pytest 8.4.2; OSQP 1.0.4; Clarabel 0.11.1; HiGHS Python
+1.15.1. The host reports 256 logical CPUs and two NVIDIA GeForce RTX 3080
+devices. Explicit CPU and <code>cuda:0</code> synthetic QP examples converged,
+with maximum constraint residual 0.0. This is not a multi-GPU qualification.</p>
+<p>The 48-module wheel passed an isolated install, public API identity checks
+and synthetic solve. Import provenance verifies 110 original files and
+1,750,809 bytes in the initial commit; independent fixes remain separate.</p>
+<p>Reproduction: <code>python3 scripts/verify.py --require-cuda</code> and
+<code>python3 scripts/check_distribution.py</code>.
+Local evidence:
+<code>/hf3fs-jd/data/tmp/openopt-verification/tests-cl__yanf/verification.json</code>
+and
+<code>/hf3fs-jd/data/tmp/openopt-distribution/wheel-bx3101xo/distribution.json</code>.
+Evidence paths are local artifacts, not files distributed in the repository.</p>
 <h2>Performance Qualification</h2>
 <p>Timing comparisons require the same objective and constraints, matched
 input hashes, explicit CPU/CUDA devices, warm-up separation, cold/hot timings,

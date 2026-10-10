@@ -366,6 +366,19 @@ def test_policy_store_circuit_reset_requires_cooldown_and_is_idempotent(
     )
     assert changed is False
     assert replay == reset
+    assert not store.open_circuit(
+        route_key="cuda:0",
+        policy_sha256=policy.policy_sha256,
+        evidence_sha256=evidence_sha256,
+        reason="shadow_diverged",
+    )
+    assert store.circuit_state("cuda:0") is None
+    assert store.open_circuit(
+        route_key="cuda:0",
+        policy_sha256=policy.policy_sha256,
+        evidence_sha256=_digest(35),
+        reason="shadow_diverged",
+    )
     with pytest.raises(CertificationPolicyConflictError, match="different reset evidence"):
         store.reset_circuit(
             route_key="cuda:1",

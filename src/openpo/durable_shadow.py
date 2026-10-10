@@ -604,6 +604,12 @@ class DurableShadowCertificationService:
                     expected_primary_request_sha256=primary_request_sha256,
                     expected_shadow_request_sha256=shadow_request_sha256,
                 )
+            if self._policy_store is not None:
+                circuit = self._policy_store.circuit_state(request.fast_device)
+                if circuit is not None:
+                    raise ShadowRouteCircuitOpenError(
+                        f"shadow route {request.fast_device!r} is circuit-open: {circuit.reason}"
+                    )
             service_time_route_key = self._service_time_route_key(request.fast_device)
             self._enforce_backpressure(
                 additional_jobs=1,
@@ -703,23 +709,6 @@ class DurableShadowCertificationService:
                     raise RuntimeError("durable shadow success is missing terminal payload")
                 online = production_from_payload(decode_payload(job.online_payload))
                 result = _validated_terminal_result(job, ticket, online)
-                if (
-                    self._policy_store is not None
-                    and result.decision is ShadowDecision.DIVERGED
-                ):
-                    policy_record = self._policy_store.decision_record_by_ticket(
-                        ticket.ticket_sha256
-                    )
-                    if policy_record is None:
-                        raise RuntimeError(
-                            "diverged shadow result is missing policy decision evidence"
-                        )
-                    self._policy_store.open_circuit(
-                        route_key=policy_record.route_key,
-                        policy_sha256=policy_record.decision.policy_sha256,
-                        evidence_sha256=result.result_sha256,
-                        reason="shadow_diverged",
-                    )
                 self._journal.mark_observed(ticket.ticket_sha256)
                 return result
             if job.state == "FAILED":
@@ -841,7 +830,28 @@ class DurableShadowCertificationService:
         stored = _ticket_from_payload(decode_payload(job.ticket_payload))
         if stored != ticket:
             raise KeyError(f"unknown or forged durable shadow ticket {ticket.ticket_sha256}")
+        # The job and policy stores commit separately. Readers close the
+        # publication window before exposing a successful divergent terminal.
+        if self._policy_store is not None and job.state == "SUCCEEDED":
+            online = production_from_payload(decode_payload(job.online_payload))
+            result = _validated_terminal_result(job, ticket, online)
+            self._enforce_terminal_circuit(ticket, result)
         return job
+
+    def _enforce_terminal_circuit(
+        self, ticket: ShadowTicket, result: ShadowCertificationResult,
+    ) -> None:
+        if self._policy_store is None or result.decision is not ShadowDecision.DIVERGED:
+            return
+        policy_record = self._policy_store.decision_record_by_ticket(ticket.ticket_sha256)
+        if policy_record is None:
+            raise RuntimeError("diverged shadow result is missing policy decision evidence")
+        self._policy_store.open_circuit(
+            route_key=policy_record.route_key,
+            policy_sha256=policy_record.decision.policy_sha256,
+            evidence_sha256=result.result_sha256,
+            reason="shadow_diverged",
+        )
 
     def _scheduler_loop(self) -> None:
         interval = min(1.0, self._heartbeat_seconds)
@@ -901,20 +911,7 @@ class DurableShadowCertificationService:
             )
             if not accepted:
                 return
-            if self._policy_store is not None and result.decision is ShadowDecision.DIVERGED:
-                policy_record = self._policy_store.decision_record_by_ticket(
-                    ticket.ticket_sha256
-                )
-                if policy_record is None:
-                    raise RuntimeError(
-                        "diverged shadow result is missing policy decision evidence"
-                    )
-                self._policy_store.open_circuit(
-                    route_key=policy_record.route_key,
-                    policy_sha256=policy_record.decision.policy_sha256,
-                    evidence_sha256=result.result_sha256,
-                    reason="shadow_diverged",
-                )
+            self._enforce_terminal_circuit(ticket, result)
         except BaseException as error:
             self._journal.complete_failure(
                 job_id=job.job_id,
