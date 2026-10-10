@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 import copy
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 import fcntl
 import hashlib
@@ -25,6 +26,8 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
+import traceback
 from xml.etree import ElementTree as ET
 
 if __package__:
@@ -350,9 +353,67 @@ def worker(plan_path, plan_pin, phase, output, shard_id=None, runtime_path=None,
 def prepare(repo, plan_path, plan_pin, artifact_root, image, python="python3",
             namespace="devtest", pvc="devtest-3fs", service_account="devbox",
             priority_class="devtest-batch", cpu=4, memory="16Gi", node=None,
-            fixture_aware=False):
+            fixture_aware=False, cli_command=None):
     artifacts = shard.new_artifacts(shared(artifact_root), repo, "cluster-")
-    source_plan = shard.read(plan_path, plan_pin)
+    log_path = artifacts / "prepare.log"
+    receipt_path = artifacts / "prepare.json"
+    started = time.monotonic()
+    receipt = {
+        "schema_version": 1, "kind": "cluster-prepare-receipt",
+        "verdict": "RUNNING", "started_at": stamp(), "pid": os.getpid(),
+        "python_executable": sys.executable,
+        "command": cli_command, "invocation": "CLI" if cli_command is not None else "library",
+        "source_plan": str(plan_path.resolve()), "source_plan_sha256": plan_pin,
+        "log": str(log_path), "first_failure": None, "returncode": None,
+        "qualification": "local preparation only; no Kubernetes or GPU execution",
+    }
+    source_plan = None
+    with log_path.open("x", encoding="utf-8") as log:
+        try:
+            with redirect_stdout(log), redirect_stderr(log):
+                print(f"invocation={receipt['invocation']} command={cli_command!r}", flush=True)
+                print(f"source_plan={receipt['source_plan']} sha256={plan_pin}", flush=True)
+                source_plan = shard.read(plan_path, plan_pin)
+                _prepare_config(repo, plan_path, plan_pin, source_plan, artifacts, image,
+                                python, namespace, pvc, service_account, priority_class,
+                                cpu, memory, node, fixture_aware)
+            receipt.update(
+                verdict="PASS", returncode=0, cluster_plan=str(artifacts / "cluster-plan.json"),
+                cluster_plan_sha256=shard.digest(artifacts / "cluster-plan.json"),
+            )
+        except Exception as error:
+            gate_error = f"{type(error).__name__}: {error}"
+            failed_input = isinstance(source_plan, dict) and source_plan.get("verdict") == "FAIL"
+            source_error = source_plan.get("error") if failed_input else None
+            receipt.update(verdict="FAIL", returncode=1, first_failure={
+                "error": source_error if isinstance(source_error, str) and source_error else gate_error,
+                "source_plan_error": source_error,
+                "gate_error": gate_error, "coordinate": receipt["source_plan"],
+                "source_plan_verdict": source_plan.get("verdict") if isinstance(source_plan, dict)
+                else None,
+            })
+            log.write(f"first_failure={receipt['first_failure']['error']}\n")
+            traceback.print_exc(file=log)
+            raise
+        finally:
+            receipt.update(finished_at=stamp(), wall_s=time.monotonic() - started)
+            log.write(f"OPENOPT_CLUSTER_PREPARE verdict={receipt['verdict']} "
+                      f"returncode={receipt['returncode']}\n")
+            log.flush()
+            os.fsync(log.fileno())
+            receipt["log_sha256"] = shard.digest(log_path)
+            save(receipt_path, receipt)
+            print(f"OPENOPT_CLUSTER_PREPARE verdict={receipt['verdict']} "
+                  f"receipt={receipt_path}", flush=True)
+    print(f"OPENOPT_CLUSTER_PLAN state=PREPARED plan={artifacts / 'cluster-plan.json'} "
+          f"sha256={receipt['cluster_plan_sha256']}", flush=True)
+    return artifacts
+
+
+def _prepare_config(repo, plan_path, plan_pin, source_plan, artifacts, image, python,
+                    namespace, pvc, service_account, priority_class, cpu, memory,
+                    node, fixture_aware):
+    """Keep the original frozen configuration semantics separate from diagnostics."""
     shard.validate_plan(source_plan)
     shard.require(type(fixture_aware) is bool and fixture_aware == (
         source_plan["schema_version"] == 2), "cluster_fixture_explicit_opt_in_required")
@@ -402,9 +463,6 @@ def prepare(repo, plan_path, plan_pin, artifact_root, image, python="python3",
         "state": "PREPARED", "jobs": [], "events": [], "first_failure": None,
         "config_sha256": shard.digest(artifacts / "cluster-plan.json"),
     })
-    print(f"OPENOPT_CLUSTER_PLAN state=PREPARED plan={artifacts / 'cluster-plan.json'} "
-          f"sha256={shard.digest(artifacts / 'cluster-plan.json')}", flush=True)
-    return artifacts
 
 
 def manifest(config, phase, item_id, runtime_pin=None, report_pin=None):
@@ -953,7 +1011,9 @@ def main(argv=None):
         if args.action == "plan":
             prepare(args.repo.resolve(), args.plan, args.plan_sha256, args.artifact_dir,
                     args.image, args.python, args.namespace, args.pvc, args.service_account,
-                    args.priority_class, args.cpu, args.memory, args.node, args.fixture_aware)
+                    args.priority_class, args.cpu, args.memory, args.node, args.fixture_aware,
+                    cli_command=[sys.executable, "-B", str(ROOT / "scripts/cluster_sharded_regression.py"),
+                                 *(sys.argv[1:] if argv is None else argv)])
         elif args.action == "run":
             shard.require(not args.fixture_aware, "fixture_opt_in_is_plan_only")
             admit(args.plan, args.plan_sha256, args.submit)

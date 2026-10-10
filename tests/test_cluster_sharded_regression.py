@@ -188,6 +188,108 @@ def test_prepare_freezes_full_clean_source_and_source_plan(tiny):
     assert len(plan["collection"]["nodeids"]) == 3
 
 
+def prepare_cli(repo, plan_path, plan_pin, root, flags=()):
+    process = root / "caller"
+    process.mkdir(parents=True)
+    command = [
+        sys.executable, "-B", str(tool.ROOT / "scripts/cluster_sharded_regression.py"),
+        "plan", "--repo", str(repo), "--plan", str(plan_path),
+        "--plan-sha256", plan_pin, "--image", "existing-image:fixture",
+        "--artifact-dir", str(root / "preparation"), *flags,
+    ]
+    failure = None
+    try:
+        shard.command_logged(command, tool.ROOT, process, 30, shard.cpu_env(tool.ROOT, process))
+    except shard.GateError as error:
+        failure = error
+    result = shard.read(process / "process.json")
+    assert result["timeout"] is False, "CLI timeout is not an expected rejection"
+    receipts = list((root / "preparation").glob("cluster-*/prepare.json"))
+    assert len(receipts) == 1
+    receipt = shard.read(receipts[0])
+    assert receipt["command"] == command and receipt["invocation"] == "CLI"
+    assert shard.digest(receipt["log"]) == receipt["log_sha256"]
+    assert receipt["returncode"] == result["returncode"]
+    if failure is not None:
+        assert "process_failed_rc=1" in str(failure)
+    else:
+        assert result["returncode"] == 0
+    return receipts[0], receipt
+
+
+@pytest.mark.parametrize("mutation,reason", [
+    ("failed_plan", "original_overbudget_shared_fixture"),
+    ("wrong_pin", "hash_mismatch"),
+    ("missing_plan", "FileNotFoundError"),
+    ("wrong_optin", "explicit_opt_in_required"),
+])
+def test_prepare_real_cli_rejection_retains_firstcause_without_admission(tiny, tmp_path,
+                                                                        mutation, reason):
+    repo, config_path, _ = tiny
+    config = shard.read(config_path)
+    plan_path, pin = Path(config["source_plan"]), config["source_plan_sha256"]
+    flags = ()
+    if mutation == "failed_plan":
+        plan = shard.read(plan_path, pin)
+        plan.update(verdict="FAIL", error="GateError: original_overbudget_shared_fixture")
+        plan_path = tmp_path / "failed-source-plan.json"
+        shard.save(plan_path, plan)
+        pin = shard.digest(plan_path)
+    elif mutation == "wrong_pin":
+        pin = "0" * 64
+    elif mutation == "missing_plan":
+        plan_path = tmp_path / "missing-source-plan.json"
+    else:
+        flags = ("--fixture-aware",)
+    original_pin = shard.digest(plan_path) if plan_path.is_file() else None
+    before = shard.snapshot(repo)
+    path, receipt = prepare_cli(repo, plan_path, pin, tmp_path / "refusal", flags)
+    assert receipt["verdict"] == "FAIL" and receipt["returncode"] == 1
+    assert reason in receipt["first_failure"]["error"]
+    assert receipt["source_plan_sha256"] == pin
+    assert receipt["first_failure"]["coordinate"] == str(plan_path.resolve())
+    assert not (path.parent / "cluster-plan.json").exists()
+    assert not (path.parent / "run.json").exists()
+    assert not (path.parent / "source").exists()
+    assert not list(path.parent.glob("job-*.json"))
+    log = Path(receipt["log"]).read_text()
+    assert reason in log and "verdict=FAIL returncode=1" in log
+    if mutation == "failed_plan":
+        assert "invalid_plan_status" in receipt["first_failure"]["gate_error"]
+        retained_pin, log_pin = shard.digest(path), shard.digest(receipt["log"])
+        _, second = prepare_cli(repo, plan_path, pin, tmp_path / "second-refusal")
+        assert second["first_failure"]["error"] == receipt["first_failure"]["error"]
+        assert shard.digest(path) == retained_pin and shard.digest(receipt["log"]) == log_pin
+    assert shard.snapshot(repo) == before
+    assert (shard.digest(plan_path) if plan_path.is_file() else None) == original_pin
+
+
+def test_prepare_real_cli_success_preserves_original_config_semantics(tiny, tmp_path):
+    repo, old_path, _ = tiny
+    old = shard.read(old_path)
+    path, receipt = prepare_cli(
+        repo, Path(old["source_plan"]), old["source_plan_sha256"], tmp_path / "success")
+    assert receipt["verdict"] == "PASS" and receipt["first_failure"] is None
+    config_path = path.parent / "cluster-plan.json"
+    config, plan = tool.load_config(config_path, receipt["cluster_plan_sha256"])
+    expected = copy.deepcopy(old)
+    expected.update(
+        artifacts=str(path.parent), plan=str(path.parent / "plan.json"),
+        plan_sha256=shard.digest(path.parent / "plan.json"), created_at=config["created_at"],
+    )
+    assert config == expected
+    assert config_path.read_bytes() == shard.encoded(expected)
+    original = shard.read(old["source_plan"], old["source_plan_sha256"])
+    original.update(repo=str(path.parent / "source"), collection=plan["collection"])
+    assert plan == original
+    state = shard.read(path.parent / "run.json")
+    assert state == {
+        "state": "PREPARED", "jobs": [], "events": [], "first_failure": None,
+        "config_sha256": shard.digest(config_path),
+    }
+    assert not list(path.parent.glob("job-*.json"))
+
+
 def test_manifest_zero_gpu_no_install_no_token_no_retry(tiny):
     _, path, _ = tiny
     config = shard.read(path)
@@ -535,6 +637,30 @@ def test_fixture_v2_explicit_optin_and_full_metadata_not_nodes_rebuild(fixture_t
     ]) == 1
 
 
+def test_fixture_v2_prepare_real_cli_success_preserves_full_transport(fixture_tiny, tmp_path):
+    repo, old_path, _ = fixture_tiny
+    old = shard.read(old_path)
+    path, receipt = prepare_cli(
+        repo, Path(old["source_plan"]), old["source_plan_sha256"],
+        tmp_path / "v2-success", ("--fixture-aware",))
+    assert receipt["verdict"] == "PASS" and receipt["first_failure"] is None
+    config_path = path.parent / "cluster-plan.json"
+    config, plan = tool.load_config(config_path, receipt["cluster_plan_sha256"])
+    expected = copy.deepcopy(old)
+    expected.update(
+        artifacts=str(path.parent), plan=str(path.parent / "plan.json"),
+        plan_sha256=shard.digest(path.parent / "plan.json"), created_at=config["created_at"],
+    )
+    assert config == expected
+    assert config_path.read_bytes() == shard.encoded(expected)
+    original = shard.read(old["plan"], old["plan_sha256"])
+    original.update(repo=str(path.parent / "source"), collection=plan["collection"])
+    assert plan == original
+    assert shard.read(plan["collection"]["path"])["fixture_audit"] == original["grouping"]["audit"]
+    assert not list(path.parent.glob("job-*.json"))
+    assert shard.read(path.parent / "run.json")["state"] == "PREPARED"
+
+
 def test_fixture_v2_runtime_install_path_mapping_preserves_all_semantics(fixture_tiny, tmp_path):
     _, path, _ = fixture_tiny
     plan = shard.read(shard.read(path)["plan"])
@@ -715,10 +841,15 @@ def accept_batch(batch, artifact_root):
     output = Path(tempfile.mkdtemp(prefix=f"{batch}-", dir=root))
     process = output / "process"
     process.mkdir()
+    prepare_tests = {
+        "test_prepare_real_cli_rejection_retains_firstcause_without_admission",
+        "test_prepare_real_cli_success_preserves_original_config_semantics",
+    }
     targets = [
         f"tests/test_cluster_sharded_regression.py::{name}"
         for name in sorted(globals()) if name.startswith("test_")
-        and name.startswith("test_fixture_v2_") == (batch == "fixture-v2")
+        and ("fixture-v2" if name.startswith("test_fixture_v2_")
+             else "prepare" if name in prepare_tests else "v1") == batch
     ]
     report = {
         "kind": "bounded-real-cpu-fake-cluster-tests",
@@ -727,7 +858,8 @@ def accept_batch(batch, artifact_root):
         "qualification": "CPU fixture correctness only; no cluster/container/speed claim",
     }
     try:
-        shard.require(targets and batch in ("v1", "fixture-v2"), "empty_or_invalid_test_batch")
+        shard.require(targets and batch in ("v1", "fixture-v2", "prepare"),
+                      "empty_or_invalid_test_batch")
         before = verify.source_snapshot(tool.ROOT)
         report["source"] = before
         command = [sys.executable, "-B", "scripts/verify.py", "tests",
@@ -766,7 +898,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--batch", required=True, choices=("v1", "fixture-v2"))
+    parser.add_argument("--batch", required=True, choices=("v1", "fixture-v2", "prepare"))
     parser.add_argument("--artifact-dir", required=True, type=Path)
     args = parser.parse_args()
     accept_batch(args.batch, args.artifact_dir)

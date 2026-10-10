@@ -227,3 +227,94 @@ Postcondition smoke is 80 passes/four explicit CUDA skips/6.17 seconds at
 These receipts bind dirty precommit source bytes; clean-source reacceptance
 uses the same two bounded commands after this three-file commit, retaining
 separate evidence rather than rewriting these receipts.
+
+## Preparation Failure Receipts
+
+The preparation-receipt repair starts from frozen `ba675eba`, independently
+of main integration. It changes only this wrapper, its tests and this document.
+Sharder grouping, cost estimates, CPU capacity, Job deadlines, concurrency,
+runtime transport and admission state transitions are unchanged.
+
+Every preparation that reaches the authorized external artifact allocation
+gets its own `cluster-*/prepare.log` and `prepare.json`. Both successful and
+failed CLI preparation records include the actual Python executable, PID,
+CLI argument list, caller-pinned input-plan location/hash, elapsed time,
+returncode, first cause, terminal verdict and log SHA256. Library calls are
+explicitly labeled library invocations rather than fabricated CLI executions.
+No credentials are read by the receipt code; logs contain CLI parameters and
+tracebacks, so callers must not pass secrets as parameters.
+
+A pinned source plan already marked FAIL is still rejected by the original
+validator before clone/config/run-ledger creation. Its original `error` is
+retained separately from the immediate `invalid_plan_status` gate error.
+Missing files, wrong pins and opt-in mismatch retain their own actual errors.
+Each attempt uses a fresh directory; re-running does not overwrite an earlier
+receipt, log or failed input. Existing success config/plan/ledger bytes retain
+their original semantics apart from the already expected output relocation,
+new hashes and creation time. New diagnostic sidecars are not config fields
+and are not runtime or regression qualification.
+
+Allocation failure outside authorized shared 3FS, an inaccessible artifact
+root, abrupt process termination, or a failure while writing the receipt can
+still prevent a terminal receipt. Those failures are not success and have no
+fallback to local storage. Argparse rejection before preparation is also
+outside this receipt boundary. Do not claim broader durable-CLI coverage.
+
+The existing CLI needs no new flags:
+
+```bash
+sudo -n -u infra env CUDA_VISIBLE_DEVICES=-1 PYTHONDONTWRITEBYTECODE=1 /hf3fs-jd/data/tmp/openopt-validation-env/bin/python -B scripts/cluster_sharded_regression.py plan --repo /data/dev/openopt-wt-release4-20261010-cluster-fixture-v2 --plan /hf3fs-jd/data/tmp/openopt-release-20261010/cluster-fixture-v2-review/frozen-ba-cost-plan/plan-pq45_4do/plan.json --plan-sha256 7fc799fab4f4b18fe9d5fbec02a3a6b888278f60cf63bb2ea70cd373a2c5b9a7 --fixture-aware --image m.daocloud.io/docker.io/lmsysorg/sglang:dev-dsv41 --artifact-dir /hf3fs-jd/data/tmp/openopt-release-20261010/cluster-prepare-receipt/real-budget-refusal
+```
+
+That historical ba input is FAIL, not an admissible final-source plan. The
+command must return 1, retain its source first cause and emit the external
+receipt coordinate; it must not create a cluster config or submit any Job.
+The old 507.420-second mixed prediction has stale known histories and unknown
+costs. Owner same-source remeasurement remains required; this repair never
+lowers unknown estimates or extends a deadline.
+
+The real CLI controls use external clean tiny Git fixtures, bounded caller
+process logs and the actual wrapper CLI, not mocked `prepare`. They check FAIL
+for a failed source plan, wrong hash, missing file and wrong opt-in; duplicate
+failed calls must preserve old bytes. V1 and explicit v2 successful calls
+compare exact config bytes with the original expected semantics and retain
+full transport metadata. Neither successful CLI preparation admits a Job.
+
+Development `minimal-v1/tests-_f85rxu7/verification.json`, below
+`/hf3fs-jd/data/tmp/openopt-release-20261010/cluster-prepare-receipt/`, retains
+five passing assertions but a final source-consistency FAIL caused by an edit
+during testing. It is not accepted evidence. Subsequent fixed-source batches
+use the existing 179-second test-file entry and separate external artifacts;
+never rewrite the failed receipt or promote its pytest returncode to PASS.
+
+The next combined v1 batch
+`bounded-v2/v1-df26xw4u/acceptance.json` hit its 179-second process deadline
+and remains FAIL/worker_timeout, with the partial log retained. V2 at
+`bounded-v2/fixture-v2-_shab53s/acceptance.json` passed ten cases and source
+consistency in 109.410349 process seconds on unchanged dirty development bytes.
+Neither is clean-commit acceptance.
+
+New CLI controls now use a separate `--batch prepare` (five cases); existing
+v1 remains 25 cases, fixture-v2 contains ten cases including its CLI success
+transport control. Name classification assigns every test to exactly one
+batch without reducing production collection or changing any production
+parallelism/deadline. All three batches retain the original 179-second gate:
+
+```bash
+sudo -n -u infra env CUDA_VISIBLE_DEVICES=-1 PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 /hf3fs-jd/data/tmp/openopt-validation-env/bin/python -B tests/test_cluster_sharded_regression.py --batch prepare --artifact-dir /hf3fs-jd/data/tmp/openopt-release-20261010/cluster-prepare-receipt/reaccept
+```
+
+Fixed-source development prepare acceptance is five passes/zero skip at
+`bounded-v3/prepare-jrwvbhxr/acceptance.json`, process wall 45.826756 seconds,
+source consistency PASS over 285 files. This is dirty precommit evidence.
+The actual historical budget refusal at
+`real-budget-refusal/cluster-vtja_z5c/prepare.json` retains the original
+507.420-second source error, validator error `invalid_plan_status`, CLI
+returncode 1 and external log SHA256
+`5c8eab0eb9de4696b9c9520fb79ba92e7792dfd500d283f24e0f537c283f0bea`.
+Its receipt SHA256 is
+`a48b24e1ca9e41033b4dd6009ce76d27c5c55b906b4f4461e37922cd9480639a`;
+no config, source clone or run ledger is produced. This is a real local CLI
+rejection of historical input, not current-source cost remeasurement.
+After commit, clean reacceptance runs all three disjoint batches under
+`clean-v4/`, preserving development negatives unchanged.
