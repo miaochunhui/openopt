@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sqlite3
@@ -9,6 +10,7 @@ import subprocess
 import sys
 from threading import Barrier, Event, Lock
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -657,58 +659,165 @@ def test_durable_shadow_replays_expired_attempt_after_process_kill(tmp_path) -> 
     recovered.shutdown()
 
 
-def test_durable_shadow_replays_two_expired_workers_after_process_kill(tmp_path) -> None:
+def _assert_two_distinct_first_executions(evidence: dict) -> None:
+    entered = evidence["entered"]
+    jobs = evidence["jobs"]
+    assert len(entered) == len(jobs) == 2
+    assert len({entry["job_id"] for entry in entered}) == 2, (
+        "two callbacks are not two distinct jobs", entered,
+    )
+    assert {entry["ticket_sha256"] for entry in entered} == {
+        job["ticket_sha256"] for job in jobs
+    }
+    for entry in entered:
+        job = next(job for job in jobs if job["job_id"] == entry["job_id"])
+        assert entry["execution_attempt"] == job["execution_attempt"] == 1
+        assert entry["fence_token"] == job["fence_token"] == 1
+        assert entry["lease_owner"] == job["lease_owner"]
+        assert job["state"] == "LEASED"
+        assert job["lease_deadline"] > evidence["lease_now"]
+
+
+def _assert_replay_once(evidence: dict) -> None:
+    assert all(evidence["passed"])
+    assert evidence["attempts"] == [2, 2], f"actual attempts={evidence['attempts']}"
+    assert evidence["fences"] == [2, 2], f"actual fences={evidence['fences']}"
+    for events in evidence["journal_events"]:
+        assert [event["event_type"] for event in events].count("LEASED") == 2
+        assert [event["event_type"] for event in events].count("SUCCEEDED") == 1
+        assert not any(event["event_type"] in {"FAILED", "FENCED_LATE"} for event in events)
+
+
+def _write_durable_acceptance(tmp_path: Path, **evidence) -> None:
+    from tests.helpers.durable_shadow_multi_crash_worker import source_hashes, write_json
+
+    write_json(tmp_path / "acceptance.json", {
+        "verdict": "PASS", "checked_at": datetime.now(timezone.utc).isoformat(),
+        "source_sha256": source_hashes(), **evidence,
+    })
+
+
+def _run_two_worker_crash(
+    tmp_path: Path, *, mode: str = "synchronized", validate_entry: bool = True,
+) -> dict:
+    from openpo import shadow_journal as journal_module
+    from tests.helpers.durable_shadow_multi_crash_worker import write_json
+
     journal_path = tmp_path / "shadow.sqlite3"
     tickets_path = tmp_path / "tickets.json"
     entered_path = tmp_path / "entered"
     helper = Path(__file__).parent / "helpers" / "durable_shadow_multi_crash_worker.py"
-    process = subprocess.Popen(
-        [
-            sys.executable,
-            str(helper),
-            str(journal_path),
-            str(tickets_path),
-            str(entered_path),
-        ],
-        cwd=Path(__file__).resolve().parents[1],
-    )
-    try:
-        deadline = time.monotonic() + 20.0
-        while time.monotonic() < deadline and not (
-            tickets_path.exists() and entered_path.exists()
-        ):
-            if process.poll() is not None:
-                raise RuntimeError(
-                    f"multi-worker crash helper exited early with {process.returncode}"
-                )
-            time.sleep(0.02)
-        assert tickets_path.exists() and entered_path.exists()
-        process.kill()
-        assert process.wait(timeout=10.0) < 0
-    finally:
-        if process.poll() is None:
+    with (tmp_path / "crash-worker.log").open("x", encoding="utf-8") as log:
+        process = subprocess.Popen(
+            [sys.executable, "-B", str(helper), "worker",
+             "--journal", str(journal_path), "--tickets", str(tickets_path),
+             "--entered", str(entered_path), "--mode", mode],
+            cwd=Path(__file__).resolve().parents[1],
+            stdout=log, stderr=subprocess.STDOUT,
+        )
+        try:
+            deadline = time.monotonic() + 20.0
+            while time.monotonic() < deadline and not (
+                tickets_path.exists() and entered_path.exists()
+            ):
+                if process.poll() is not None:
+                    raise RuntimeError(
+                        f"multi-worker crash helper exited early with {process.returncode}; "
+                        f"log={tmp_path / 'crash-worker.log'}"
+                    )
+                time.sleep(0.02)
+            assert tickets_path.exists() and entered_path.exists(), (
+                f"crash readiness missing; log={tmp_path / 'crash-worker.log'}"
+            )
+            entry = json.loads(entered_path.read_text(encoding="utf-8"))
+            if validate_entry:
+                _assert_two_distinct_first_executions(entry)
+            with sqlite3.connect(journal_path) as connection:
+                rows = connection.execute(
+                    "SELECT job_id, state, execution_attempt, fence_token "
+                    "FROM jobs ORDER BY job_id"
+                ).fetchall()
+            assert rows == [
+                (job["job_id"], job["state"], job["execution_attempt"], job["fence_token"])
+                for job in entry["jobs"]
+            ], "entry evidence no longer matches live journal"
             process.kill()
-            process.wait(timeout=10.0)
+            assert process.wait(timeout=10.0) < 0
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=10.0)
 
     tickets = [
         ShadowTicket(**payload)
         for payload in json.loads(tickets_path.read_text(encoding="utf-8"))
     ]
-    time.sleep(0.6)
-    recovered = DurableShadowCertificationService(
-        journal_path,
-        max_pending=2,
-        worker_count=2,
-        lease_seconds=0.5,
-        heartbeat_seconds=0.1,
-    )
-    results = [recovered.collect(ticket, timeout=10.0) for ticket in tickets]
+    # Advance only journal lease time after SIGKILL. No sleeps or fabricated
+    # journal states: recovery performs real claims, certification and commits.
+    expired_now = max(
+        job["lease_deadline"] for job in entry["jobs"]
+        if job["lease_deadline"] is not None
+    ) + 0.001
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(journal_module, "time", SimpleNamespace(time=lambda: expired_now))
+        recovered = DurableShadowCertificationService(
+            journal_path, max_pending=2, worker_count=2,
+            lease_seconds=0.5, heartbeat_seconds=0.1,
+        )
+        try:
+            results = [recovered.collect(ticket, timeout=10.0) for ticket in tickets]
+            repeat = [recovered.collect(ticket, timeout=0.0) for ticket in tickets]
+            assert [result.result_sha256 for result in results] == [
+                result.result_sha256 for result in repeat
+            ]
+            events = [
+                [dict(event) for event in recovered._journal.events(job["job_id"])]
+                for job in entry["jobs"]
+            ]
+            assert all(recovered.ack(ticket) for ticket in tickets)
+            assert recovered.outstanding_count == 0
+        finally:
+            recovered.shutdown(require_collected=False)
+    evidence = {
+        "mode": mode, "entry": entry, "killed_returncode": process.returncode,
+        "recovery_lease_now": expired_now,
+        "attempts": [result.execution_attempt for result in results],
+        "fences": [result.fence_token for result in results],
+        "passed": [result.passed for result in results],
+        "result_sha256": [result.result_sha256 for result in results],
+        "journal_events": events,
+    }
+    write_json(tmp_path / "replay.json", evidence)
+    return evidence
 
-    assert all(result.passed for result in results)
-    assert [result.execution_attempt for result in results] == [2, 2]
-    assert [result.fence_token for result in results] == [2, 2]
-    assert all(recovered.ack(ticket) for ticket in tickets)
-    recovered.shutdown()
+
+def test_durable_shadow_replays_two_expired_workers_after_process_kill(tmp_path) -> None:
+    evidence = _run_two_worker_crash(tmp_path)
+    _assert_replay_once(evidence)
+    _write_durable_acceptance(tmp_path, case="two-distinct-workers-replay-once", **evidence)
+
+
+def test_durable_shadow_duplicate_job_entry_is_rejected(tmp_path) -> None:
+    with pytest.raises(AssertionError, match="two callbacks are not two distinct jobs"):
+        _run_two_worker_crash(tmp_path, mode="legacy-expired-first")
+    entry = json.loads((tmp_path / "entered").read_text(encoding="utf-8"))
+    assert [job["execution_attempt"] for job in entry["jobs"]] == [2, 0]
+    _write_durable_acceptance(
+        tmp_path, case="duplicate-job-entry-rejected", entry=entry,
+        rejected_before_recovery=True,
+    )
+
+
+def test_durable_shadow_replay_count_negative_control(tmp_path) -> None:
+    evidence = _run_two_worker_crash(
+        tmp_path, mode="legacy-expired-first", validate_entry=False,
+    )
+    assert evidence["attempts"] == evidence["fences"] == [3, 1]
+    with pytest.raises(AssertionError):
+        _assert_replay_once(evidence)
+    _write_durable_acceptance(
+        tmp_path, case="legacy-synchronization-replay-count-rejected", **evidence,
+    )
 
 
 def test_sampled_policy_skip_is_explicit_idempotent_and_runs_no_shadow(
