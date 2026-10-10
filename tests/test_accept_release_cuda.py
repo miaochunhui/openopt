@@ -82,6 +82,18 @@ def test_positive_execution_scope_is_not_full_certificate(evidence):
     assert result["negative_verdict"] == "UNVERIFIED"
 
 
+def test_source_scan_reads_only_explicit_document(tmp_path):
+    for name in ("src/openopt/qp.py", "docs/research/refinement.md", "docs/private.md"):
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("fixture\n")
+    hashes = audit.source_files(tmp_path)
+    assert set(hashes) == {"src/openopt/qp.py", "docs/research/refinement.md"}
+    assert audit.relative("docs/research/refinement.md") == "docs/research/refinement.md"
+    with pytest.raises(audit.AuditError, match="unknown or unsafe"):
+        audit.relative("docs/private.md")
+
+
 def test_caller_bundle_and_result_pins_are_required(evidence):
     bundle, current, run = evidence
     path = run / "bundle.json"

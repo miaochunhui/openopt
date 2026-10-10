@@ -22,6 +22,7 @@ from xml.etree import ElementTree as ET
 ROOT = Path(__file__).resolve().parents[1]
 ARTIFACT_ROOT = Path("/hf3fs-jd/data/tmp").resolve()
 PREFIXES = ("src/", "scripts/", "tests/", "examples/")
+EXPLICIT_SOURCE_FILES = ("docs/research/refinement.md",)
 COUNT_KEYS = ("tests", "failures", "errors", "skipped")
 RUNNER = "scripts/gpu_release_check.py"
 SCOPE = "correctness-suite execution"
@@ -100,7 +101,8 @@ def relative(value):
     require(isinstance(value, str) and value, "source", "nonempty relative path required")
     path = PurePosixPath(value)
     require(not path.is_absolute() and ".." not in path.parts and str(path) == value
-            and value.startswith(PREFIXES), value, "unknown or unsafe source")
+            and (value.startswith(PREFIXES) or value in EXPLICIT_SOURCE_FILES),
+            value, "unknown or unsafe source")
     return value
 
 
@@ -116,6 +118,12 @@ def source_files(root):
             if path.is_file():
                 name = relative(path.relative_to(root).as_posix())
                 result[name] = sha(path.read_bytes())
+    for name in EXPLICIT_SOURCE_FILES:
+        path = root / name
+        if path.exists():
+            require(path.is_file() and not path.is_symlink()
+                    and path.resolve().is_relative_to(root), path, "explicit source is not regular")
+            result[name] = sha(path.read_bytes())
     require(result, root, "empty source set")
     return result
 

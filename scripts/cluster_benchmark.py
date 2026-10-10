@@ -16,16 +16,48 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
+SNAPSHOT_PREFIXES = ("src/", "scripts/", "tests/", "examples/")
+SNAPSHOT_FILES = ("docs/research/refinement.md",)
 
 
 def proof_cases() -> tuple[str, ...]:
+    return proof_module().CASES
+
+
+def proof_module():
     if __package__:
-        from .gpu_release_proof import CASES
+        from . import gpu_release_proof
     else:
-        from gpu_release_proof import CASES
-    return CASES
+        import gpu_release_proof
+    return gpu_release_proof
+
+
+def freeze_proof_expectations(run: Path, source: Path, cases: list[str]) -> dict:
+    """Freeze model bytes before dispatch, never derive them during replay."""
+    proof = proof_module()
+    frozen_sources = proof.source_map(source)
+    proof.same_sources(frozen_sources, proof.source_map(ROOT), "pre-dispatch source")
+    models = {}
+    for case in cases:
+        problem = proof.make_problem(case)
+        if case.startswith("jacobi_"):
+            P, A = (getattr(problem, name).to_sparse() for name in ("P", "A"))
+            if case == "jacobi_csr":
+                P, A = P.to_sparse_csr(), A.to_sparse_csr()
+            problem = SimpleNamespace(P=P, q=problem.q, A=A, l=problem.l, u=problem.u)
+        model = {
+            name: proof.save_tensor(run, case + "-original-" + name, getattr(problem, name))
+            for name in proof.FIELDS
+        }
+        models[case] = {"model_sha256": proof.model_hash(model), "model": model}
+    path = run / "proof-expectations.json"
+    proof.write(path, {"schema_version": 1, "source_sha256": frozen_sources, "cases": models})
+    proof.same_sources(frozen_sources, proof.source_map(ROOT), "source after model freeze")
+    payload = path.read_bytes()
+    return {"path": str(path), "sha256": hashlib.sha256(payload).hexdigest(), "bytes": len(payload)}
 
 
 def submission_units(args: argparse.Namespace) -> list[tuple[int, str | None]]:
@@ -54,6 +86,7 @@ def submission_units(args: argparse.Namespace) -> list[tuple[int, str | None]]:
 
 def worker_command(
     args: argparse.Namespace, source: Path, output: Path, size: int, proof_case: str | None,
+    expectations: dict | None = None,
 ) -> list[str]:
     script = {
         "probe": "gpu_probe.py", "regression": "cluster_regression.py",
@@ -65,10 +98,12 @@ def worker_command(
     }[args.stage]
     result = ["python3", str(source / "scripts" / script)]
     if args.stage == "release-proof":
-        if proof_case not in proof_cases():
-            raise ValueError("explicit release proof case required")
+        if proof_case not in proof_cases() or expectations is None:
+            raise ValueError("explicit release proof case and pre-dispatch expectations required")
         return result + [
             "run", "--artifact-dir", str(output), "--device", "cuda:0", "--case", proof_case,
+            "--expectations", expectations["path"],
+            "--expectations-sha256", expectations["sha256"],
         ]
     result += ["--artifact-dir", str(output)]
     if args.stage in ("smoke", "ladder"):
@@ -107,7 +142,9 @@ def snapshot(destination: Path) -> dict[str, str]:
     ).split("\0")
     hashes = {}
     for relative in sorted(set(paths)):
-        if not relative or not relative.startswith(("src/", "scripts/", "tests/", "examples/")):
+        if not relative or not (
+            relative.startswith(SNAPSHOT_PREFIXES) or relative in SNAPSHOT_FILES
+        ):
             continue
         source = ROOT / relative
         if source.is_symlink():
@@ -121,6 +158,8 @@ def snapshot(destination: Path) -> dict[str, str]:
         hashes[relative] = digest
     if not hashes:
         raise RuntimeError("empty source snapshot")
+    if "tests/test_qp_refinement.py" in hashes and SNAPSHOT_FILES[0] not in hashes:
+        raise ValueError("refinement evidence requires its explicit research-document source")
     dump(destination / "source-hashes.json", hashes)
     return hashes
 
@@ -173,13 +212,19 @@ def submit(args: argparse.Namespace) -> None:
             raise ValueError(f"source changed during release snapshot: {consistency}")
         if any(identity["sha256"].get(name) != digest for name, digest in hashes.items()):
             raise ValueError("release snapshot bytes differ from frozen source identity")
+    expectations = None
+    if args.stage == "release-proof":
+        expectations = freeze_proof_expectations(run, source, args.proof_case)
+        consistency = check_source_consistency(identity, source_snapshot(ROOT))
+        if consistency["verdict"] != "PASS":
+            raise ValueError(f"source changed during model freeze: {consistency}")
     outputs = []
     for index, (size, proof_case) in enumerate(units):
         output = run / f"case-{index}"
         output.mkdir()
         name = f"openopt-{args.stage}-{run.name.split('-')[-1].replace('_', '')}-{index}"
         labels = {"repo": "openopt", "owner": "infra-openopt", "purpose": args.stage}
-        main_command = worker_command(args, source, output, size, proof_case)
+        main_command = worker_command(args, source, output, size, proof_case, expectations)
         env = [
             {"name": "PYTHONPATH", "value": str(source / "src")},
             {"name": "PYTHONDONTWRITEBYTECODE", "value": "1"},
@@ -238,6 +283,8 @@ def submit(args: argparse.Namespace) -> None:
     }
     if identity is not None:
         record["source_identity"] = identity
+    if expectations is not None:
+        record["expectations"] = expectations
     dump(run / "run.json", record)
     try:
         for item in outputs:
@@ -267,11 +314,13 @@ def collect(run: Path) -> None:
         dump(run / f"{item['job']}-status.json", {"job": job, "pods": pods})
         status = job.get("status", {})
         state = "FAIL" if status.get("failed", 0) else "PASS" if status.get("succeeded", 0) else "RUNNING"
+        collected_logs = []
         for pod in pods["items"]:
             name = pod["metadata"]["name"]
             if pod["status"]["phase"] in ("Running", "Succeeded", "Failed"):
                 logs = command(["kubectl", "-n", namespace, "logs", name])
                 (run / f"{name}.log").write_text(logs)
+                collected_logs.append(logs)
         if state == "PASS":
             path = collected_result(record, item)
             if path is None:
@@ -279,6 +328,11 @@ def collect(run: Path) -> None:
             else:
                 item["result_path"] = str(path)
                 item["result_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+                if record["stage"] == "release-proof":
+                    if len(collected_logs) != 1 or not proof_completion_matches(
+                        collected_logs[0], path, item["result_sha256"],
+                    ):
+                        state = "FAIL_EXECUTION_PIN"
         states.append(state)
         print(f"OPENOPT_JOB job={item['job']} state={state} output={item['output']}", flush=True)
     record["collected_at"] = datetime.now(timezone.utc).isoformat()
@@ -306,9 +360,20 @@ def collected_result(record: dict, item: dict) -> Path | None:
         value.get("returncode") != 0 or value.get("device") != "cuda:0"
         or value.get("requested_cases") != [item["proof_case"]]
         or set(value.get("cases", {})) != {item["proof_case"]}
+        or value.get("expectations") != record.get("expectations")
     ):
         return None
     return path
+
+
+def proof_completion_matches(log: str, result: Path, expected_sha256: str) -> bool:
+    value = json.loads(result.read_text())
+    completion = (
+        f"OPENOPT_GPU_PROOF verdict=PASS at={value['finished_at']} "
+        f"result={result} result_sha256={expected_sha256}"
+    )
+    markers = [line for line in log.splitlines() if line.startswith("OPENOPT_GPU_PROOF verdict=")]
+    return markers == [completion]
 
 
 def validate_performance_prerequisite(args: argparse.Namespace) -> None:
