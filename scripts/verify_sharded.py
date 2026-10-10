@@ -26,6 +26,7 @@ from xml.etree import ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ARTIFACTS = Path("/hf3fs-jd/data/tmp/openopt-release-20261010/sharded-regression")
+MAX_CPU_CAPACITY = 32
 
 
 class GateError(RuntimeError):
@@ -110,6 +111,12 @@ def cpu_env(repo, artifacts):
 
 def deadline(value):
     require(math.isfinite(value) and 0 < value <= 300, "timeout_must_be_in_0_300")
+    return value
+
+
+def capacity(value, name):
+    require(type(value) is int and 1 <= value <= MAX_CPU_CAPACITY,
+            f"{name}_must_be_1_{MAX_CPU_CAPACITY}")
     return value
 
 
@@ -215,7 +222,7 @@ def parse_junit(path):
 
 
 def lpt(nodes, histories, shards=3, unknown_s=1.0):
-    require(type(shards) is int and 1 <= shards <= 3, "shards_must_be_1_3")
+    capacity(shards, "shards")
     require(math.isfinite(unknown_s) and unknown_s > 0, "invalid_unknown_prediction")
     costs, provenance = {}, []
     for path in histories:
@@ -240,15 +247,35 @@ def lpt(nodes, histories, shards=3, unknown_s=1.0):
             group["unknown_nodeids"].append(node)
     require(len(groups) >= shards, "too_few_files_for_nonempty_shards")
     assignments = [{"id": index, "targets": [], "nodeids": [], "predicted_test_s": 0.0,
-                    "unknown_nodeids": []} for index in range(shards)]
+                    "unknown_nodeids": [], "file_test_s": {}} for index in range(shards)]
     for target, group in sorted(groups.items(),
                                 key=lambda item: (-item[1]["predicted_test_s"], item[0])):
-        chosen = min(assignments, key=lambda item: (item["predicted_test_s"], item["id"]))
+        chosen = min(assignments, key=lambda item: (
+            item["predicted_test_s"], len(item["targets"]), item["id"]))
         chosen["targets"].append(target)
         chosen["nodeids"].extend(group["nodeids"])
         chosen["unknown_nodeids"].extend(group["unknown_nodeids"])
+        chosen["file_test_s"][target] = group["predicted_test_s"]
         chosen["predicted_test_s"] += group["predicted_test_s"]
     return assignments, provenance, unknown
+
+
+def prediction_budget(assignments, timeout):
+    deadline(timeout)
+    for item in assignments:
+        for target, seconds in item["file_test_s"].items():
+            require(math.isfinite(seconds) and seconds >= 0, "invalid_file_prediction")
+            require(seconds <= timeout,
+                    f"file_prediction_exceeds_deadline: file={target} "
+                    f"predicted_test_s={seconds:.6f} deadline_s={timeout:g}; "
+                    "file_is_indivisible")
+    for item in assignments:
+        seconds = item["predicted_test_s"]
+        require(math.isfinite(seconds) and seconds >= 0, "invalid_shard_prediction")
+        require(seconds <= timeout,
+                f"shard_prediction_exceeds_deadline: shard={item['id']} "
+                f"predicted_test_s={seconds:.6f} deadline_s={timeout:g}; "
+                "increase_cpu_shards_within_32_and_replan")
 
 
 def validate_plan(plan):
@@ -259,8 +286,12 @@ def validate_plan(plan):
     nodes = plan.get("collection", {}).get("nodeids")
     require(isinstance(nodes, list) and nodes and len(nodes) == len(set(nodes)),
             "empty_or_duplicate_plan_collection")
+    require(all(isinstance(node, str) and "::" in node for node in nodes),
+            "invalid_plan_nodeid")
+    require(len({junit_key(node) for node in nodes}) == len(nodes), "ambiguous_junit_identity")
     assignments = plan.get("shards")
-    require(isinstance(assignments, list) and 1 <= len(assignments) <= 3, "invalid_shards")
+    require(isinstance(assignments, list) and 1 <= len(assignments) <= MAX_CPU_CAPACITY,
+            "invalid_shards")
     require([item["id"] for item in assignments] == list(range(len(assignments))),
             "invalid_shard_ids")
     assigned_nodes, assigned_files = [], []
@@ -273,6 +304,19 @@ def validate_plan(plan):
     require(Counter(assigned_nodes) == Counter(nodes), "shard_collection_mismatch")
     require(len(assigned_files) == len(set(assigned_files)), "duplicate_shard_file")
     deadline(plan["shard_timeout_s"])
+    history = plan["history"]
+    require(isinstance(history, list), "invalid_prediction_history")
+    for observation in history:
+        read_path = Path(observation["path"])
+        require(digest(read_path) == observation["sha256"], "prediction_history_pin_mismatch")
+    expected, provenance, unknown = lpt(
+        nodes, [item["path"] for item in history], len(assignments),
+        plan["prediction"]["unknown_test_s"],
+    )
+    require(provenance == history and unknown == plan["unknown_nodeids"],
+            "prediction_provenance_mismatch")
+    prediction_budget(expected, plan["shard_timeout_s"])
+    require(assignments == expected, "prediction_assignment_mismatch")
 
 
 def plan_run(repo, artifact_root, histories, shards=3, unknown_s=1.0,
@@ -280,11 +324,15 @@ def plan_run(repo, artifact_root, histories, shards=3, unknown_s=1.0,
     artifacts = new_artifacts(artifact_root, repo, "plan-")
     report = {"schema_version": 1, "verdict": "RUNNING", "started_at": now()}
     try:
+        capacity(shards, "shards")
         deadline(shard_timeout)
         report["source"] = snapshot(repo)
         directory = artifacts / "collection"
         directory.mkdir()
         nodes = collect(repo, directory, collection_timeout)
+        report["collection"] = {"nodeids": nodes,
+            "path": str(directory / "collection.json"),
+            "sha256": digest(directory / "collection.json")}
         assignments, historical, unknown = lpt(nodes, histories, shards, unknown_s)
         report.update({
             "repo": str(repo), "coverage": "tests", "collection": {"nodeids": nodes,
@@ -383,7 +431,7 @@ def combine(plan, results):
 
 
 def execute(repo, plan_path, plan_pin, artifact_root, workers=3):
-    require(type(workers) is int and 1 <= workers <= 3, "workers_must_be_1_3")
+    capacity(workers, "workers")
     artifacts = new_artifacts(artifact_root, repo, "run-")
     started = time.monotonic()
     summary = {
@@ -527,8 +575,10 @@ def main(argv=None):
     parser.add_argument("--repo", type=Path, default=ROOT)
     parser.add_argument("--artifact-dir", "--log-dir", type=Path, default=DEFAULT_ARTIFACTS)
     parser.add_argument("--history-junit", type=Path, action="append", default=[])
-    parser.add_argument("--shards", type=int, default=3)
-    parser.add_argument("--workers", type=int, default=3)
+    parser.add_argument("--shards", type=int, default=3,
+                        help="CPU file partitions (1-32); independent of GPU limits")
+    parser.add_argument("--workers", type=int, default=3,
+                        help="simultaneous CPU workers (1-32); may be fewer than shards")
     parser.add_argument("--unknown-test-seconds", type=float, default=1.0)
     parser.add_argument("--shard-timeout", type=float, default=300)
     parser.add_argument("--collection-timeout", type=float, default=60)

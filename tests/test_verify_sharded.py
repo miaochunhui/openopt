@@ -101,10 +101,48 @@ def test_timeout_outside_finite_gate_rejected(value):
         tool.deadline(value)
 
 
-@pytest.mark.parametrize("shards", [0, 4, 1.5])
+@pytest.mark.parametrize("shards", [0, 33, 1.5, True])
 def test_invalid_capacity_rejected(nodes, shards):
     with pytest.raises(tool.GateError, match="shards"):
         tool.lpt(nodes, [], shards)
+
+
+@pytest.mark.parametrize("workers", [0, 33, 1.5, True])
+def test_invalid_worker_capacity_rejected(tmp_path, workers):
+    with pytest.raises(tool.GateError, match="workers_must_be_1_32"):
+        tool.execute(tool.ROOT, tmp_path / "missing-plan", "unused", tmp_path / "run", workers)
+    assert not (tmp_path / "run").exists()
+
+
+def test_32_cpu_shards_zero_duration_files_are_nonempty(tmp_path):
+    nodes = [f"tests/test_{index}.py::test_ok" for index in range(32)]
+    history = xml(tmp_path / "zero.xml", nodes, seconds=0)
+    assignments, _, unknown = tool.lpt(nodes, [history], shards=32)
+    assert len(assignments) == 32 and not unknown
+    assert all(len(item["targets"]) == len(item["nodeids"]) == 1 for item in assignments)
+    assert tool.capacity(32, "workers") == 32
+    tool.prediction_budget(assignments, 300)
+
+
+@pytest.mark.parametrize("seconds,files,match", [
+    (301, 1, "file_prediction_exceeds_deadline"),
+    (160, 2, "shard_prediction_exceeds_deadline"),
+])
+def test_wholefile_and_shard_over_budget_rejected(tmp_path, seconds, files, match):
+    nodes = [f"tests/test_{index}.py::test_ok" for index in range(files)]
+    history = xml(tmp_path / "cost.xml", nodes, seconds=seconds)
+    assignments, _, _ = tool.lpt(nodes, [history], shards=1)
+    with pytest.raises(tool.GateError, match=match):
+        tool.prediction_budget(assignments, 300)
+
+
+def test_prediction_exact_deadline_is_not_extended(tmp_path):
+    nodes = ["tests/test_at_limit.py::test_ok"]
+    history = xml(tmp_path / "limit.xml", nodes, seconds=300)
+    assignments, _, _ = tool.lpt(nodes, [history], shards=1)
+    tool.prediction_budget(assignments, 300)
+    with pytest.raises(tool.GateError, match="exceeds_deadline"):
+        tool.prediction_budget(assignments, 299)
 
 
 @pytest.mark.parametrize("value", [0, -1, float("nan")])
@@ -197,6 +235,83 @@ def test_full_tiny_run_and_independent_replay(tiny_plan, tmp_path):
     assert tool.read(audit)["verdict"] == "FAIL"
 
 
+def test_eight_cpu_shards_three_workers_full_run_replay(mini_repo, tmp_path):
+    files = []
+    for index in range(5):
+        path = f"tests/test_extra_{index}.py"
+        (mini_repo / path).write_text("def test_extra():\n    assert 7 == 7\n")
+        files.append(path)
+    git(mini_repo, "add", *files)
+    git(mini_repo, "commit", "-m", "Freeze eight indivisible CPU test files")
+    planned = tool.plan_run(mini_repo, tmp_path / "eight-plan", [], shards=8, shard_timeout=90)
+    plan_path = planned / "plan.json"
+    plan = tool.read(plan_path)
+    assert len(plan["shards"]) == 8 and len(plan["collection"]["nodeids"]) == 9
+    assert all(item["targets"] and item["nodeids"] for item in plan["shards"])
+    assert len({target for item in plan["shards"] for target in item["targets"]}) == 8
+    assert any(node.startswith("tests/check_b.py::") for node in plan["collection"]["nodeids"])
+    run = tool.execute(mini_repo, plan_path, tool.digest(plan_path), tmp_path / "eight-run", workers=3)
+    report_path = run / "verification.json"
+    report = tool.read(report_path)
+    assert report["verdict"] == "PASS" and report["workers"] == 3
+    assert report["tests"] == {"tests": 9, "failures": 0, "errors": 0, "skipped": 1}
+    assert report["not_admitted"] == report["failures"] == [] and report["speedup"] is None
+    events = []
+    for item in report["shards"]:
+        process = tool.read(Path(item["artifact_dir"]) / "process.json", item["process_sha256"])
+        assert process["returncode"] == 0 and process["timeout"] is False
+        events.extend([(process["started_at"], 1), (process["finished_at"], -1)])
+    flying, peak = 0, 0
+    for _, change in sorted(events):
+        flying += change
+        peak = max(peak, flying)
+    assert flying == 0 and 1 <= peak <= 3
+    checked = tool.check(mini_repo, plan_path, tool.digest(plan_path), report_path,
+                         tool.digest(report_path), tmp_path / "eight-check")
+    audit = tool.read(checked / "acceptance.json")
+    assert audit["verdict"] == "PASS" and audit["tests"] == report["tests"]
+    assert audit["source_consistency"]["verdict"] == "PASS"
+    assert git(mini_repo, "status", "--porcelain") == ""
+
+
+def test_overbudget_plan_saved_fail_and_forged_cost_stops_admission(mini_repo, tmp_path):
+    history = xml(tmp_path / "overbudget.xml",
+                  ["tests/test_a.py::test_a[v.1]"], seconds=301)
+    with pytest.raises(tool.GateError, match="file_prediction_exceeds_deadline"):
+        tool.plan_run(mini_repo, tmp_path / "overbudget", [history], shard_timeout=300)
+    path = next((tmp_path / "overbudget").glob("plan-*/plan.json"))
+    failed = tool.read(path)
+    assert failed["verdict"] == "FAIL" and "file_is_indivisible" in failed["error"]
+    assert failed["collection"]["nodeids"] and failed["shards"]
+    assert failed["history"][0]["sha256"] == tool.digest(history)
+    assert max(item["predicted_test_s"] for item in failed["shards"]) > 300
+    forged = copy.deepcopy(failed)
+    forged["verdict"] = "PASS"
+    for item in forged["shards"]:
+        item["predicted_test_s"] = 1
+        item["file_test_s"] = {target: 1 for target in item["targets"]}
+    tool.save(path, forged)
+    with pytest.raises(tool.GateError, match="file_prediction_exceeds_deadline"):
+        tool.execute(mini_repo, path, tool.digest(path), tmp_path / "forged-run", workers=3)
+    report = tool.read(next((tmp_path / "forged-run").glob("run-*/verification.json")))
+    assert report["verdict"] == "FAIL" and "exceeds_deadline" in report["error"]
+    assert not list((tmp_path / "forged-run").glob("run-*/shard-*"))
+
+
+def test_understated_prediction_and_history_drift_rejected(tiny_plan, tmp_path):
+    repo, path, _ = tiny_plan
+    plan = tool.read(path)
+    plan["shards"][0]["predicted_test_s"] = 0
+    with pytest.raises(tool.GateError, match="prediction_assignment_mismatch"):
+        tool.validate_plan(plan)
+    history = xml(tmp_path / "original.xml", ["tests/test_a.py::test_a[v.1]"])
+    directory = tool.plan_run(repo, tmp_path / "history-plan", [history])
+    bound = tool.read(directory / "plan.json")
+    xml(history, ["tests/test_a.py::test_a[v.1]"], seconds=299)
+    with pytest.raises(tool.GateError, match="prediction_history_pin_mismatch"):
+        tool.validate_plan(bound)
+
+
 def test_hash_source_and_collection_drift_stop_before_admission(tiny_plan, tmp_path):
     repo, path, pin = tiny_plan
     with pytest.raises(tool.GateError, match="hash_mismatch"):
@@ -219,8 +334,9 @@ def test_collection_conflict_rejected_before_workers(tiny_plan, tmp_path):
     new = old.split("::", 1)[0] + "::test_absent"
     assert new != old
     plan["collection"]["nodeids"][0] = new
-    for shard in plan["shards"]:
-        shard["nodeids"] = [new if node == old else node for node in shard["nodeids"]]
+    plan["shards"], plan["history"], plan["unknown_nodeids"] = tool.lpt(
+        plan["collection"]["nodeids"], [], shards=3,
+    )
     tool.save(path, plan)
     with pytest.raises(tool.GateError, match="collection_drift"):
         tool.execute(repo, path, tool.digest(path), tmp_path / "bad-collection")
@@ -232,7 +348,7 @@ def test_partial_failure_stops_queued_admission(mini_repo, tmp_path):
         "def test_failure():\n    assert False, 'intentional admission negative'\n")
     git(mini_repo, "add", "tests/test_a.py")
     git(mini_repo, "commit", "-m", "Freeze deliberate failing fixture")
-    history = xml(tmp_path / "cost.xml", ["tests/test_a.py::test_failure"], seconds=100)
+    history = xml(tmp_path / "cost.xml", ["tests/test_a.py::test_failure"], seconds=80)
     directory = tool.plan_run(mini_repo, tmp_path / "fail-plan", [history], shard_timeout=90)
     path = directory / "plan.json"
     with pytest.raises(tool.GateError, match="shard_failure"):
