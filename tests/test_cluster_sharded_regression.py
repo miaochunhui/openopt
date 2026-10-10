@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from collections import Counter
 import json
 from pathlib import Path
 import shutil
@@ -455,6 +456,156 @@ def test_terminal_job_corruptions(tiny, mutation, match):
         tool.terminal_job(job, pods, spec, "expected-uid", "fixture://sha256:" + "a"*64)
 
 
+def execution_archives(spec):
+    job = copy.deepcopy(spec)
+    job["metadata"]["uid"] = "expected-uid"
+    job["status"] = {
+        "succeeded": 1, "conditions": [{"type": "Complete", "status": "True"}],
+    }
+    pods = {"items": [{
+        "metadata": {"uid": "expected-pod", "ownerReferences": [
+            {"uid": "expected-uid", "controller": True}]},
+        "spec": copy.deepcopy(spec["spec"]["template"]["spec"]),
+        "status": {"phase": "Succeeded", "containerStatuses": [{
+            "restartCount": 0, "imageID": "fixture://sha256:" + "a" * 64,
+            "state": {"terminated": {"exitCode": 0}}}]},
+    }]}
+    return job, pods
+
+
+@pytest.mark.parametrize("placement", ("job", "pod"))
+@pytest.mark.parametrize("mutation", (
+    "args", "envFrom", "env_value", "env_member", "duplicate_env", "null_args",
+))
+def test_terminal_execution_inputs_strict_without_unrelated_defaulting_rejection(
+        placement, mutation):
+    spec = {
+        "metadata": {"name": "synthetic"},
+        "spec": {"template": {"spec": {"containers": [{
+            "resources": {"requests": {"cpu": "1"}, "limits": {"cpu": "1"}},
+            "command": ["python3", "-B", "worker"], "env": [
+                {"name": "PYTEST_ADDOPTS", "value": ""}],
+        }]}}},
+    }
+    job, pods = execution_archives(spec)
+    job["spec"]["template"]["spec"]["containers"][0]["args"] = []
+    pods["items"][0]["spec"]["containers"][0]["envFrom"] = []
+    pods["items"][0]["spec"]["dnsPolicy"] = "ClusterFirst"
+    baseline = copy.deepcopy((job, pods))
+    assert tool.terminal_job(job, pods, spec, "expected-uid")["exit_code"] == 0
+    container = (job["spec"]["template"]["spec"] if placement == "job"
+                 else pods["items"][0]["spec"])["containers"][0]
+    if mutation == "args":
+        container["args"] = ["--not-submitted"]
+    elif mutation == "envFrom":
+        container["envFrom"] = [{"configMapRef": {"name": "synthetic-not-submitted"}}]
+    elif mutation == "env_value":
+        container["env"][0]["value"] = "-k test_a"
+    elif mutation == "env_member":
+        container["env"].append({"name": "UNSUBMITTED", "value": "1"})
+    elif mutation == "duplicate_env":
+        container["env"].append(copy.deepcopy(container["env"][0]))
+    else:
+        container["args"] = None
+    assert (job, pods) != baseline
+    with pytest.raises(shard.GateError, match="execution_.*_drift|manifest_drift"):
+        tool.terminal_job(job, pods, spec, "expected-uid")
+
+
+def test_archived_manifest_coordinated_rehash_preserves_config_and_rejects(tiny):
+    _, path, pin = tiny
+    config, plan = tool.load_config(path, pin)
+    spec, item = tool.manifest(config, "probe", None)
+    job, pods = execution_archives(spec)
+    hardware = tool.terminal_job(job, pods, spec, "expected-uid")
+    output = Path(item["output"])
+    (output / "collection").mkdir(parents=True)
+    collection_path = output / "collection/collection.json"
+    shard.save(collection_path, {"nodeids": plan["collection"]["nodeids"]})
+    worker_path = output / "worker.json"
+    shard.save(worker_path, {
+        "verdict": "PASS", "phase": "probe", "plan_sha256": config["plan_sha256"],
+        "source": plan["source"], "source_consistency": shard.verifier(
+            Path(plan["repo"])).check_source_consistency(plan["source"], plan["source"]),
+        "collection_sha256": shard.digest(collection_path),
+    })
+    job_path, pods_path = path.parent / "archived-job.json", path.parent / "archived-pods.json"
+    shard.save(item["manifest"], spec)
+    shard.save(job_path, job)
+    shard.save(pods_path, pods)
+    item.update(
+        uid="expected-uid", accepted=True, hardware=hardware,
+        manifest_sha256=shard.digest(item["manifest"]), worker_sha256=shard.digest(worker_path),
+        cluster_evidence={"job": str(job_path), "job_sha256": shard.digest(job_path),
+                          "pods": str(pods_path), "pods_sha256": shard.digest(pods_path)},
+    )
+    state = {"state": "PROBE_PASSED", "jobs": [item], "events": [], "first_failure": None,
+             "config_sha256": pin, "image_id": hardware["image_id"]}
+    tool.stage_members(config, plan, state)
+    tool.verify_accepted(config, plan, state)
+    baseline = copy.deepcopy((spec, job, pods, state))
+    for mutation in ("args", "env_value", "env_membership", "actual_args_only", "envFrom"):
+        intended, observed, placed, changed_state = copy.deepcopy(baseline)
+        containers = [observed["spec"]["template"]["spec"]["containers"][0],
+                      placed["items"][0]["spec"]["containers"][0]]
+        if mutation != "actual_args_only":
+            containers.append(intended["spec"]["template"]["spec"]["containers"][0])
+        for container in containers:
+            if mutation in ("args", "actual_args_only"):
+                container["args"] = ["--not-submitted"]
+            elif mutation == "env_value":
+                next(entry for entry in container["env"] if entry["name"] ==
+                     "PYTEST_ADDOPTS")["value"] = "-k test_a"
+            elif mutation == "env_membership":
+                container["env"].append({"name": "UNSUBMITTED", "value": "1"})
+            else:
+                container["envFrom"] = [{"configMapRef": {"name": "synthetic-not-submitted"}}]
+        shard.save(item["manifest"], intended)
+        shard.save(job_path, observed)
+        shard.save(pods_path, placed)
+        changed = changed_state["jobs"][0]
+        changed["manifest_sha256"] = shard.digest(item["manifest"])
+        changed["cluster_evidence"].update(job_sha256=shard.digest(job_path),
+                                         pods_sha256=shard.digest(pods_path))
+        assert shard.digest(path) == pin
+        assert shard.read(item["manifest"], changed["manifest_sha256"]) == intended
+        assert shard.read(job_path, changed["cluster_evidence"]["job_sha256"]) == observed
+        assert shard.read(pods_path, changed["cluster_evidence"]["pods_sha256"]) == placed
+        tool.stage_members(config, plan, changed_state)
+        reason = ("execution_args_drift" if mutation == "actual_args_only"
+                  else "archived_manifest_config_drift")
+        with pytest.raises(shard.GateError, match=reason):
+            tool.verify_accepted(config, plan, changed_state)
+    shard.save(item["manifest"], spec)
+    shard.save(job_path, job)
+    shard.save(pods_path, pods)
+    for key in ("output", "manifest", "name"):
+        changed_state = copy.deepcopy(state)
+        changed_state["jobs"][0][key] += "-unsubmitted"
+        with pytest.raises(shard.GateError, match="archived_stage_item_drift"):
+            tool.intended_manifest(config, changed_state, changed_state["jobs"][0])
+    tool.verify_accepted(config, plan, state)
+
+
+def test_active_manifest_coordinated_rehash_blocks_collection_before_query(tiny):
+    _, path, pin = tiny
+    client = FakeKubernetes(shard.read(path))
+    state = tool.admit(path, pin, True, client)
+    item = state["jobs"][0]
+    spec = shard.read(item["manifest"], item["manifest_sha256"])
+    spec["spec"]["template"]["spec"]["containers"][0]["args"] = ["--not-submitted"]
+    shard.save(item["manifest"], spec)
+    item["manifest_sha256"] = shard.digest(item["manifest"])
+    tool.save(path.parent / "run.json", state)
+    before = list(client.calls)
+    with pytest.raises(shard.GateError, match="archived_manifest_config_drift"):
+        tool.collect(path, pin, client)
+    stopped = shard.read(path.parent / "run.json")
+    assert stopped["state"] == "BLOCKED"
+    assert "archived_manifest_config_drift" in stopped["first_failure"]["error"]
+    assert client.calls == before and len(client.created) == 1
+
+
 def test_pending_not_pass_and_source_drift_stops(tiny):
     repo, path, pin = tiny
     config = shard.read(path)
@@ -819,7 +970,7 @@ def test_fixture_v2_real_cpu_workers_full_transport_replay(fixture_tiny, monkeyp
     corrupted_state = copy.deepcopy(state)
     corrupted_state["report_sha256"] = shard.digest(summary_path)
     tool.save(path.parent / "run.json", corrupted_state)
-    with pytest.raises(shard.GateError, match="combined_fixture_transport_binding_mismatch"):
+    with pytest.raises(shard.GateError, match="archived_manifest_config_drift"):
         tool.check(path, pin)
     shard.save(summary_path, summary)
     tool.save(path.parent / "run.json", state)
@@ -845,12 +996,15 @@ def accept_batch(batch, artifact_root):
         "test_prepare_real_cli_rejection_retains_firstcause_without_admission",
         "test_prepare_real_cli_success_preserves_original_config_semantics",
     }
+    family = "v1" if batch in ("v1-a", "v1-b") else batch
     targets = [
         f"tests/test_cluster_sharded_regression.py::{name}"
         for name in sorted(globals()) if name.startswith("test_")
         and ("fixture-v2" if name.startswith("test_fixture_v2_")
-             else "prepare" if name in prepare_tests else "v1") == batch
+             else "prepare" if name in prepare_tests else "v1") == family
     ]
+    if batch in ("v1-a", "v1-b"):
+        targets = targets[0::2] if batch == "v1-a" else targets[1::2]
     report = {
         "kind": "bounded-real-cpu-fake-cluster-tests",
         "batch": batch, "verdict": "RUNNING", "targets": targets,
@@ -858,7 +1012,7 @@ def accept_batch(batch, artifact_root):
         "qualification": "CPU fixture correctness only; no cluster/container/speed claim",
     }
     try:
-        shard.require(targets and batch in ("v1", "fixture-v2", "prepare"),
+        shard.require(targets and batch in ("v1", "v1-a", "v1-b", "fixture-v2", "prepare"),
                       "empty_or_invalid_test_batch")
         before = verify.source_snapshot(tool.ROOT)
         report["source"] = before
@@ -894,11 +1048,70 @@ def accept_batch(batch, artifact_root):
     return output
 
 
+def check_batches(paths, pins, artifact_root):
+    """Reaccept complete disjoint clean-source CPU batches against real collection."""
+    output = shard.new_artifacts(tool.shared(artifact_root), tool.ROOT, "batch-check-")
+    audit = {"verdict": "RUNNING", "kind": "full-wrapper-cpu-batch-replay",
+             "started_at": tool.stamp(), "qualification": "CPU only; no K8s/GPU/speed proof"}
+    try:
+        assert len(paths) == len(pins) == 4, "require four caller-pinned batch receipts"
+        source = shard.snapshot(tool.ROOT)
+        collection = output / "collection"
+        collection.mkdir()
+        nodes = [node for node in shard.collect(tool.ROOT, collection)
+                 if node.split("::", 1)[0] == "tests/test_cluster_sharded_regression.py"]
+        assert nodes, "empty wrapper collection"
+        actual, observed_batches, counts = [], [], Counter()
+        for path, pin in zip(paths, pins):
+            receipt = shard.read(path, pin)
+            assert receipt["verdict"] == "PASS" and receipt["source"] == source
+            assert receipt["source_consistency"] == shard.consistent(tool.ROOT, source)
+            process = shard.read(path.parent / "process/process.json")
+            assert process == receipt["process"] and process["returncode"] == 0
+            assert process["timeout"] is False and process["timeout_s"] == 179
+            verification = shard.read(receipt["verification"], receipt["verification_sha256"])
+            assert verification["verdict"] == "PASS" and verification["source"] == source
+            assert verification["source_consistency"] == receipt["source_consistency"]
+            assert verification["targets"] == receipt["targets"]
+            assert verification["cuda_available"] is False
+            records, batch_counts = shard.parse_junit(
+                Path(receipt["verification"]).parent / "pytest.xml")
+            assert batch_counts == receipt["tests"] == verification["tests"]
+            assert not any(batch_counts[key] for key in ("failures", "errors", "skipped"))
+            actual.extend(record["key"] for record in records)
+            counts.update(batch_counts)
+            observed_batches.append(receipt["batch"])
+        assert Counter(observed_batches) == Counter(("v1-a", "v1-b", "fixture-v2", "prepare"))
+        assert len(actual) == len(set(actual)), "duplicate wrapper JUnit membership"
+        assert Counter(actual) == Counter(shard.junit_key(node) for node in nodes), \
+            "complete wrapper collection/JUnit bidirectional mismatch"
+        audit.update(verdict="PASS", source=source, source_consistency=shard.consistent(
+            tool.ROOT, source), tests=dict(counts), collection_count=len(nodes),
+            missing=[], extra=[], duplicates=[],
+            receipts=[{"path": str(path), "sha256": pin} for path, pin in zip(paths, pins)])
+    except Exception as error:
+        audit.update(verdict="FAIL", first_failure=f"{type(error).__name__}: {error}")
+        raise
+    finally:
+        audit["finished_at"] = tool.stamp()
+        shard.save(output / "acceptance.json", audit)
+        print(f"CLUSTER_CPU_BATCH_CHECK verdict={audit['verdict']} "
+              f"receipt={output / 'acceptance.json'}", flush=True)
+    return output
+
+
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--batch", required=True, choices=("v1", "fixture-v2", "prepare"))
+    choice = parser.add_mutually_exclusive_group(required=True)
+    choice.add_argument("--batch", choices=("v1", "v1-a", "v1-b", "fixture-v2", "prepare"))
+    choice.add_argument("--check-batch", type=Path, action="append")
+    parser.add_argument("--check-batch-sha256", action="append")
     parser.add_argument("--artifact-dir", required=True, type=Path)
     args = parser.parse_args()
-    accept_batch(args.batch, args.artifact_dir)
+    if args.batch is not None:
+        assert args.check_batch_sha256 is None, "batch execution does not consume replay pins"
+        accept_batch(args.batch, args.artifact_dir)
+    else:
+        check_batches(args.check_batch, args.check_batch_sha256 or [], args.artifact_dir)

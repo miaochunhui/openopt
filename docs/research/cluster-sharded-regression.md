@@ -318,3 +318,65 @@ no config, source clone or run ledger is produced. This is a real local CLI
 rejection of historical input, not current-source cost remeasurement.
 After commit, clean reacceptance runs all three disjoint batches under
 `clean-v4/`, preserving development negatives unchanged.
+
+Clean `9c46c8e` reacceptance retains v2 ten passes at
+`clean-v4/fixture-v2-trzdemdf/acceptance.json` (114.536962 process seconds),
+and prepare five passes at `clean-v4/prepare-4gueyrhn/acceptance.json`.
+The v1 batch `clean-v4/v1-asblh9im/acceptance.json` again timed out at 179
+seconds and remains FAIL. No complete-suite PASS is claimed for that attempt.
+Both earlier v1 timeouts ran alongside another batch; contention is a possible
+factor, not a measured root-cause attribution.
+
+Explicit local test-only `--batch v1-a` and `--batch v1-b` now partition the
+original sorted v1 test-function targets by even/odd index. Their union is
+exactly the unchanged `--batch v1` selection, with zero overlap. The tiny
+fixtures are function-scoped; no module/session user fixture is split.
+Production grouping, admission, concurrency and deadlines remain unchanged.
+For this bounded acceptance use v1-a, v1-b, fixture-v2 and prepare, and check
+their actual JUnit identities against the complete test-file collection.
+Each invocation still has its own original 179-second gate. New clean evidence
+lives under `clean-v5/`; failed v4 evidence is never relabeled.
+
+## Archived Execution Contract Repair
+
+The diagnostic commit `9c46c8e` did not fix archived acceptance. Nash's
+unchanged five-case replay retained one positive and four false accepts
+at `cluster-prepare-receipt-review/frozen-9c46/coordinated-irvu_z4v/`.
+Those failures remain historical red evidence, separate from preparation
+diagnostics and RSOC numerical/GPU evidence.
+
+`intended_manifest` now regenerates the exact Job manifest and stage item
+from caller-pinned config/plan, phase/id, and the current accepted runtime
+and report pins. The archived name/output/manifest location must match that
+stage item, and the rehashed archived manifest must equal the regenerated
+manifest. Both prior-stage `verify_accepted` and active-stage `collect` use
+this check. An internally consistent rewritten archive cannot become its
+own expected execution. A rewritten report pin also invalidates a previously
+accepted check Job's command before later summary replay.
+
+`terminal_job` independently compares `command`, `args`, `env`, and `envFrom`
+lists exactly for both Job and Pod. A missing list is equivalent only to
+an explicit empty list; null, extra arguments, altered/duplicate/extra
+environment entries, valueFrom additions, and unsubmitted envFrom sources
+are not equivalent. Reviewed defaulting outside those fields remains under
+the existing subset check; CPU resources, UID, image digest, restarts,
+termination, original source/JUnit and all numerical gates are unchanged.
+
+Owner controls include a baseline-positive archived replay, all four Nash
+mutation shapes plus envFrom with synchronized rehashes, unchanged config,
+stage path/name substitutions, twelve Job/Pod execution mutations and
+active-stage refusal before any transport query. The existing v1/v2 real
+CPU worker chains remain necessary regression coverage. No real Kubernetes
+call, GPU execution, numerical solve replay, deadline increase or main-tree
+edit is part of this repair. Independent closure requires Nash's unchanged
+controls against the new committed source, not old receipts or owner claims.
+
+Same-byte precommit owner evidence below `cluster-prepare-receipt/`:
+`manifest-targeted-v1/tests-1m_mvrai/verification.json` reports 14 passes,
+zero skip/fail/error, 14.21 pytest seconds and source consistency PASS.
+`manifest-chain-v1/tests-ul8m_6df/verification.json` reports both original
+v1/v2 real CPU worker chains passing in 76.51 pytest seconds with source
+consistency PASS. These are development receipts, not clean-source
+qualification. The three explicit files also passed the existing scanner
+selftest, credential-literal and shape gates. Postcommit receipts must bind
+the new commit and unchanged bytes, with the independent controls kept intact.

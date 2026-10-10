@@ -582,6 +582,16 @@ def terminal_job(job, pods, expected, uid, image_id=None):
         shard.require(len(pod_spec["containers"]) == 1 and
                       pod_spec["containers"][0]["resources"] ==
                       expected_pod["containers"][0]["resources"], "cpu_resources_manifest_drift")
+        actual = pod_spec["containers"][0]
+        intended = expected_pod["containers"][0]
+        for key in ("command", "args", "env", "envFrom"):
+            # Kubernetes may omit an empty list, but never add execution inputs.
+            actual_value = actual.get(key, [])
+            intended_value = intended.get(key, [])
+            shard.require(isinstance(actual_value, list)
+                          and isinstance(intended_value, list)
+                          and actual_value == intended_value,
+                          f"cpu_execution_{key}_drift")
 
     cpu_only(job["spec"]["template"]["spec"])
     status = job.get("status", {})
@@ -861,6 +871,17 @@ def combined_report(config, plan, jobs):
     return shard.digest(artifacts / "verification.json")
 
 
+def intended_manifest(config, state, job):
+    """Bind archived execution to caller-pinned config, not rewritable archives."""
+    spec, item = manifest(config, job["phase"], job["id"],
+                          state.get("runtime_sha256"), state.get("report_sha256"))
+    shard.require(all(job.get(key) == value for key, value in item.items()),
+                  "archived_stage_item_drift")
+    archived = shard.read(item["manifest"], job["manifest_sha256"])
+    shard.require(archived == spec, "archived_manifest_config_drift")
+    return spec
+
+
 def verify_accepted(config, plan, state):
     artifacts = Path(config["artifacts"])
     runtime = shard.read(artifacts / "worker-probe/worker.json",
@@ -873,7 +894,7 @@ def verify_accepted(config, plan, state):
         evidence = job["cluster_evidence"]
         observed = shard.read(evidence["job"], evidence["job_sha256"])
         pods = shard.read(evidence["pods"], evidence["pods_sha256"])
-        spec = shard.read(job["manifest"], job["manifest_sha256"])
+        spec = intended_manifest(config, state, job)
         shard.require(terminal_job(observed, pods, spec, job["uid"], state["image_id"])
                       == job["hardware"], "archived_cluster_evidence_mismatch")
         reaccept_result(config, plan, job, runtime if job["phase"] != "probe" else None)
@@ -901,7 +922,7 @@ def collect(config_path, config_pin, client=None):
     try:
         verify_accepted(config, plan, state)
         for job in active:
-            spec = shard.read(job["manifest"], job["manifest_sha256"])
+            spec = intended_manifest(config, state, job)
             observed = client.query(["get", "job", job["name"], "-o", "json"],
                                     sample / f"{job['name']}-job")
             pods = client.query(["get", "pods", "-l", f"job-name={job['name']}", "-o", "json"],
