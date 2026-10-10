@@ -1,4 +1,4 @@
-"""Opt-in dense PyTorch proximal ADMM for zero/nonnegative/Lorentz conic QP.
+"""Opt-in dense PyTorch proximal ADMM for zero/nonnegative/SOC/RSOC conic QP.
 
 min .5*x.T*P*x + q.T*x, subject to A*x + s = b, s in K.
 No third-party solving, automatic routing, infeasibility certificates or HSD.
@@ -14,7 +14,8 @@ import torch
 
 from .certificates import NumericalEvidence
 from .conic import (
-    ConicProblem, NonnegativeCone, SecondOrderCone, ZeroCone, check_conic_candidate,
+    ConicProblem, NonnegativeCone, RotatedSecondOrderCone, SecondOrderCone,
+    ZeroCone, check_conic_candidate,
 )
 
 __all__ = [
@@ -22,7 +23,7 @@ __all__ = [
     "project_cones", "prepare_native_conic", "solve_native_conic",
 ]
 
-Cone = ZeroCone | NonnegativeCone | SecondOrderCone
+Cone = ZeroCone | NonnegativeCone | SecondOrderCone | RotatedSecondOrderCone
 
 
 def _finite(value: torch.Tensor, context: str) -> None:
@@ -44,11 +45,103 @@ def _cones(cones: object, rows: int) -> tuple[Cone, ...]:
     if not isinstance(cones, (tuple, list)):
         raise TypeError("cones must be an ordered tuple or list")
     result = tuple(cones)
-    if any(type(cone) not in (ZeroCone, NonnegativeCone, SecondOrderCone) for cone in result):
-        raise TypeError("native conic supports Zero, Nonnegative and SOC only")
+    if any(type(cone) not in (
+        ZeroCone, NonnegativeCone, SecondOrderCone, RotatedSecondOrderCone,
+    ) for cone in result):
+        raise TypeError("native conic supports Zero, Nonnegative, SOC and RSOC only")
     if sum(cone.dimension for cone in result) != rows:
         raise ValueError("sum of cone dimensions must equal vector/A/b rows")
     return result
+
+
+def _rotated_projection(block: torch.Tensor) -> None:
+    """Scale only the SOC calculation; recover its small boundary head stably."""
+    tail = block[2:].clone()
+    tail_scale = tail.abs().max()
+    has_tail = bool(tail_scale > 0)
+    radius_mantissa, radius_exponent = torch.frexp(tail_scale)
+    if has_tail:
+        normalized_tail_radius = torch.linalg.vector_norm(tail / tail_scale)
+        radius_mantissa, norm_exponent = torch.frexp(
+            radius_mantissa * normalized_tail_radius,
+        )
+        radius_exponent = radius_exponent + norm_exponent
+    _finite(radius_mantissa, "RSOC tail radius mantissa")
+    first, second = block[0].clone(), block[1].clone()
+
+    def restore_exponent(mantissa, exponent):
+        # Some torch runtimes materialize 2**exponent before multiplication.
+        limit = 1023 if block.dtype == torch.float64 else 127
+        floor = -1022 if block.dtype == torch.float64 else -126
+        initial = exponent.clamp(min=floor, max=limit)
+        return torch.ldexp(torch.ldexp(mantissa, initial), exponent - initial)
+
+    def inside(a, b):
+        if bool((a < 0) | (b < 0)):
+            return False
+        if not has_tail:
+            return True
+        if not bool((a > 0) & (b > 0)):
+            return False
+        a_mantissa, a_exponent = torch.frexp(a)
+        b_mantissa, b_exponent = torch.frexp(b)
+        sum_exponent = a_exponent + b_exponent
+        half_exponent = torch.div(sum_exponent, 2, rounding_mode="floor")
+        product_root = torch.sqrt(a_mantissa * b_mantissa)
+        if bool(sum_exponent - 2 * half_exponent):
+            product_root = product_root * math.sqrt(2.0)
+        ratio = restore_exponent(
+            radius_mantissa / product_root, radius_exponent - half_exponent,
+        )
+        return bool(ratio <= math.sqrt(2.0))
+
+    if inside(first, second):
+        return
+    if inside(-first, -second):
+        block.zero_()
+        return
+    scale = block.abs().max()
+    normalized = block / scale
+    inverse_root_two = 1.0 / math.sqrt(2.0)
+    head = inverse_root_two * normalized[0] + inverse_root_two * normalized[1]
+    difference = inverse_root_two * normalized[0] - inverse_root_two * normalized[1]
+    transformed_tail = torch.cat((difference.reshape(1), normalized[2:]))
+    transformed_radius = torch.linalg.vector_norm(transformed_tail)
+    _finite(transformed_radius, "RSOC scaled radius")
+    if not bool(transformed_radius > 0):
+        raise RuntimeError("native conic unresolved RSOC projection radius")
+    if bool(head < 0):
+        # Rationalize R+head; the direct half-sum erases near-polar solutions.
+        normalized_radius = torch.linalg.vector_norm(normalized[2:])
+        numerator = normalized_radius ** 2 - 2 * normalized[0] * normalized[1]
+        weight = numerator / (
+            2 * transformed_radius * (transformed_radius - head)
+        )
+    else:
+        weight = 0.5 + 0.5 * head / transformed_radius
+    if not bool(weight > 0):
+        raise RuntimeError("native conic unresolved RSOC projection weight")
+    projected_head = weight * transformed_radius
+    large = (inverse_root_two * projected_head
+             + inverse_root_two * torch.abs(weight * difference)) * scale
+    _finite(large, "RSOC projected large head")
+    projected_tail = weight * tail
+    small = torch.zeros_like(large)
+    if has_tail and bool(weight > 0):
+        if not bool(large > 0):
+            raise RuntimeError("native conic unresolved RSOC projected head")
+        weight_mantissa, weight_exponent = torch.frexp(weight)
+        large_mantissa, large_exponent = torch.frexp(large)
+        small = restore_exponent(
+            (weight_mantissa * radius_mantissa) ** 2 / large_mantissa,
+            2 * weight_exponent + 2 * radius_exponent - large_exponent - 1,
+        )
+    if bool(first >= second):
+        block[0], block[1] = large, small
+    else:
+        block[0], block[1] = small, large
+    block[2:] = projected_tail
+    _finite(block, "RSOC projection output")
 
 
 @torch.no_grad()
@@ -57,8 +150,8 @@ def project_cones(
 ) -> torch.Tensor:
     """Euclidean projection onto the ordered product K (or K*).
 
-    Zero's dual is unrestricted. Nonnegative and SOC are self-dual.
-    For SOC, use scaled norms and half sums to avoid gratuitous overflow.
+    Zero's dual is unrestricted. Nonnegative, SOC and RSOC are self-dual.
+    RSOC uses an orthogonal SOC transform, preserving Euclidean projection.
     """
     if not isinstance(value, torch.Tensor):
         raise TypeError("cone projection requires a tensor")
@@ -80,14 +173,16 @@ def project_cones(
                 block.zero_()
         elif isinstance(cone, NonnegativeCone):
             block.clamp_(min=0)
+        elif isinstance(cone, RotatedSecondOrderCone):
+            _rotated_projection(block)
         else:
             t, tail = block[0].clone(), block[1:].clone()
             scale = tail.abs().max()
             radius = scale * torch.linalg.vector_norm(tail / scale) if bool(scale > 0) else scale
             _finite(radius, "SOC radius")
             if bool(radius <= t):
-                continue
-            if bool(radius <= -t):
+                pass
+            elif bool(radius <= -t):
                 block.zero_()
             else:
                 block[0] = 0.5 * t + 0.5 * radius

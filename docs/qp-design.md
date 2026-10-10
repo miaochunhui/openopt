@@ -61,15 +61,27 @@ The dense solver can now opt into these checks for generated checkpoint
 directions and termination. Singular spectral uncertainty remains unavailable.
 Approximate numerical evidence is not an exact proof or rigorous certified bound.
 
-`openopt.conic` defines zero, nonnegative and second-order cones, with independent
+`openopt.conic` defines zero, nonnegative, second-order and rotated second-order
+cones, with independent
 cone/KKT/complementarity/gap checks and an explicitly selected Clarabel CPU
 reference. `openopt.integer` defines MILP bounds/integrality, an explicit HiGHS
 CPU reference and independent incumbent/gap checks. MIQP is rejected; neither
 module silently falls back from CUDA or constitutes a native GPU solver.
 
 `openopt.native_conic` is a separate opt-in dense PyTorch proximal ADMM
-prototype for zero/nonnegative/SOC products, with explicitly requested
+prototype for zero/nonnegative/SOC/RSOC products, with explicitly requested
 device/dtype and independent original cone/KKT/range/gap acceptance.
+The RSOC convention is `(a,b,w): a,b>=0, 2ab>=||w||^2`. The native Euclidean
+projection uses a scaled orthogonal Lorentz transform, retains interior values
+exactly, rationalizes near-polar projection weights, and reconstructs the small
+boundary head from the original tail with exponent-split arithmetic.
+Original feasibility checks each head's sign separately and computes
+`||w||^2/(2*max(a,b))` by exponent splitting: neither opposite-head scale nor
+subtractive transformed coordinates may conceal an original violation.
+Unavailable/nonrepresentable arithmetic fails loudly. The explicit Clarabel
+CPU reference transforms the corresponding A/b rows and restores both s/z;
+all candidate checks run in original coordinates. CPU tests do not establish
+same-source CUDA execution or speedup. See `research/rotated-conic.md`.
 It is not the Clarabel CPU reference and never invokes a third-party solver.
 Its scope excludes HSD, additional cones, sparse conic operators and generated
 conic directions; CPU regression does not qualify its CUDA path or performance.

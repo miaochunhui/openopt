@@ -1,8 +1,10 @@
 """Dense conic contracts and independent CPU numerical checks.
 
 min 0.5*x.T*P*x + q.T*x, subject to A*x + s = b, s in K.
-The only solver is an explicitly selected, optional Clarabel CPU reference.
-No GPU implementation, exact certificate, or automatic fallback is provided.
+Zero, nonnegative, Lorentz and rotated Lorentz cones are supported here.
+The solver in this module is an explicitly selected Clarabel CPU reference;
+the separate native_conic module supplies opt-in PyTorch execution.
+No exact certificate or automatic fallback is provided.
 """
 
 from __future__ import annotations
@@ -19,7 +21,8 @@ import torch
 from .certificates import NumericalEvidence
 
 __all__ = [
-    "ZeroCone", "NonnegativeCone", "SecondOrderCone", "Zero", "Nonnegative", "SOC",
+    "ZeroCone", "NonnegativeCone", "SecondOrderCone", "RotatedSecondOrderCone",
+    "Zero", "Nonnegative", "SOC", "RSOC",
     "ConicProblem", "ConicConfig", "ConicResult",
     "check_cone_feasibility", "check_conic_candidate", "solve_conic",
 ]
@@ -60,10 +63,21 @@ class SecondOrderCone:
         _dimension(self.dimension, 2)
 
 
+@dataclass(frozen=True)
+class RotatedSecondOrderCone:
+    """(a, b, w): a,b >= 0 and 2*a*b >= ||w||_2^2; self-dual."""
+
+    dimension: int
+
+    def __post_init__(self) -> None:
+        _dimension(self.dimension, 3)
+
+
 Zero = ZeroCone
 Nonnegative = NonnegativeCone
 SOC = SecondOrderCone
-Cone = ZeroCone | NonnegativeCone | SecondOrderCone
+RSOC = RotatedSecondOrderCone
+Cone = ZeroCone | NonnegativeCone | SecondOrderCone | RotatedSecondOrderCone
 
 
 @dataclass(frozen=True)
@@ -170,8 +184,10 @@ def _cones(values: object, rows: int) -> tuple[Cone, ...]:
     if not isinstance(values, (tuple, list)):
         raise TypeError("cones must be an ordered tuple or list")
     cones = tuple(values)
-    if any(type(cone) not in (ZeroCone, NonnegativeCone, SecondOrderCone) for cone in cones):
-        raise TypeError("supported cones are Zero, Nonnegative and SOC only")
+    if any(type(cone) not in (
+        ZeroCone, NonnegativeCone, SecondOrderCone, RotatedSecondOrderCone,
+    ) for cone in cones):
+        raise TypeError("supported cones are Zero, Nonnegative, SOC and RSOC only")
     if sum(cone.dimension for cone in cones) != rows:
         raise ValueError("sum of cone dimensions must equal A/b rows")
     return cones
@@ -243,6 +259,33 @@ def _cone_check(
         elif isinstance(cone, NonnegativeCone):
             violation = np.maximum(-block, 0)
             limits = atol + rtol * np.abs(block)
+        elif isinstance(cone, RotatedSecondOrderCone):
+            first, second = float(block[0]), float(block[1])
+            tail_scale = _norm(block[2:])
+            small, large = min(first, second), max(first, second)
+            required = tail_scale
+            if large > 0 and tail_scale:
+                # r^2/(2*large), without squared overflow or a subtractive SOC gap.
+                scale_mantissa, scale_exponent = math.frexp(tail_scale)
+                normalized_radius = _scalar(
+                    np.hypot.reduce(block[2:] / tail_scale), f"{name} RSOC scaled norm",
+                )
+                mantissa, norm_exponent = math.frexp(scale_mantissa * normalized_radius)
+                exponent = scale_exponent + norm_exponent
+                head_mantissa, head_exponent = math.frexp(large)
+                required = _scalar(math.ldexp(
+                    mantissa * mantissa / (2.0 * head_mantissa),
+                    2 * exponent - head_exponent,
+                ), f"{name} RSOC required head")
+            elif large > 0:
+                required = 0.0
+            violation = np.array([
+                max(-first, 0.0), max(-second, 0.0), max(required - small, 0.0),
+            ])
+            limits = np.array([
+                atol + rtol * abs(first), atol + rtol * abs(second),
+                atol + rtol * max(abs(small), required),
+            ])
         else:
             tail = _scalar(np.hypot.reduce(block[1:]), f"{name} SOC norm")
             violation = np.array([max(tail - block[0], 0.0)])
@@ -369,6 +412,22 @@ def _reference_dependencies():
     return clarabel, sparse
 
 
+def _rotated_coordinates(value: np.ndarray, cones: tuple[Cone, ...]) -> np.ndarray:
+    """Apply symmetric orthogonal T; T is also its inverse and dual map."""
+    result = value.copy()
+    offset = 0
+    inverse_root_two = 1.0 / math.sqrt(2.0)
+    for cone in cones:
+        if isinstance(cone, RotatedSecondOrderCone):
+            first, second = value[offset].copy(), value[offset + 1].copy()
+            result[offset] = inverse_root_two * first + inverse_root_two * second
+            result[offset + 1] = inverse_root_two * first - inverse_root_two * second
+        offset += cone.dimension
+    if not np.isfinite(result).all():
+        raise ValueError("nonfinite rotated-cone coordinate transformation")
+    return result
+
+
 def solve_conic(problem: ConicProblem, config: ConicConfig = ConicConfig()) -> ConicResult:
     """Execute only the explicitly selected third-party CPU reference backend.
 
@@ -383,6 +442,7 @@ def solve_conic(problem: ConicProblem, config: ConicConfig = ConicConfig()) -> C
         ZeroCone: clarabel.ZeroConeT,
         NonnegativeCone: clarabel.NonnegativeConeT,
         SecondOrderCone: clarabel.SecondOrderConeT,
+        RotatedSecondOrderCone: clarabel.SecondOrderConeT,
     }
     settings = clarabel.DefaultSettings()
     for name, value in {
@@ -394,9 +454,12 @@ def solve_conic(problem: ConicProblem, config: ConicConfig = ConicConfig()) -> C
             raise RuntimeError(f"Clarabel settings field unavailable: {name}")
         setattr(settings, name, value)
     # Clarabel consumes the upper triangle; independent checks use the full P.
+    with _arithmetic():
+        reference_A = _rotated_coordinates(p.A, p.cones)
+        reference_b = _rotated_coordinates(p.b, p.cones)
     solver = clarabel.DefaultSolver(
-        sparse.csc_matrix(np.triu(p.P)), p.q.copy(), sparse.csc_matrix(p.A),
-        p.b.copy(), [cone_types[type(cone)](cone.dimension) for cone in p.cones], settings,
+        sparse.csc_matrix(np.triu(p.P)), p.q.copy(), sparse.csc_matrix(reference_A),
+        reference_b, [cone_types[type(cone)](cone.dimension) for cone in p.cones], settings,
     )
     solution = solver.solve()
     raw = str(solution.status)
@@ -408,6 +471,8 @@ def solve_conic(problem: ConicProblem, config: ConicConfig = ConicConfig()) -> C
             _vector(getattr(solution, name), name, size)
             for name, size in (("x", p.q.size), ("s", p.b.size), ("z", p.b.size))
         )
+        s = _rotated_coordinates(s, p.cones)
+        z = _rotated_coordinates(z, p.cones)
     statuses = {
         "Solved": "reference_candidate_rejected",
         "AlmostSolved": "reference_almost_solved",

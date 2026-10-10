@@ -20,7 +20,8 @@ from .scaling import (
     equilibrate_qp, solve_scaled_qp,
 )
 from .conic import (
-    ZeroCone, NonnegativeCone, SecondOrderCone, ConicProblem, ConicConfig,
+    ZeroCone, NonnegativeCone, SecondOrderCone, RotatedSecondOrderCone,
+    ConicProblem, ConicConfig,
     ConicResult, check_cone_feasibility, check_conic_candidate, solve_conic,
 )
 from .integer import (
@@ -45,7 +46,8 @@ __all__ = list(_openpo_all) + [
     "prepare_operator_qp", "solve_operator_qp",
     "ScalingConfig", "DiagonalScaling", "EquilibratedQP", "ScaledQPResult",
     "equilibrate_qp", "solve_scaled_qp",
-    "ZeroCone", "NonnegativeCone", "SecondOrderCone", "ConicProblem", "ConicConfig",
+    "ZeroCone", "NonnegativeCone", "SecondOrderCone", "RotatedSecondOrderCone",
+    "ConicProblem", "ConicConfig",
     "ConicResult", "check_cone_feasibility", "check_conic_candidate", "solve_conic",
     "MILPProblem", "MILPConfig", "MILPResult", "MILPValidation", "check_milp_candidate",
     "solve_milp", "solve_miqp",

@@ -31,7 +31,10 @@ The product target and release gates are in `strategy.html`.
    requests strict and choose automatic CPU/GPU routing from measurements.
 4. Convex conic scope: zero/nonnegative/SOC contracts, the explicit Clarabel
    CPU reference and an opt-in dense native PyTorch proximal ADMM prototype
-   are implemented. Actual CUDA acceptance, HSD/directions, further cones and
+   are implemented. RSOC original-coordinate checks and native projection
+   extend that prototype, with extreme-coordinate regression and strict
+   device semantics; fresh clean-source independent/CUDA checks are pending.
+   Actual CUDA acceptance, HSD/directions, further cones and
    representative MOSEK/open-reference qualification remain required.
 5. MILP/MIQP scope: MILP bounds/integrality and the explicit HiGHS CPU reference
    are implemented with independent incumbent checks. Native GPU search,
@@ -99,3 +102,39 @@ Remaining qualification: licensed commercial matched runs, representative
 diverse/ill-conditioned/sparse corpora, certificates, actual multi-GPU scaling,
 hardware lower-bound analysis and publication through an authorized project
 entry. These are not promoted to DONE.
+
+## Release4 Current Stop Gates
+
+Current detailed handoff: `handoff/release4-20261010.md`. The v4 renderer is
+implemented and independently reviewed, but its current external report is
+an intermediate historical-source projection, not final release acceptance.
+
+- Main integrator: freeze current RSOC and reviewed guard sources, run clean
+  independent CPU checks, then fresh K8s CUDA replay and wheel acceptance.
+  Eleven extreme-coordinate RSOC counterexamples were retained and repaired;
+  the latest development three-file suite is 276 passed/19 CUDA skips.
+- Checker developer and independent mathematical reviewer: close the
+  reproducible v1 rounded-zero/nonconvex false acceptance. Repair v2 is locally
+  committed separately; original independent tests are unchanged, but the
+  main tree has not integrated it and independent signoff is still pending.
+  Its GPU admission remains stopped until that signoff and clean integration.
+- Regression coordinator: integrate fixture-aware sharding only after its
+  dependency/metadata proof and cost gate pass. Whole-file outer proof
+  remains above 300 seconds; the three independently validated groups are
+  bounded, not permission to split a shared fixture component arbitrarily.
+  Cluster v2 fixture audit transport is not yet implemented.
+- Public qualification owner: fixed-primal LP postsolve is committed only
+  in an independent worktree; fresh real-model behavior is unverified.
+  New refinement settings require a versioned complete worker contract.
+  Old Openopt/OSQP failures and instance redistribution restrictions remain.
+- Commercial owner: zero real licensed commercial solves are recorded.
+  Authorized actual SDK/license runtime and matched problem results are
+  required; fixtures and open-source baselines cannot close this gate.
+- Publication owner: shared infra index/generator/source files contain
+  existing changes from other work. No collision merge, online publication
+  or remote push was performed. Approved integration plus genuine readback
+  and exact published bytes are required to close publication.
+- Core owners: full sparse/presolve/HSD/SDP/exponential/power cones,
+  native MIP/MIQP, nonlinear/global scope, representative robustness,
+  transfer-inclusive commercial performance and real multi-GPU scaling
+  remain incomplete. The 0BSD project license does not confer those abilities.

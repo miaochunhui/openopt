@@ -647,15 +647,24 @@ def test_optional_public_qualification_no_invented_run(inputs, false_pass):
         assert b'data-scalar="public_attempted">0' in files["benchmark-report-v4.html"]
 
 
-def scan_submission_with_existing_gate():
+def scan_submission_with_existing_gate(paths=None):
     scanner = Path("/data/dev/infra/ops/dsh/scan-secrets-precommit.py")
     assert scanner.is_file(), "required local precommit scanner missing"
     check = subprocess.run([sys.executable, "-B", str(scanner), "--selftest"],
                            capture_output=True, text=True, check=False)
     assert check.returncode == 0 and "verdict=PASS" in check.stdout, "secret scanner selftest failed"
     command = [sys.executable, "-B", str(scanner), "--no-grep"]
-    for name in ("scripts/render_release_report.py", "tests/test_render_release_report.py",
-                 "docs/research/release-report.md"):
+    paths = paths or (
+        "scripts/render_release_report.py", "tests/test_render_release_report.py",
+        "docs/research/release-report.md",
+    )
+    assert len(paths) == len(set(paths)) and paths, "require unique explicit source paths"
+    for name in paths:
+        relative = Path(name)
+        target = report.ROOT / relative
+        assert (not relative.is_absolute() and ".." not in relative.parts
+                and target.is_file() and not target.is_symlink()
+                and target.resolve().is_relative_to(report.ROOT.resolve()))
         command.extend(["--path", str(report.ROOT / name)])
     result = subprocess.run(command, capture_output=True, text=True, check=False)
     assert result.returncode == 0, "local credential-literal gate failed; output withheld"
@@ -664,9 +673,15 @@ def scan_submission_with_existing_gate():
     shape = subprocess.run([sys.executable, "-B", str(scanner), "--no-needle", *command[4:]],
                            capture_output=True, text=True, check=False)
     assert shape.returncode == 0, "redaction-safe shape scan failed"
-    print("REPORT_SUBMISSION_SCAN verdict=PASS files=3 literal_hits=0 scanner_selftest=PASS")
+    print(f"REPORT_SUBMISSION_SCAN verdict=PASS files={len(paths)} "
+          "literal_hits=0 scanner_selftest=PASS")
 
 
 if __name__ == "__main__":
-    assert sys.argv[1:] == ["--scan-submission"], "use --scan-submission"
-    scan_submission_with_existing_gate()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Safe explicit-file submission scan")
+    parser.add_argument("--scan-submission", required=True, action="store_true")
+    parser.add_argument("--path", action="append")
+    args = parser.parse_args()
+    scan_submission_with_existing_gate(args.path)
