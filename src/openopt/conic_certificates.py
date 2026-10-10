@@ -96,6 +96,20 @@ def _bounds(value: Fraction, name: str) -> tuple[float, float]:
     return lower, upper
 
 
+def _reject_boolean_values(value: object, name: str) -> None:
+    # NumPy promotes booleans in mixed sequences before its dtype can reject them.
+    pending, visited = [value], set()
+    while pending:
+        item = pending.pop()
+        if (isinstance(item, (bool, np.bool_))
+                or isinstance(item, np.ndarray) and item.dtype.kind == "b"
+                or isinstance(item, torch.Tensor) and item.dtype == torch.bool):
+            raise ValueError(f"{name} must be real dense binary64; booleans are forbidden")
+        if isinstance(item, (list, tuple)) and id(item) not in visited:
+            visited.add(id(item))
+            pending.extend(item)
+
+
 def _array(value: object, name: str) -> np.ndarray:
     if isinstance(value, torch.Tensor):
         if value.device != torch.device("cpu"):
@@ -103,6 +117,7 @@ def _array(value: object, name: str) -> np.ndarray:
         if value.layout != torch.strided or value.dtype != torch.float64:
             raise ValueError(f"{name} must be real dense binary64")
         value = value.detach().numpy()
+    _reject_boolean_values(value, name)
     array = np.asarray(value)
     if array.dtype.kind not in "fiu" or (array.dtype.kind == "f" and array.dtype != np.float64):
         raise ValueError(f"{name} must be real dense binary64 or exactly representable integers")
@@ -199,7 +214,7 @@ def _model(problem: ConicProblem) -> _Model:
 
 class _Audit:
     def __init__(self, atol: float, rtol: float):
-        if isinstance(atol, bool) or isinstance(rtol, bool):
+        if isinstance(atol, (bool, np.bool_)) or isinstance(rtol, (bool, np.bool_)):
             raise ValueError("tolerances cannot be booleans")
         atol, rtol = float(atol), float(rtol)
         if not math.isfinite(atol) or atol <= 0 or not math.isfinite(rtol) or not 0 <= rtol < 1:

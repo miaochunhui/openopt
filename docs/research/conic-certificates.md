@@ -39,6 +39,15 @@ non-CPU inputs, inexact integer conversions and unsupported shapes/cones fail
 loud. Explicit `device=cuda[:index]` raises even if CUDA is available; there
 is no implicit transfer, accelerator claim or CPU fallback from CUDA.
 
+Python and NumPy booleans are rejected before numeric promotion inside original
+list/tuple models and witnesses, including mixed numeric sequences and nested
+boolean arrays/tensors. Already binary64 arrays carry represented numeric
+values, not recoverable provenance about any earlier caller conversion.
+Python bool and NumPy bool scalars are also forbidden for both tolerances.
+Numeric lists/tuples, exactly representable integers and CPU double tensors keep
+the same arithmetic and evidence. No mathematical, device or default gate is
+changed by this input-contract repair.
+
 The full original matrix must be exactly symmetric on its supplied binary64
 entries, with no symmetrization, triangular expansion or regularization.
 Bounded rational Schur complements check original PSD, including zero-pivot
@@ -125,3 +134,41 @@ PASS. These are development receipts, not clean freeze or independent signoff.
 Final clean receipts live in `clean-cpu` and `clean-smoke`; use the real final
 verification/JUnit and `conic-directions-audit.json` written by the re-read CLI,
 not these development counts, for review. Original first-cause evidence stays.
+
+## Boolean Contract Repair Evidence
+
+The unchanged independent review `09751dc06815038869926dc9092e30591984abf9`
+against original `cfecb19146cb064059ac682f0d6991878f586a3b` remains FAIL:
+120 nodes, 115 passed/five failed/zero skipped, with five actual returned
+`passed=true` observations at
+`conic-certificates-independent/clean-final-v1/tests-9wjazit9/independent-review.json`.
+Mixed y/q/b lists and NumPy boolean tolerances bypassed the old input rejection.
+
+This repair owns only this document, the module and its existing test file.
+The new 40-case targeted pre-repair run is retained at
+`conic-types-repair/before-types-v1/tests-yxljtior`: 39 failed/one passed,
+zero errors/skips, 7.12 pytest seconds. The one numeric compatibility control
+passed. Pre-smoke was 80 passed/four explicit CUDA skips in 8.65 seconds at
+`conic-types-repair/pre-smoke-v1/smoke-wy71xsvr`.
+
+Clean owner verification and audit use the external `conic-types-repair`
+directory. The original independent test file must remain byte-for-byte frozen.
+Its fixed old producer hashes cannot certify changed production. The replay
+entry executes its unchanged 120 controls in the clean old reviewer tree, while
+Python imports the clean repaired module from the new repair tree. Both complete
+source snapshots, actual loaded module path/hash, exact collection/JUnit and
+the five rejection observations are retained. The historical pin check and
+math receipt still refer to the old reviewer root; they are explicitly NOT
+repaired-source acceptance. No constants, test gates or scopes are patched.
+
+```bash
+sudo -n -u infra env CUDA_VISIBLE_DEVICES=-1 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=src:. /hf3fs-jd/data/tmp/openopt-validation-env/bin/python -B tests/test_conic_certificates.py --replay-independent /data/dev/openopt-wt-release4-20261010-conic-certificates-independent --artifact-dir /hf3fs-jd/data/tmp/openopt-release-20261010/conic-types-repair/unchanged-independent-v1
+```
+
+`CONTROLS_PASS` means owner execution of all unchanged controls, not independent
+signoff. A newly authorized reviewer source binding is still needed for that
+signoff. The old `09751dc` FAIL receipt is never overwritten or relabeled.
+The targeted repaired 40 cases passed in 5.61 pytest seconds at
+`conic-types-repair/after-types-v1/tests-8xg098rf`; this was dirty development
+source, not the final clean freeze. CPU numerical evidence remains neither GPU
+nor commercial qualification.

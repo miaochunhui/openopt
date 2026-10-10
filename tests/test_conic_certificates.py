@@ -6,6 +6,7 @@ and evidence in its external tmp directory. The CLI re-reads real receipts.
 
 from __future__ import annotations
 
+import argparse
 from dataclasses import replace
 from datetime import datetime, timezone
 from fractions import Fraction
@@ -13,7 +14,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
+import tempfile
+import time
 from xml.etree import ElementTree
 
 import numpy as np
@@ -314,6 +318,48 @@ def test_nonbinary64_or_inexact_conversion_rejected(value):
         unbounded(empty(), value)
 
 
+@pytest.mark.parametrize("field", ["P", "q", "A", "b", "d", "x0", "s0", "y"])
+@pytest.mark.parametrize("boolean", [True, False, np.bool_(True), np.bool_(False)])
+def test_mixed_boolean_inputs_rejected_before_numeric_coercion(field, boolean):
+    p = in_cone(Nonnegative(2), [-1., 0.])
+    witness = {"d": [1., 0.], "x0": [0., 0.], "s0": [0., 0.]}
+    if field in ("P", "A"):
+        p = replace(p, **{field: [[0., boolean], [0., 0.]]})
+    elif field in ("q", "b"):
+        p = replace(p, **{field: [-1., boolean]})
+    elif field == "y":
+        with pytest.raises(ValueError, match="boolean|binary64"):
+            infeasible(p, [1., boolean])
+        return
+    else:
+        witness[field] = [1., boolean] if field == "d" else [0., boolean]
+    with pytest.raises(ValueError, match="boolean|binary64"):
+        unbounded(p, **witness)
+
+
+@pytest.mark.parametrize("name", ["atol", "rtol"])
+@pytest.mark.parametrize("boolean", [np.bool_(True), np.bool_(False)])
+def test_numpy_boolean_tolerances_rejected(name, boolean):
+    with pytest.raises(ValueError, match="boolean"):
+        unbounded(empty(), [1.], x0=[0.], s0=[], **{name: boolean})
+
+
+@pytest.mark.parametrize("direction", [
+    (1., False), [1., np.array(False)], [1., np.array([False])[0]],
+])
+def test_nested_boolean_sequence_forms_rejected(direction):
+    with pytest.raises(ValueError, match="boolean|binary64"):
+        unbounded(empty(q=[-1., 0.]), direction, x0=[0., 0.], s0=[])
+
+
+def test_numeric_sequence_and_tensor_types_keep_original_evidence():
+    p = empty(q=[-1., 0.])
+    baseline = unbounded(p, [1., 0.], x0=[0., 0.], s0=[]).to_dict()
+    for direction in ([1, 0], (1., 0.), np.array([1, 0]),
+                      torch.tensor([1., 0.], dtype=torch.float64)):
+        assert unbounded(p, direction, x0=[0., 0.], s0=[]).to_dict() == baseline
+
+
 @pytest.mark.parametrize("change", ["n_limit", "m_limit", "P_shape", "b_shape", "cone_rows", "cone_type", "empty_n", "device"])
 def test_unsupported_and_malformed_fail_loud(change):
     p = empty()
@@ -498,8 +544,154 @@ def audit_artifacts(directory: Path):
           f"gpu=UNVERIFIED receipt={path} sha256={digest} audit={audit_path}")
 
 
+INDEPENDENT_COMMIT = "09751dc06815038869926dc9092e30591984abf9"
+INDEPENDENT_TEST = "tests/test_conic_certificates_independent.py"
+INDEPENDENT_SHA = "633f40fa6481dca0b4b8d183dee1457b6c4b0cacceeaef2fb7ede3bd5ed26829"
+
+
+def _save_replay(path, value):
+    with path.open("x", encoding="utf-8") as output:
+        output.write(json.dumps(value, indent=2, allow_nan=False) + "\n")
+
+
+def _independent_worker(review_root, artifacts):
+    """Execute unchanged gates, with a reporting-only collection hook."""
+    import openopt.conic_certificates as loaded
+
+    assert Path(loaded.__file__).resolve() == ROOT / "src/openopt/conic_certificates.py"
+    nodes = []
+
+    class MembershipRecorder:
+        def pytest_collection_finish(self, session):
+            nodes.extend(item.nodeid for item in session.items)
+
+    os.chdir(review_root)
+    rc = pytest.main([
+        "-q", "-ra", "-o", f"cache_dir={artifacts / 'pytest-cache'}",
+        "--basetemp", str(artifacts / "pytest-tmp"),
+        f"--junitxml={artifacts / 'pytest.xml'}", INDEPENDENT_TEST,
+    ], plugins=[MembershipRecorder()])
+    _save_replay(artifacts / "worker.json", {
+        "returncode": int(rc), "collection_nodeids": nodes,
+        "loaded_module": str(Path(loaded.__file__).resolve()),
+        "loaded_module_sha256": hashlib.sha256(Path(loaded.__file__).read_bytes()).hexdigest(),
+    })
+    return int(rc)
+
+
+def replay_independent(review_root, artifact_root):
+    """Owner replay, not re-labeling the reviewer's old source-pin acceptance."""
+    from scripts.verify import check_source_consistency, source_snapshot
+
+    review_root = review_root.resolve(strict=True)
+    artifact_root = artifact_root.resolve()
+    if (not artifact_root.is_relative_to(Path("/3fs/research3fs/data/tmp"))
+            or artifact_root.is_relative_to(ROOT) or artifact_root.is_relative_to(review_root)):
+        raise ValueError("replay artifacts require external 3FS tmp")
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    artifacts = Path(tempfile.mkdtemp(prefix="replay-", dir=artifact_root))
+    started = time.monotonic()
+    value = {
+        "schema_version": 1, "verdict": "RUNNING",
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "qualification": "owner execution of unchanged independent controls; not independent signoff",
+        "independent_signoff": "UNVERIFIED", "gpu_execution": "UNVERIFIED",
+        "commercial": "UNVERIFIED", "deadline_seconds": 170,
+        "review_commit": INDEPENDENT_COMMIT, "review_test_sha256": INDEPENDENT_SHA,
+        "historical_pin_check_root": str(review_root),
+        "historical_math_receipt_is_repaired_source_acceptance": False,
+    }
+    before = reviewer_before = None
+    try:
+        before, reviewer_before = source_snapshot(ROOT), source_snapshot(review_root)
+        value.update(source=before, reviewer_source=reviewer_before)
+        assert before["clean"] and reviewer_before["clean"]
+        assert reviewer_before["commit"] == INDEPENDENT_COMMIT
+        assert reviewer_before["sha256"][INDEPENDENT_TEST] == INDEPENDENT_SHA
+        env = os.environ.copy()
+        env.update(PYTHONPATH=os.pathsep.join([str(ROOT / "src"), str(ROOT)]),
+                   CUDA_VISIBLE_DEVICES="-1", PYTHONDONTWRITEBYTECODE="1",
+                   PYTEST_DISABLE_PLUGIN_AUTOLOAD="1", TMPDIR=str(artifacts),
+                   OMP_NUM_THREADS="1", OPENBLAS_NUM_THREADS="1", MKL_NUM_THREADS="1")
+        command = [sys.executable, "-B", str(ROOT / "tests/test_conic_certificates.py"),
+                   "--independent-worker", str(review_root), "--artifact-dir", str(artifacts)]
+        value["command"] = command
+        with (artifacts / "pytest.log").open("x", encoding="utf-8") as output:
+            result = subprocess.run(command, cwd=ROOT, env=env, stdout=output,
+                                    stderr=subprocess.STDOUT, check=False, timeout=160)
+            output.write(f"\nreturncode={result.returncode}\n")
+        value["returncode"] = result.returncode
+        worker = json.loads((artifacts / "worker.json").read_bytes())
+        assert worker["returncode"] == result.returncode
+        cases = list(ElementTree.parse(artifacts / "pytest.xml").getroot().iter("testcase"))
+        actual = [c.get("classname").replace(".", "/") + ".py::" + c.get("name") for c in cases]
+        selected = worker["collection_nodeids"]
+        value.update(collection_nodeids=selected, junit_nodeids=actual,
+                     membership_missing=sorted(set(selected) - set(actual)),
+                     membership_extra=sorted(set(actual) - set(selected)),
+                     duplicates=sorted(n for n in set(actual) if actual.count(n) > 1))
+        assert len(selected) == len(set(selected)) == len(actual) == len(set(actual)) == 120
+        assert set(selected) == set(actual)
+        counts = {"tests": len(cases), **{
+            name: sum(c.find(tag) is not None for c in cases)
+            for name, tag in (("failures", "failure"), ("errors", "error"), ("skipped", "skipped"))
+        }}
+        value.update(tests=counts, loaded_source=worker)
+        assert worker["loaded_module_sha256"] == before["sha256"]["src/openopt/conic_certificates.py"]
+        observations = []
+        for case in cases:
+            props = {p.get("name"): p.get("value") for p in case.findall("properties/property")}
+            if "input_observation_path" not in props:
+                continue
+            path = Path(props["input_observation_path"]).resolve(strict=True)
+            assert path.is_relative_to(artifacts)
+            pin = hashlib.sha256(path.read_bytes()).hexdigest()
+            assert pin == props["input_observation_sha256"]
+            observations.append({"path": str(path), "sha256": pin,
+                                 **json.loads(path.read_bytes())})
+        value["input_observations"] = observations
+        assert len(observations) == 5 and all(o["outcome"] == "REJECTED" for o in observations)
+        assert result.returncode == 0 and counts == {
+            "tests": 120, "failures": 0, "errors": 0, "skipped": 0,
+        }
+        value["verdict"] = "CONTROLS_PASS"
+    except Exception as error:
+        value.update(verdict="FAIL", first_failure=f"{type(error).__name__}: {error}")
+    finally:
+        after, reviewer_after = source_snapshot(ROOT), source_snapshot(review_root)
+        if before is not None and reviewer_before is not None:
+            value["source_consistency"] = check_source_consistency(before, after)
+            value["reviewer_source_consistency"] = check_source_consistency(reviewer_before, reviewer_after)
+            if (not after["clean"] or not reviewer_after["clean"]
+                    or value["source_consistency"]["verdict"] != "PASS"
+                    or value["reviewer_source_consistency"]["verdict"] != "PASS"):
+                value.update(verdict="FAIL", first_failure=value.get("first_failure", "source drift"))
+        elapsed = time.monotonic() - started
+        value.update(wall_seconds=elapsed, finished_at=datetime.now(timezone.utc).isoformat())
+        if elapsed > 170:
+            value.update(verdict="FAIL", first_failure=value.get("first_failure", "170-second budget exceeded"))
+        value["artifact_sha256"] = {
+            name: hashlib.sha256((artifacts / name).read_bytes()).hexdigest()
+            for name in ("pytest.xml", "pytest.log", "worker.json") if (artifacts / name).is_file()
+        }
+        _save_replay(artifacts / "replay.json", value)
+        print(f"CONIC_TYPES_REPLAY verdict={value['verdict']} "
+              f"tests={value.get('tests')} independent_signoff=UNVERIFIED "
+              f"receipt={artifacts / 'replay.json'}", flush=True)
+    return 0 if value["verdict"] == "CONTROLS_PASS" else 1
+
+
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "--audit-artifacts":
         audit_artifacts(Path(sys.argv[2]))
     else:
-        raise SystemExit("use pytest or --audit-artifacts DIRECTORY")
+        parser = argparse.ArgumentParser(description=__doc__)
+        modes = parser.add_mutually_exclusive_group(required=True)
+        modes.add_argument("--replay-independent", type=Path)
+        modes.add_argument("--independent-worker", type=Path)
+        parser.add_argument("--artifact-dir", type=Path, required=True)
+        args = parser.parse_args()
+        raise SystemExit(
+            _independent_worker(args.independent_worker, args.artifact_dir)
+            if args.independent_worker else replay_independent(args.replay_independent, args.artifact_dir)
+        )
