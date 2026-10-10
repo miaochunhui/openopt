@@ -11,6 +11,7 @@ exercise the verifier only and must never be promoted to GPU release evidence.
 
 from copy import deepcopy
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
 import importlib.util
 import json
 import os
@@ -60,6 +61,18 @@ def put(path, value):
     path.write_bytes(audit.encode(value))
 
 
+def write_fixture_files(root, files):
+    """Independent byte copies only; no links, metadata copying or gate cache."""
+    paths = {root / audit.relative(name): data for name, data in files.items()}
+    parents = {path.parent for path in paths}
+    for parent in sorted(parents):
+        parent.mkdir(parents=True, exist_ok=True)
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(path.write_bytes, data) for path, data in paths.items()]
+        for future, data in zip(futures, paths.values()):
+            assert future.result() == len(data)
+
+
 @pytest.fixture(scope="module")
 def trusted_root(tmp_path_factory):
     root = tmp_path_factory.mktemp("trusted-source")
@@ -106,8 +119,20 @@ def trusted_root(tmp_path_factory):
     return root
 
 
+@pytest.fixture(scope="module")
+def frozen_source_files(trusted_root):
+    """Freeze fixture inputs once; real acceptance still rechecks current bytes."""
+    identity = audit.current_identity(trusted_root)
+    selected = {name: digest for name, digest in identity["sha256"].items()
+                if name.startswith(audit.PREFIXES) or name in audit.SNAPSHOT_FILES}
+    files = {name: (trusted_root / name).read_bytes() for name in selected}
+    assert {name: audit.sha(data) for name, data in files.items()} == selected
+    yield {"identity": identity, "selected": selected, "files": files}
+    assert audit.current_identity(trusted_root) == identity
+
+
 @pytest.fixture
-def producer(trusted_root, trusted_runtime, frozen_cpu_nine, monkeypatch):
+def producer(trusted_root, trusted_runtime, frozen_cpu_nine, frozen_source_files, monkeypatch):
     real = trusted_runtime
 
     def forbidden(*args, **kwargs):
@@ -136,6 +161,7 @@ def producer(trusted_root, trusted_runtime, frozen_cpu_nine, monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", git_only)
     monkeypatch.setattr(audit, "trusted_producer", lambda root, digest: real)
+    monkeypatch.setattr(real, "_fixture_source_files", frozen_source_files, raising=False)
     assert real.seal.__module__ == real.replay.__module__
     assert real.ROOT == trusted_root
     return real
@@ -213,7 +239,12 @@ def frozen_cpu_nine(tmp_path_factory, trusted_root, trusted_runtime):
               "case_count": 9, "source_sha256": proof.source_map(trusted_root)}
     put(parent / "cpu-receipt.json", frozen)
     before = proof.inventory(parent)
-    yield {"root": parent, "result": result, "expected": expected}
+    sidecars = {case: load(result.parent / (case + ".json")) for case in proof.CASES}
+    expected_files = frozen_raw_files(expected, parent)
+    case_files = {case: frozen_raw_files(saved, result.parent)
+                  for case, saved in sidecars.items()}
+    yield {"root": parent, "result": result, "expected": expected,
+           "sidecars": sidecars, "expected_files": expected_files, "case_files": case_files}
     assert proof.inventory(parent) == before
 
 
@@ -236,13 +267,11 @@ def tensor_records(producer, root, case, arrays, label):
 
 def fake_result(producer, root, case, sources, model, expectation, cpu=None):
     root.mkdir(parents=True)
-    for name in sources:
-        target = root / "source" / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes((producer.ROOT / name).read_bytes())
+    write_fixture_files(root / "source",
+                        {name: producer._fixture_source_files["files"][name] for name in sources})
     if cpu is not None:
-        saved = deepcopy(load(cpu["result"].parent / (case + ".json")))
-        copy_raw_descriptors(saved, cpu["result"].parent, root)
+        saved = deepcopy(cpu["sidecars"][case])
+        copy_raw_descriptors(saved, cpu["result"].parent, root, cpu["case_files"][case])
         relabel_runtime(saved)
         saved["device"] = saved["config"]["device"] = "cuda:0"
         for record in saved["model"].values():
@@ -358,22 +387,49 @@ def fake_manifest(tree, index, case, expectation):
     return item
 
 
-def copy_raw_descriptors(value, source, target):
-    if isinstance(value, dict):
-        if set(value) == {"path", "sha256", "bytes"}:
-            original = audit.bound(source, value)
-            path = target / value["path"]
-            path.parent.mkdir(parents=True, exist_ok=True)
-            if path.exists():
-                assert path.read_bytes() == original.read_bytes()
+def raw_descriptors(value):
+    records = {}
+
+    def collect(item):
+        if isinstance(item, dict):
+            if set(item) == {"path", "sha256", "bytes"}:
+                name = audit.relative(item["path"])
+                if name in records:
+                    assert records[name] == item, "conflicting fixture raw descriptor"
+                else:
+                    records[name] = item
             else:
-                path.write_bytes(original.read_bytes())
-        else:
-            for item in value.values():
-                copy_raw_descriptors(item, source, target)
-    elif isinstance(value, list):
-        for item in value:
-            copy_raw_descriptors(item, source, target)
+                for nested in item.values():
+                    collect(nested)
+        elif isinstance(item, list):
+            for nested in item:
+                collect(nested)
+
+    collect(value)
+    return records
+
+
+def frozen_raw_files(value, source):
+    """Cache verified immutable fixture inputs, not replay/inventory outcomes."""
+    records = raw_descriptors(value)
+
+    def checked(item):
+        name, record = item
+        data = audit.bound(source, record).read_bytes()
+        assert len(data) == record["bytes"] and audit.sha(data) == record["sha256"]
+        return name, data
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        return dict(executor.map(checked, records.items()))
+
+
+def copy_raw_descriptors(value, source, target, frozen_files=None):
+    records = raw_descriptors(value)
+    inputs = frozen_raw_files(value, source) if frozen_files is None else frozen_files
+    files = {name: inputs[name] for name in records}
+    assert all(len(files[name]) == record["bytes"] and audit.sha(files[name]) == record["sha256"]
+               for name, record in records.items())
+    write_fixture_files(target, files)
 
 
 def relabel_runtime(value):
@@ -393,15 +449,12 @@ def relabel_runtime(value):
 def fixture_run(tmp_path, trusted_root, producer, cases=("gap_lp",), cpu=None):
     tree = tmp_path / "simulated-release-proof"
     tree.mkdir()
-    identity = audit.current_identity(trusted_root)
-    selected = {k: v for k, v in identity["sha256"].items()
-                if k.startswith(audit.PREFIXES) or k in audit.SNAPSHOT_FILES}
+    frozen_sources = producer._fixture_source_files
+    identity = deepcopy(frozen_sources["identity"])
+    selected = frozen_sources["selected"]
     producer_sources = {k: v for k, v in selected.items()
                         if (k.startswith("src/") and k.endswith(".py")) or k == audit.PRODUCER}
-    for name in selected:
-        path = tree / "source" / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes((trusted_root / name).read_bytes())
+    write_fixture_files(tree / "source", frozen_sources["files"])
     put(tree / "source/source-hashes.json", selected)
     model_root = tree
     expected = {"schema_version": 1, "source_sha256": producer_sources, "cases": {}}
@@ -412,7 +465,7 @@ def fixture_run(tmp_path, trusted_root, producer, cases=("gap_lp",), cpu=None):
             expected["cases"][case] = {"model": records, "model_sha256": producer.model_hash(records)}
         else:
             entry = deepcopy(cpu["expected"]["cases"][case])
-            copy_raw_descriptors(entry, cpu["root"], model_root)
+            copy_raw_descriptors(entry, cpu["root"], model_root, cpu["expected_files"])
             expected["cases"][case] = entry
     path = tree / "proof-expectations.json"
     put(path, expected)
