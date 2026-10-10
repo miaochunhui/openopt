@@ -247,6 +247,75 @@ def test_candidate_original_radial_tolerance_matches_exact_rational(value, atol,
     assert check_cone_feasibility(value, (RSOC(len(value)),), atol=atol, rtol=rtol).passed is expected
 
 
+@pytest.mark.parametrize("tail", [
+    [2. ** 600, 2. ** 600, 1.],
+    [1., 2. ** 600, 2. ** 600],
+    [2. ** 600, 1., 2. ** 600],
+    [-2. ** 600, 2. ** 600, -1.],
+    [2. ** 600, 2. ** 600, 2. ** 200],
+    [2. ** 200, 2. ** 600, 2. ** 600],
+    [2. ** 600, 2. ** 600, 1., 2. ** -450],
+    [2. ** -450, 1., 2. ** 600, 2. ** 600],
+])
+@pytest.mark.parametrize("dual", [False, True])
+def test_risk_remote_product_levels_retain_representable_polar_projection(tail, dual):
+    from fractions import Fraction
+
+    head = 2. ** 600
+    original = torch.tensor([-head, -head, *tail], dtype=torch.float64)
+    exact_tail = [Fraction.from_float(x) for x in tail]
+    excess = sum(x * x for x in exact_tail) - 2 * Fraction.from_float(head) ** 2
+    assert excess > 0
+    expected = original_projection(original)
+    assert 0 < float(expected[0]) < 1 and 0 < float(expected[1]) < 1
+    actual = project_cones(original, (RSOC(len(original)),), dual=dual)
+    assert_coordinates(actual, expected)
+    assert_coordinates(project_cones(-original, (RSOC(len(original)),), dual=dual),
+                       original_projection(-original))
+    assert_scaled_moreau(original, actual, project_cones(-original, (RSOC(len(original)),)))
+
+
+@pytest.mark.parametrize("tail,inside", [
+    ([2. ** 600, 2. ** 600, 1.], False),
+    ([1., 2. ** 600, 2. ** 600], False),
+    ([2. ** 600, 1., 2. ** 600], False),
+    ([2. ** 600, 2. ** 600, 0.], True),
+    ([2. ** 600, math.nextafter(2. ** 600, 0.), 1.], True),
+    ([1., math.nextafter(2. ** 600, 0.), 2. ** 600], True),
+])
+@pytest.mark.parametrize("dual", [False, True])
+def test_risk_positive_remote_boundary_uses_exact_sign_before_early_return(tail, inside, dual, monkeypatch):
+    from fractions import Fraction
+    import openopt.native_conic as native
+
+    head = 2. ** 600
+    original = torch.tensor([head, head, *tail], dtype=torch.float64)
+    exact_head = Fraction.from_float(head)
+    exact_squared = sum(Fraction.from_float(x) ** 2 for x in tail)
+    assert (exact_squared <= 2 * exact_head ** 2) is inside
+    # The checker requires positive atol; the smallest float64 exceeds neither
+    # exterior gap (2**-601) nor any nonzero exact dyadic boundary correction.
+    assert check_cone_feasibility(original, (RSOC(len(original)),),
+                                  atol=math.ulp(0.), rtol=0.).passed is inside
+    calls = []
+    original_norm = native.torch.linalg.vector_norm
+
+    def counted_norm(*args, **kwargs):
+        calls.append(True)
+        return original_norm(*args, **kwargs)
+
+    # Outputs can round to the input on a genuine exterior point. Count the
+    # unmodified norm calls to distinguish that from an erroneous early return.
+    monkeypatch.setattr(native.torch.linalg, "vector_norm", counted_norm)
+    before = original.clone()
+    actual = project_cones(original, (RSOC(len(original)),), dual=dual)
+    assert len(calls) == (1 if inside else 2)
+    assert_coordinates(actual, original_projection(original))
+    torch.testing.assert_close(original, before, atol=0, rtol=0)
+    if inside:
+        torch.testing.assert_close(actual, original, atol=0, rtol=0)
+
+
 def main():
     """Bounded batches with exact source inventory and terminal JUnit counts."""
     import argparse
