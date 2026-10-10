@@ -354,13 +354,16 @@ def collected_result(record: dict, item: dict) -> Path | None:
     if not path.is_file() or path.is_symlink() or not path.resolve().is_relative_to(root.resolve()):
         return None
     value = json.loads(path.read_text())
-    if value.get("verdict") != "PASS":
+    expected_verdict = "SEMANTIC_NUMERICAL_PASS" if record["stage"] == "release-proof" else "PASS"
+    if value.get("verdict") != expected_verdict:
         return None
     if record["stage"] == "release-proof" and (
         value.get("returncode") != 0 or value.get("device") != "cuda:0"
         or value.get("requested_cases") != [item["proof_case"]]
         or set(value.get("cases", {})) != {item["proof_case"]}
         or value.get("expectations") != record.get("expectations")
+        or value.get("numerical_verdict") != "PASS"
+        or value.get("execution_verdict") != "UNVERIFIED"
     ):
         return None
     return path
@@ -369,11 +372,12 @@ def collected_result(record: dict, item: dict) -> Path | None:
 def proof_completion_matches(log: str, result: Path, expected_sha256: str) -> bool:
     value = json.loads(result.read_text())
     completion = (
-        f"OPENOPT_GPU_PROOF verdict=PASS at={value['finished_at']} "
+        f"OPENOPT_GPU_PROOF verdict=SEMANTIC_NUMERICAL_PASS at={value['finished_at']} "
         f"result={result} result_sha256={expected_sha256}"
     )
     markers = [line for line in log.splitlines() if line.startswith("OPENOPT_GPU_PROOF verdict=")]
-    return markers == [completion]
+    lines = [line for line in log.splitlines() if line.strip()]
+    return markers == [completion] and bool(lines) and lines[-1] == completion
 
 
 def validate_performance_prerequisite(args: argparse.Namespace) -> None:

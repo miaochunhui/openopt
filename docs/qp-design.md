@@ -137,7 +137,12 @@ submissions require clean committed and byte-stable source. Collection records
 the immutable nested result and hash, rejecting missing, duplicate, CPU-only,
 failed or mismatched case artifacts. `gpu_release_proof.py` saves complete
 original/resident models, vectors, placement, scaling/CG/checkpoint traces and
-independent replay. Scoped synthetic proof is neither a performance claim nor
+independent replay. Collected proof requires the exact final
+`SEMANTIC_NUMERICAL_PASS` marker, numerical PASS and execution UNVERIFIED;
+collection does not promote producer self-consistency to execution qualification.
+The separate caller-pinned coordinator audit must bind pre-dispatch original
+models, clean source, actual Job/Pod UIDs and independently collected logs before
+execution can pass. Scoped synthetic proof is neither a performance claim nor
 remote attestation or commercial qualification.
 
 The v3 campaign adds independent pinned-byte acceptance: source membership,

@@ -75,7 +75,8 @@ def result(tmp_path):
     root = tmp_path / "case-0"
     path = root / "cuda-proof-fixture/result.json"
     path.parent.mkdir(parents=True)
-    value = {"verdict": "PASS", "returncode": 0, "device": "cuda:0",
+    value = {"verdict": "SEMANTIC_NUMERICAL_PASS", "numerical_verdict": "PASS",
+             "execution_verdict": "UNVERIFIED", "returncode": 0, "device": "cuda:0",
              "requested_cases": ["gap_spd"], "cases": {"gap_spd": {}},
              "finished_at": "2026-10-10T09:00:00+00:00",
              "expectations": {"path": str(tmp_path / "expected.json"), "sha256": "a" * 64, "bytes": 12}}
@@ -94,6 +95,7 @@ def test_proof_collect_uses_immutable_nested_result(result):
     ("verdict", "FAIL"), ("verdict", "CPU_SMOKE_PASS"), ("returncode", 1),
     ("device", "cpu"), ("requested_cases", ["unbounded"]), ("cases", {}),
     ("expectations", None),
+    ("verdict", "PASS"), ("numerical_verdict", "FAIL"), ("execution_verdict", "PASS"),
 ])
 def test_collect_does_not_promote_wrong_scope_or_failure(result, key, value):
     record, item, path, report = result
@@ -119,11 +121,12 @@ def test_collect_does_not_accept_only_a_coordinator_mirror(result):
 def test_completion_pin_must_come_from_exact_single_pod_log(result):
     _, _, path, report = result
     pin = "a" * 64
-    line = (f"OPENOPT_GPU_PROOF verdict=PASS at={report['finished_at']} "
+    line = (f"OPENOPT_GPU_PROOF verdict=SEMANTIC_NUMERICAL_PASS at={report['finished_at']} "
             f"result={path} result_sha256={pin}")
     assert dispatch.proof_completion_matches(line + "\n", path, pin)
     for log in ("", line.replace(pin, "b" * 64), line + "\n" + line,
-                line.replace("PASS", "FAIL"), line.replace(str(path), "/other/result.json")):
+                line.replace("PASS", "FAIL"), line.replace(str(path), "/other/result.json"),
+                line + "\ntrailing unverified completion", line.replace("SEMANTIC_NUMERICAL_PASS", "PASS")):
         assert not dispatch.proof_completion_matches(log, path, pin)
 
 
