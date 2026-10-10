@@ -34,6 +34,11 @@ class QPConfig:
     eps_abs: float = 1e-7
     eps_rel: float = 1e-7
     linear_solver: str = "cholesky"
+    adaptive_rho: bool = False
+    adaptive_rho_interval: int = 100
+    adaptive_rho_tolerance: float = 5.0
+    rho_min: float = 1e-6
+    rho_max: float = 1e6
 
     def validate(self) -> None:
         if self.dtype not in (torch.float32, torch.float64):
@@ -50,6 +55,21 @@ class QPConfig:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
+        if not isinstance(self.adaptive_rho, bool):
+            raise ValueError("adaptive_rho must be a boolean")
+        interval = self.adaptive_rho_interval
+        if isinstance(interval, bool) or not isinstance(interval, int) or interval <= 0:
+            raise ValueError("adaptive_rho_interval must be a positive integer")
+        for name in ("rho_min", "rho_max"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(f"{name} must be finite and positive")
+        if self.rho_min > self.rho_max:
+            raise ValueError("rho_min must not exceed rho_max")
+        if not math.isfinite(self.adaptive_rho_tolerance) or self.adaptive_rho_tolerance <= 1:
+            raise ValueError("adaptive_rho_tolerance must be finite and greater than one")
+        if self.adaptive_rho and not self.rho_min <= self.rho <= self.rho_max:
+            raise ValueError("adaptive initial rho must be within rho_min/rho_max")
         device = torch.device(self.device)
         if device.type not in ("cpu", "cuda"):
             raise ValueError("QP supports CPU or CUDA only")
@@ -70,10 +90,39 @@ class QPResult:
     primal_residual: float
     dual_residual: float
     normal_cone_residual: float
+    rho_updates: int = 0
+    final_rho: float = 1.0
 
 
 def _norm(x: torch.Tensor) -> float:
     return float(x.abs().max()) if x.numel() else 0.0
+
+
+def _balanced_rho(
+    rho: float, primal: float, dual: float,
+    primal_scale: float, dual_scale: float, config: QPConfig,
+) -> float:
+    """Balance normalized KKT residuals without overflow or a zero division."""
+    if not all(math.isfinite(value) for value in (primal, dual, primal_scale, dual_scale)):
+        raise RuntimeError("adaptive rho residuals/scales must be finite")
+    if primal == dual == 0:
+        return rho
+    if primal == 0:
+        candidate = config.rho_min
+    elif dual == 0:
+        candidate = config.rho_max
+    else:
+        # Log arithmetic bounds even extreme finite ratios before exponentiation.
+        log_candidate = math.log(rho) + 0.5 * (
+            math.log(primal) - math.log(max(primal_scale, config.eps_abs))
+            - math.log(dual) + math.log(max(dual_scale, config.eps_abs))
+        )
+        candidate = math.exp(min(
+            math.log(config.rho_max), max(math.log(config.rho_min), log_candidate),
+        ))
+        candidate = min(config.rho_max, max(config.rho_min, candidate))
+    change = abs(math.log(candidate) - math.log(rho))
+    return candidate if change > math.log(config.adaptive_rho_tolerance) else rho
 
 
 class PreparedQP:
@@ -115,12 +164,31 @@ class PreparedQP:
         if eigen_min < -symmetry_tol:
             raise ValueError("P must be positive semidefinite")
         self.P, self.q, self.A, self.l, self.u = P, q, A, l, u
-        system = P + config.rho * (A.T @ A)
+        gram = A.T @ A
+        system = P + config.rho * gram
         system.diagonal().add_(config.sigma)
         factor, info = torch.linalg.cholesky_ex(system)
         if int(info) != 0:
             raise RuntimeError("QP linear system factorization failed")
+        if config.adaptive_rho:
+            if not bool(torch.isfinite(system).all() & torch.isfinite(factor).all()):
+                raise RuntimeError("adaptive QP initial factorization is nonfinite")
+            self.gram = gram
         self.factor = factor
+
+    def _factorize_rho(self, rho: float, iteration: int) -> torch.Tensor:
+        context = f"adaptive rho factorization failed iteration={iteration} rho={rho!r}"
+        system = self.P + rho * self.gram
+        system.diagonal().add_(self.config.sigma)
+        if not bool(torch.isfinite(system).all()):
+            raise RuntimeError(f"{context}: nonfinite system")
+        try:
+            factor, info = torch.linalg.cholesky_ex(system)
+        except RuntimeError as error:
+            raise RuntimeError(context) from error
+        if int(info) != 0 or not bool(torch.isfinite(factor).all()):
+            raise RuntimeError(f"{context}: info={int(info)} or nonfinite factor")
+        return factor
 
     @torch.no_grad()
     def solve(self) -> QPResult:
@@ -131,34 +199,58 @@ class PreparedQP:
         y = torch.zeros_like(l)
         status = "max_iterations"
         primal = dual = normal = math.inf
+        rho, factor, rho_updates = c.rho, self.factor, 0
         for iteration in range(1, c.max_iterations + 1):
-            rhs = c.sigma * x - q + A.T @ (c.rho * z - y)
+            rhs = c.sigma * x - q + A.T @ (rho * z - y)
             if c.linear_solver == "triangular":
-                forward = torch.linalg.solve_triangular(self.factor, rhs[:, None], upper=False)
-                x = torch.linalg.solve_triangular(self.factor.T, forward, upper=True).squeeze(1)
+                forward = torch.linalg.solve_triangular(factor, rhs[:, None], upper=False)
+                x = torch.linalg.solve_triangular(factor.T, forward, upper=True).squeeze(1)
             else:
-                x = torch.cholesky_solve(rhs[:, None], self.factor).squeeze(1)
+                x = torch.cholesky_solve(rhs[:, None], factor).squeeze(1)
             Ax = A @ x
             relaxed = c.relaxation * Ax + (1 - c.relaxation) * z
-            z = torch.minimum(torch.maximum(relaxed + y / c.rho, l), u)
-            y = y + c.rho * (relaxed - z)
-            if iteration % c.check_interval == 0 or iteration == c.max_iterations:
+            z = torch.minimum(torch.maximum(relaxed + y / rho, l), u)
+            y = y + rho * (relaxed - z)
+            check = iteration % c.check_interval == 0 or iteration == c.max_iterations
+            adapt = c.adaptive_rho and l.numel() > 0 and iteration % c.adaptive_rho_interval == 0
+            if check or adapt:
                 if not bool(torch.isfinite(x).all() & torch.isfinite(y).all()):
                     status = "numerical_error"
                     break
                 Px, ATy = P @ x, A.T @ y
+                if not all(bool(torch.isfinite(t).all()) for t in (Ax, z, Px, ATy)):
+                    raise RuntimeError(f"QP nonfinite residual input iteration={iteration} rho={rho!r}")
                 primal = _norm(Ax - z)
                 dual = _norm(Px + q + ATy)
                 normal = _norm(z - torch.minimum(torch.maximum(z + y, l), u))
                 primal_tol = c.eps_abs + c.eps_rel * max(_norm(Ax), _norm(z))
                 dual_tol = c.eps_abs + c.eps_rel * max(_norm(Px), _norm(q), _norm(ATy))
-                if primal <= primal_tol and dual <= dual_tol and normal <= primal_tol:
+                if not all(math.isfinite(value) for value in (
+                    primal, dual, normal, primal_tol, dual_tol,
+                )):
+                    raise RuntimeError(
+                        f"QP nonfinite residual/tolerance iteration={iteration} rho={rho!r}",
+                    )
+                if check and primal <= primal_tol and dual <= dual_tol and normal <= primal_tol:
                     status = "solved"
                     break
+                if adapt and iteration < c.max_iterations:
+                    new_rho = _balanced_rho(
+                        rho, primal, dual, max(_norm(Ax), _norm(z)),
+                        max(_norm(Px), _norm(q), _norm(ATy)), c,
+                    )
+                    if new_rho != rho:
+                        factor = self._factorize_rho(new_rho, iteration)
+                        # y is the unscaled Lagrange multiplier, not y/rho.
+                        rho = new_rho
+                        rho_updates += 1
         objective = float(0.5 * x @ (P @ x) + q @ x)
+        if not math.isfinite(objective):
+            raise RuntimeError(f"QP nonfinite objective iteration={iteration} rho={rho!r}")
         return QPResult(
             x=x, y=y, status=status, iterations=iteration, objective=objective,
             primal_residual=primal, dual_residual=dual, normal_cone_residual=normal,
+            rho_updates=rho_updates, final_rho=rho,
         )
 
 
