@@ -1,0 +1,22 @@
+{
+  "audiences": {
+    "admin": {
+      "path_prefix": ""
+    }
+  },
+  "pages": [
+    {
+      "aliases": [],
+      "audience": "admin",
+      "order": 1,
+      "owner": "openopt",
+      "section": "Research",
+      "slug": "overview",
+      "source": "docs/site/index.html",
+      "status": "research",
+      "title": "Openopt research"
+    }
+  ],
+  "project": "openopt",
+  "version": 1
+}

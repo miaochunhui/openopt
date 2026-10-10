@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Openopt: a 0BSD optimization research project. Scoped evidence, explicit limits, no commercial ranking.">
+<meta name="generator" content="scripts/render_project_site.py schema 1">
+<title>Openopt | Optimization, with evidence</title>
+<style>
+:root{--paper:#f4f1e7;--ink:#15382d;--muted:#4f6155;--line:#c7cec0;--accent:#a94724;--card:#fffef7}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;color:var(--ink);background:radial-gradient(ellipse at 85% 8%,#e2e8cb,transparent 48%),var(--paper);font-family:Georgia,"Times New Roman",serif}
+a{color:inherit;text-decoration-thickness:1px;text-underline-offset:4px}main,header,footer{max-width:1120px;margin:auto;padding:24px 36px}header{display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--line)}header b{font-size:24px;letter-spacing:-1px}nav{display:flex;gap:22px;font-size:15px}
+.hero{padding:64px 0 54px;max-width:880px}.eyebrow{font:12px/1.5 "Courier New",monospace;text-transform:uppercase;letter-spacing:2px;color:var(--accent)}h1{font-size:clamp(48px,7vw,88px);font-weight:normal;letter-spacing:-3px;line-height:1.03;margin:18px 0 26px}h1 em{color:var(--accent);font-weight:normal}.lede{font-size:22px;line-height:1.55;max-width:700px}.tag{display:inline-block;border:1px solid var(--ink);padding:8px 12px;font:12px "Courier New",monospace;margin:4px 8px 4px 0}
+section{border-top:1px solid var(--line);padding:32px 0}h2{font-size:34px;letter-spacing:-1px;font-weight:normal;margin:0 0 20px}p{line-height:1.65}section>p{max-width:780px}.split{display:grid;grid-template-columns:1fr 1fr;gap:36px}.status{list-style:none;padding:0;margin:0}.status li{display:flex;gap:12px;justify-content:space-between;padding:15px 0;border-bottom:1px solid var(--line);line-height:1.5}.status strong{font:12px/2 "Courier New",monospace;color:var(--accent)}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}.evidence{background:var(--card);border:1px solid var(--line);padding:24px}.evidence.failed{border:2px solid var(--accent);background:#fff2e9}.evidence h3{font-size:45px;font-weight:normal;margin:16px 0}.evidence h3 span{font-size:17px}.evidence p{font-size:15px}dl{font-size:13px}dt{color:var(--muted);margin-top:12px}dd{margin:4px 0}code{font:12px/1.6 "Courier New",monospace;overflow-wrap:anywhere}.note{border-left:3px solid var(--accent);padding-left:18px}.provenance{font-size:14px;overflow-wrap:anywhere}footer{border-top:1px solid var(--line);font:12px/1.7 "Courier New",monospace;padding-bottom:36px}.hero{animation:reveal .6s ease-out}@keyframes reveal{from{opacity:0;transform:translateY(10px)}to{opacity:1;transform:translateY(0)}}@media(prefers-reduced-motion:reduce){.hero{animation:none}html{scroll-behavior:auto}}@media(max-width:700px){main,header,footer{padding-left:20px;padding-right:20px}header{align-items:flex-start;gap:18px}nav{flex-wrap:wrap;gap:10px 18px;justify-content:flex-end}.hero{padding:38px 0}h1{letter-spacing:-2px}.lede{font-size:19px}.split,.grid{grid-template-columns:1fr}.status li{font-size:14px}.evidence{padding:20px}}
+</style>
+</head>
+<body>
+<header><b>openopt.</b><nav aria-label="Project sections"><a href="#scope">Scope</a><a href="#evidence">Evidence</a><a href="#access">Access</a></nav></header>
+<main>
+<div class="hero"><p class="eyebrow">Optimization research / 0BSD</p>
+<h1>Build the optimizer.<br><em>Keep the evidence.</em></h1>
+<p class="lede">A GPU-first optimization project with bounded, opt-in research components.
+The commercial-grade general optimizer is the destination, not an achieved qualification.</p>
+<span class="tag">RESEARCH ONLY</span><span class="tag">0BSD PROJECT CODE</span>
+<span class="tag">NOT_PUBLISHED</span></div>
+<section id="scope" class="split"><div><h2>Useful foundations.<br>Explicit limits.</h2>
+<p>Experimental convex quadratic and linear programming (QP/LP), native cone prototypes,
+original-model checks and finite-precision refinement form the research foundation.
+Defaults and supported dimensions are component-specific.</p>
+<p>Project code uses BSD Zero Clause (0BSD). Dependency licenses are separate.
+The project license is not authorization for commercial benchmark execution or disclosure.</p>
+<p class="note">Not complete semidefinite, exponential or power-cone optimization;
+not general native mixed-integer, nonlinear or global optimization. A cone primitive is not
+a full solver. No arbitrary-precision optimizer or universal GPU speedup is claimed.</p></div>
+<div><h2>Qualification ledger</h2><ul class="status"><li><span>Commercial qualification</span><strong>PENDING</strong></li><li><span>Complete general optimizer</span><strong>PENDING</strong></li><li><span>Current-source CUDA qualification</span><strong>UNVERIFIED</strong></li><li><span>Fair comparative speed</span><strong>UNVERIFIED</strong></li></ul>
+<p>Historical and separate-source checks below do not qualify this content baseline.
+No comparative timing, commercial ranking, or current-source GPU claim is inferred.</p></div></section>
+<section id="evidence"><p class="eyebrow">Pinned scalar readback</p><h2>What was actually selected</h2>
+<p>These are counts extracted from caller-pinned owner receipts and failed CUDA result/JUnit/log bytes.
+Skipped tests are not passes. Extraction checks receipt/source consistency; it does not
+rerun the solver, independently accept the numerical results, or attest remote execution.</p>
+<p class="note">Failed CUDA checks remain red. No fixed13 evidence is included or
+treated as effective acceptance. Failure readback is not a GPU execution seal.</p>
+<div class="grid"><article class="evidence"><p class="eyebrow">Historical CPU smoke</p><h3>80<span> passed / 84 selected</span></h3><p>4 skipped; 0 failed; 0 errors. Reported owner CPU checks only.</p><dl><dt>Source relation</dt><dd>historical</dd><dt>Checked at</dt><dd>2026-10-10T22:41:55+08:00</dd><dt>Source commit</dt><dd><code>73613fce9faafdd622baf69dcf1ecb64b4cfa6f7</code></dd><dt>Receipt SHA-256</dt><dd><code>4a839df589709dd3ef5e02b4a18186f67db2fa6af784656ec424ce953a604bec</code></dd></dl></article><article class="evidence failed"><p class="eyebrow">Failed operator CUDA owner regression</p><h3>44<span> passed / 53 selected</span></h3><p>0 skipped; 9 failed; 0 errors. FAILED; no CUDA acceptance.</p><dl><dt>Source relation</dt><dd>same-content-source</dd><dt>Checked at</dt><dd>2026-10-10T23:15:45+08:00</dd><dt>Source commit</dt><dd><code>f9cc655ba14b2804a97befa5755aad46417b4b77</code></dd><dt>Receipt SHA-256</dt><dd><code>07a1ed3023914f9b0f52c6b618b88e923d759c7bdec51c425050b26e4d47fe66</code></dd><dt>JUnit SHA-256</dt><dd><code>137455e4772b0b7b2457d79496b2d7488306e91e754488bcd52a751442e06e2b</code></dd><dt>Pytest log SHA-256</dt><dd><code>7b2b862c6514f8a5edf7376651a7f5f28a4efda80a386dca8f9fc9eeda3b4fee</code></dd></dl></article><article class="evidence"><p class="eyebrow">Separate PSD primitive owner CPU checks</p><h3>94<span> passed / 96 selected</span></h3><p>2 skipped; 0 failed; 0 errors. Reported owner CPU checks only.</p><dl><dt>Source relation</dt><dd>separate-freeze</dd><dt>Checked at</dt><dd>2026-10-10T23:04:31+08:00</dd><dt>Source commit</dt><dd><code>2278294820a133c23d4f3fa632bd51ec24789463</code></dd><dt>Receipt SHA-256</dt><dd><code>b89b66df3eab5220c243bc3a887082efe325b47d0815d0f8d7a9c25260cd9814</code></dd></dl></article></div></section>
+<section id="access"><h2>Access has not changed.</h2>
+<p class="note">Existing super-only access is the intended onboarding default. This generated
+project catalog does not grant public access, alter authentication, or establish a live URL.
+Shared registration, publication and exact online byte readback remain the chair's responsibility.</p>
+<p>No raw model arrays, proprietary SDK details, private evidence locations or credentials
+are included here. Only selected scalars, public code hashes and research boundaries leave
+the evidence input.</p></section>
+<section class="provenance"><h2>Reproducible content</h2>
+<p>Content baseline commit: <code>f9cc655ba14b2804a97befa5755aad46417b4b77</code><br>
+Scalar input SHA-256: <code>a43f54bc24285bd9997ab63893d15aca3d3bd53845527018135e37100851d839</code><br>
+0BSD license bytes SHA-256: <code>b7f79d5c1767e9fd88117ef4f9957f1ca29dfbab8e0d72ac1f10d5da1422ebae</code><br>
+Research boundary bytes SHA-256: <code>97d888cb719c0ac467e7ce6c7de38a009f40a01110238c7a3eb69cdc2a5ede29</code></p></section>
+</main><footer><span lang="zh">最后修改：</span>2026-10-10 23:27:02 +08:00<br>
+Generated deterministically from a pinned scalar input. Local content, not online acceptance.</footer>
+</body></html>
