@@ -224,6 +224,34 @@ def numeric(value, coordinate, *, bounds=False):
     return np.asarray(checked(value), dtype=np.float64)
 
 
+def evidence_differences(saved, replayed, pointer=""):
+    """Exact, typed evidence comparison. No ULP/relative-error acceptance."""
+    if isinstance(saved, dict) and isinstance(replayed, dict):
+        result = []
+        for key in sorted(set(saved) | set(replayed)):
+            child = pointer + "/" + key
+            if key not in saved or key not in replayed:
+                result.append({"pointer": child, "reason": "missing evidence member"})
+            else:
+                result.extend(evidence_differences(saved[key], replayed[key], child))
+        return result
+    numeric_types = (int, float)
+    same_type = type(saved) is type(replayed) or (
+        type(saved) in numeric_types and type(replayed) in numeric_types)
+    if same_type and saved == replayed:
+        return []
+    return [{"pointer": pointer, "saved": saved, "replayed": replayed,
+             "saved_hex": float(saved).hex() if type(saved) in numeric_types else None,
+             "replayed_hex": float(replayed).hex() if type(replayed) in numeric_types else None}]
+
+
+def exact_evidence(saved, replayed, coordinate):
+    differences = evidence_differences(saved, replayed)
+    require(not differences, coordinate,
+            "independent original checker replay mismatch at "
+            + ", ".join(item["pointer"] for item in differences))
+
+
 def native_replay(saved, parameters, *, negative=None):
     from openopt.certificates import NumericalEvidence
     from openopt.conic import ConicProblem, Nonnegative, SOC, Zero, check_conic_candidate
@@ -288,7 +316,7 @@ def native_replay(saved, parameters, *, negative=None):
             "negative_replayed": negative is not None}
 
 
-def refinement_replay(saved, parameters, function):
+def refinement_replay(saved, parameters, function, *, diagnostic=False):
     import numpy as np
     from openopt.certificates import check_qp_candidate
 
@@ -326,8 +354,11 @@ def refinement_replay(saved, parameters, function):
     xx, yy = (numeric(refined[name], "refined/" + name) for name in ("x", "y"))
     before = check_qp_candidate(problem, bx, by, **tol)
     after = check_qp_candidate(problem, xx, yy, **tol)
-    require(before.to_dict() == baseline["evidence"] and after.to_dict() == refined["evidence"],
-            "refinement evidence", "independent original checker replay mismatch")
+    differences = evidence_differences(baseline["evidence"], before.to_dict(), "/baseline")
+    differences += evidence_differences(refined["evidence"], after.to_dict(), "/refined")
+    if not diagnostic:
+        exact_evidence(baseline["evidence"], before.to_dict(), "refinement baseline evidence")
+        exact_evidence(refined["evidence"], after.to_dict(), "refinement refined evidence")
     accepted = refined["status"] == "accepted"
     require(type(saved["candidate_accepted"]) is bool and saved["candidate_accepted"] == accepted,
             "refinement status", "candidate acceptance contradiction")
@@ -366,8 +397,10 @@ def refinement_replay(saved, parameters, function):
         "wrong_y": check_qp_candidate(problem, xx, -yy, **tol),
         "wrong_model": check_qp_candidate(wrong_problem, xx, yy, **tol),
     }
-    require({name: value.to_dict() for name, value in controls.items()} == saved["negative_controls"],
-            "refinement controls", "saved/replayed negative controls disagree")
+    controls_dict = {name: value.to_dict() for name, value in controls.items()}
+    differences += evidence_differences(saved["negative_controls"], controls_dict, "/negative_controls")
+    if not diagnostic:
+        exact_evidence(saved["negative_controls"], controls_dict, "refinement controls")
     require(not accepted or not any(value.passed for value in controls.values()),
             "refinement controls", "accepted candidate negative control unexpectedly passed")
     if function == "test_cuda_refinement_actual_residual_correction":
@@ -377,6 +410,15 @@ def refinement_replay(saved, parameters, function):
                 and trace[0]["original_check_passed"] is False
                 and trace[1]["linear_residual"] < trace[0]["linear_residual"],
                 "refinement correction", "actual mixed-precision correction evidence missing")
+    if diagnostic:
+        # Independent current-runtime checks remain complete and unchanged.
+        # Diagnostic evidence never grants seal/accept, even when numerics pass.
+        return {"verdict": "DIAGNOSTIC_ONLY", "numerical_gate": "PASS",
+                "recorded_evidence_exact": not differences, "differences": differences,
+                "candidate_accepted": accepted, "candidate_status": refined["status"],
+                "baseline_evidence": before.to_dict(), "refined_evidence": after.to_dict(),
+                "negative_controls": controls_dict, "reason": refined["reason"],
+                "qualified": False, "certified": False}
     return {"verdict": "PASS", "candidate_accepted": accepted,
             "candidate_status": refined["status"], "reason": refined["reason"],
             "baseline_evidence": before.to_dict(), "refined_evidence": after.to_dict(),
@@ -519,9 +561,74 @@ def accept(bundle_path, bundle_sha256, *, current_root, development_replay=False
                     development_replay=development_replay)
 
 
+def diagnose_refinement(*, current_root, **pin_arguments):
+    """Complete pinned execution/source check, all seven diagnostic-only replays."""
+    import numpy as np
+    import torch
+
+    pins = caller_pins(**pin_arguments)
+    snapshot = Path(pins["run"]["path"]).parent / "source"
+    frozen = execution.seal(pins["result"]["path"], pins["result"]["sha256"],
+                            source_snapshot=snapshot, run_path=pins["run"]["path"],
+                            current_root=current_root)
+    require(frozen["result"] == pins["result"] and frozen["run"] == pins["run"]
+            and frozen["files"]["pytest.xml"] == pins["junit"],
+            "diagnostic caller pins", "exact caller run/result/JUnit path+hash+bytes mismatch")
+    clean_sources(current_root, SOURCES["refinement"])
+    auditor = auditor_sources()
+    observed = execution.validate(frozen, current_root=current_root)
+    require(not any(name not in frozen["sources"] for name in SOURCES["refinement"]),
+            "diagnostic sources", "complete frozen refinement sources required")
+    report = execution.parse(execution.bound(frozen["result"]), "result")
+    require(report["targets"] == ["tests/test_qp_refinement.py"]
+            and report["selection"] == "cuda_refinement", "diagnostic selection",
+            "exact isolated refinement selection required")
+    _, cases = execution.junit(execution.bound(frozen["files"]["pytest.xml"]), report, frozen["sources"])
+    expected = expected_cases(snapshot, "refinement")
+    actual = {case["id"]: case for case in cases}
+    require(set(expected) == set(actual), "diagnostic denominator", "exact seven testcases required")
+    outcomes, paths = [], set()
+    for identity, definition in expected.items():
+        props = actual[identity]["properties"]
+        require(set(props) == {"refinement_acceptance_path", "refinement_acceptance_sha256"},
+                identity, "exact sidecar path/hash properties required")
+        path = execution.external(props["refinement_acceptance_path"], Path(pins["run"]["path"]).parent)
+        require(str(path) == props["refinement_acceptance_path"]
+                and path.is_relative_to(Path(pins["result"]["path"]).parent / "pytest-tmp")
+                and str(path) not in paths, identity, "sidecar alias/escape/shared path")
+        paths.add(str(path))
+        item = frozen["proofs"][str(path)]
+        require(item["sha256"] == execution.digest(props["refinement_acceptance_sha256"]),
+                identity, "sidecar property pin mismatch")
+        saved = execution.parse(execution.bound(item), identity)
+        source_audit(saved, "refinement", snapshot, current_root, frozen["sources"], {})
+        require(saved["device"] == "cuda:0" and saved["gpu_name"] == observed["hardware"]["gpu"],
+                identity, "sidecar execution placement mismatch")
+        try:
+            outcome = refinement_replay(saved, definition["parameters"], definition["function"],
+                                        diagnostic=True)
+        except Exception as exc:
+            outcome = {"verdict": "DIAGNOSTIC_ONLY", "numerical_gate": "FAIL",
+                       "first_cause": f"{type(exc).__name__}: {exc}"}
+        outcomes.append({"case": identity, "sidecar": item, **outcome})
+    require(paths == set(frozen["proofs"]), "diagnostic sidecars", "unlinked/extra/missing sidecar")
+    for item in pins.values():
+        execution.bound(item)
+    return {"verdict": "DIAGNOSTIC_ONLY", "scope": "no seal/accept qualification granted",
+            "tests": observed["tests"], "cases": outcomes, "pins": pins,
+            "auditors": auditor, "source_sha_informational": observed["source_sha_informational"],
+            "numpy": np.__version__, "torch": torch.__version__,
+            "numpy_config": np.show_config(mode="dicts"),
+            "producer_checker_runtime": "NOT_FROZEN_IN_SIDECAR",
+            "exact_mismatch_cases": sum(not item.get("recorded_evidence_exact", False) for item in outcomes),
+            "numerical_gate_failures": sum(item["numerical_gate"] != "PASS" for item in outcomes),
+            "final_source": False, "qualified": False, "certified": False,
+            "commercial": "UNVERIFIED", "performance": "UNVERIFIED"}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("seal", "accept"))
+    parser.add_argument("action", choices=("seal", "accept", "diagnose-refinement"))
     parser.add_argument("--suite", choices=tuple(CONTRACTS))
     for name in ("result", "run", "junit"):
         parser.add_argument("--" + name, type=Path, required=True)
@@ -544,7 +651,23 @@ def main(argv=None):
     pin_arguments.update({name + "_sha256": getattr(args, name + "_sha256")
                           for name in ("result", "run", "junit")})
     try:
-        if args.action == "seal":
+        if args.action == "diagnose-refinement":
+            require(not args.bundle and not args.sha256 and not args.development_replay
+                    and args.suite in (None, "refinement"), "diagnostic mode",
+                    "diagnostic-only entry cannot take acceptance options")
+            report.update(diagnose_refinement(current_root=args.current_root, **pin_arguments))
+            rc = 1 if report["exact_mismatch_cases"] or report["numerical_gate_failures"] else 0
+            if rc:
+                with (output / "failure.log").open("x", encoding="utf-8") as log:
+                    for case in report["cases"]:
+                        log.write(case["case"] + "\n")
+                        for item in case.get("differences", []):
+                            log.write(item["pointer"] + ": "
+                                      + str(item.get("saved_hex")) + " != "
+                                      + str(item.get("replayed_hex")) + "\n")
+                        if "first_cause" in case:
+                            log.write(case["first_cause"] + "\n")
+        elif args.action == "seal":
             require(args.suite, "seal", "explicit suite required")
             bundle = seal(suite=args.suite, current_root=args.current_root,
                           development_replay=args.development_replay, **pin_arguments)
@@ -570,7 +693,9 @@ def main(argv=None):
         log.write(line + f"\nreturncode={rc}\n")
     print(line, flush=True)
     if rc:
-        print(report["error"], flush=True)
+        print(report.get("error", "diagnostic mismatch; seal/accept NOT_GRANTED"), flush=True)
+    elif args.action == "diagnose-refinement":
+        print("diagnostic only; seal/accept NOT_GRANTED", flush=True)
     elif args.action == "seal":
         print(f"bundle_sha256={report['bundle_sha256']}", flush=True)
     else:

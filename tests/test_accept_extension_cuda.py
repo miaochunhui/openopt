@@ -476,3 +476,209 @@ def test_retrospective_auditor_cannot_claim_final_source():
     with pytest.raises(execution.AuditError, match="no retrospective promotion"):
         audit.final_source_binding(sources, auditors, development_replay=False)
     audit.final_source_binding(sources, auditors, development_replay=True)
+
+
+REAL_REFINEMENT_RUN = Path(
+    "/hf3fs-jd/data/tmp/openopt-release-20261010/frozen-r1-gpu-refinement/"
+    "release-regression-9wjw_yt4"
+)
+REAL_REFINEMENT_CHECK = REAL_REFINEMENT_RUN / "case-0/cuda-check-3rvbwpaq"
+
+
+@pytest.fixture
+def real_refinement_artifacts():
+    if not (REAL_REFINEMENT_CHECK / "pytest.xml").is_file():
+        pytest.skip("historical external CUDA sidecars absent; no replay qualification")
+
+
+def evidence_differences(saved, replayed, pointer=""):
+    if isinstance(saved, dict) and isinstance(replayed, dict):
+        result = []
+        for key in sorted(set(saved) | set(replayed)):
+            result.extend(evidence_differences(saved.get(key), replayed.get(key), pointer + "/" + key))
+        return result
+    if saved == replayed:
+        return []
+    return [{"pointer": pointer, "saved": saved, "replayed": replayed,
+             "saved_hex": saved.hex() if type(saved) is float else None,
+             "replayed_hex": replayed.hex() if type(replayed) is float else None}]
+
+
+def test_real_seven_sidecar_exact_first_cause_diagnosis(tmp_path, real_refinement_artifacts):
+    import ctypes
+    import ctypes.util
+    import math
+    import torch
+    from types import SimpleNamespace
+
+    definitions = audit.expected_cases(REAL_REFINEMENT_RUN / "source", "refinement")
+    root = ET.fromstring((REAL_REFINEMENT_CHECK / "pytest.xml").read_bytes())
+    cases = {node.get("classname") + "::" + node.get("name"): node
+             for node in root.iter("testcase")}
+    assert set(cases) == set(definitions) and len(cases) == 7
+    rows = []
+    library = ctypes.CDLL(ctypes.util.find_library("m"))
+    fma = library.fma
+    fma.argtypes = (ctypes.c_double, ctypes.c_double, ctypes.c_double)
+    fma.restype = ctypes.c_double
+
+    def fused_dot(left, right, reverse=False):
+        result = 0.
+        indices = range(len(left) - 1, -1, -1) if reverse else range(len(left))
+        for index in indices:
+            result = fma(float(left[index]), float(right[index]), result)
+        return result
+
+    for identity, definition in definitions.items():
+        props = {node.get("name"): node.get("value")
+                 for node in cases[identity].findall("./properties/property")}
+        path = Path(props["refinement_acceptance_path"])
+        raw = execution.read(path)
+        assert execution.sha(raw) == props["refinement_acceptance_sha256"]
+        saved = execution.parse(raw, "real sidecar")
+        model = {name: audit.numeric(value, name, bounds=name in ("l", "u"))
+                 for name, value in saved["problem"].items()}
+        model["A"] = model["A"].reshape(-1, model["q"].size)
+        torch_model = {name: torch.tensor(value, dtype=torch.float64, device="cpu")
+                       for name, value in model.items()}
+        assert all(np.array_equal(model[name], torch_model[name].numpy())
+                   and model[name].tobytes() == torch_model[name].numpy().tobytes()
+                   for name in model)
+        tolerance = dict(atol=saved["config"]["check_atol"], rtol=saved["config"]["check_rtol"])
+        differences, tensor_differences = [], []
+        for leg in ("baseline", "refined"):
+            x, y = (audit.numeric(saved[leg][name], leg + "/" + name) for name in ("x", "y"))
+            evidence = check_qp_candidate(SimpleNamespace(**model), x, y, **tolerance)
+            tensor_evidence = check_qp_candidate(
+                SimpleNamespace(**torch_model), torch.tensor(x, dtype=torch.float64),
+                torch.tensor(y, dtype=torch.float64), **tolerance)
+            differences.extend(evidence_differences(saved[leg]["evidence"], evidence.to_dict(), "/" + leg))
+            tensor_differences.extend(evidence_differences(saved[leg]["evidence"], tensor_evidence.to_dict(),
+                                                         "/" + leg))
+        xx, yy = (audit.numeric(saved["refined"][name], name) for name in ("x", "y"))
+        controls = {
+            "wrong_x": check_qp_candidate(SimpleNamespace(**model), xx + 1., yy, **tolerance),
+            "wrong_y": check_qp_candidate(SimpleNamespace(**model), xx, -yy, **tolerance),
+            "wrong_model": check_qp_candidate(
+                SimpleNamespace(**{**model, "q": model["q"] + 1.}), xx, yy, **tolerance),
+        }
+        controls_diff = evidence_differences(
+            saved["negative_controls"], {name: item.to_dict() for name, item in controls.items()},
+            "/negative_controls")
+        operations = []
+        for leg in ("baseline", "refined"):
+            x = audit.numeric(saved[leg]["x"], "x")
+            Px = model["P"] @ x
+            terms = (0.5 * x) * Px
+            linear_terms = model["q"] * x
+            operations.append({
+                "leg": leg, "saved": saved[leg]["evidence"]["metrics"]["primal_objective"],
+                "matmul": float(0.5 * x @ Px + model["q"] @ x),
+                "sequential": sum(float(v) for v in terms) + sum(float(v) for v in linear_terms),
+                "fsum": math.fsum(terms) + math.fsum(linear_terms),
+                "np_sum": float(np.sum(terms) + np.sum(linear_terms)),
+                "fma_forward": fused_dot(0.5 * x, Px) + fused_dot(model["q"], x),
+                "fma_reverse": fused_dot(0.5 * x, Px, True) + fused_dot(model["q"], x, True),
+            })
+        status = "PASS"
+        try:
+            audit.refinement_replay(saved, definition["parameters"], definition["function"])
+        except execution.AuditError as exc:
+            status = str(exc)
+        rows.append({"case": identity, "sidecar": str(path), "sha256": execution.sha(raw),
+                     "dtype": saved["dtype"], "original_replay": status,
+                     "differences": differences, "producer_decode_differences": tensor_differences,
+                     "negative_control_differences": controls_diff, "dot_operations": operations,
+                     "all_model_decoded_bytes_equal": True})
+    report = {"verdict": "DIAGNOSED", "numpy": np.__version__, "torch": torch.__version__,
+              "numpy_config": np.show_config(mode="dicts"),
+              "cases": rows}
+    overwrite(tmp_path / "real-seven-diagnosis.json", report)
+    assert len(rows) == 7
+    assert [row["original_replay"] == "PASS" for row in rows] == [
+        False, False, True, False, True, True, True]
+    assert all(row["all_model_decoded_bytes_equal"] for row in rows)
+    for row in rows[:2]:
+        assert {entry["pointer"] for entry in row["differences"]} == {
+            "/baseline/metrics/primal_objective", "/baseline/metrics/duality_gap"}
+        operation = row["dot_operations"][0]
+        assert operation["fma_forward"] == operation["saved"]
+        assert operation["matmul"] != operation["saved"]
+
+
+@pytest.mark.parametrize("mutation", ["one_ulp", "bool", "missing", "false_status"])
+def test_exact_evidence_never_uses_approximate_dictionary_or_bool_coercion(mutation):
+    saved = {"passed": True, "metrics": {"primal_objective": 1.}, "checks": {"gap": True}}
+    replayed = copy.deepcopy(saved)
+    if mutation == "one_ulp":
+        replayed["metrics"]["primal_objective"] = float(np.nextafter(1., 2.))
+    elif mutation == "bool":
+        replayed["passed"] = 1
+    elif mutation == "missing":
+        replayed.pop("checks")
+    else:
+        replayed["checks"]["gap"] = False
+    with pytest.raises(execution.AuditError, match="replay mismatch at"):
+        audit.exact_evidence(saved, replayed, "negative control")
+
+
+def test_real_seven_complete_numerical_gates_and_diagnostic_never_accepts(
+    tmp_path, real_refinement_artifacts,
+):
+    definitions = audit.expected_cases(REAL_REFINEMENT_RUN / "source", "refinement")
+    root = ET.fromstring((REAL_REFINEMENT_CHECK / "pytest.xml").read_bytes())
+    rows = []
+    for case in root.iter("testcase"):
+        identity = case.get("classname") + "::" + case.get("name")
+        definition = definitions[identity]
+        props = {node.get("name"): node.get("value")
+                 for node in case.findall("./properties/property")}
+        path = Path(props["refinement_acceptance_path"])
+        raw = execution.read(path)
+        assert execution.sha(raw) == props["refinement_acceptance_sha256"]
+        saved = execution.parse(raw, identity)
+        result = audit.refinement_replay(saved, definition["parameters"],
+                                         definition["function"], diagnostic=True)
+        assert result["verdict"] == "DIAGNOSTIC_ONLY" and result["numerical_gate"] == "PASS"
+        assert not result["qualified"] and not result["certified"]
+        rows.append({"case": identity, **result})
+    assert len(rows) == 7
+    assert sum(not row["recorded_evidence_exact"] for row in rows) == 3
+    assert sum(row["candidate_accepted"] for row in rows) == 4
+    overwrite(tmp_path / "real-seven-numerical-gates.json", {"verdict": "DIAGNOSTIC_ONLY", "cases": rows})
+
+
+def test_complete_diagnostic_cli_keeps_mismatch_red(evidence):
+    suite, bundle, current, run, arguments = evidence
+    if suite != "refinement":
+        return
+    identity = next(key for key in audit.expected_cases(
+        bundle["execution"]["source_snapshot"], suite) if "frozen_model" in key)
+    root = ET.fromstring(execution.bound(bundle["execution"]["files"]["pytest.xml"]))
+    node = next(node for node in root.iter("testcase")
+                if node.get("classname") + "::" + node.get("name") == identity)
+    path = Path(node.find("./properties/property[@name='refinement_acceptance_path']").get("value"))
+    saved = execution.parse(execution.read(path), "sidecar")
+    saved["baseline"]["evidence"]["metrics"]["primal_objective"] = float(
+        np.nextafter(saved["baseline"]["evidence"]["metrics"]["primal_objective"], np.inf))
+    reseal_proof(bundle, identity, saved, arguments)
+    assert audit.main(["diagnose-refinement", *cli_arguments(current, run, arguments)]) == 1
+    report_path = next((run / "audit-output").glob("diagnose-refinement-*/acceptance.json"))
+    report = execution.parse(report_path.read_bytes(), "diagnostic")
+    assert report["verdict"] == "DIAGNOSTIC_ONLY"
+    assert report["exact_mismatch_cases"] == 1 and report["numerical_gate_failures"] == 0
+    assert len(report["cases"]) == 7 and not report["final_source"]
+    assert "primal_objective" in (report_path.parent / "failure.log").read_text()
+    assert "returncode=1" in (report_path.parent / "execution.log").read_text()
+
+
+def test_diagnostic_rejects_valid_hash_but_unbound_caller_junit(evidence):
+    suite, bundle, current, run, arguments = evidence
+    if suite != "refinement":
+        return
+    unrelated = run / "unrelated-junit.xml"
+    unrelated.write_bytes(execution.bound(bundle["execution"]["files"]["pytest.xml"]))
+    changed = {**arguments, "junit_path": unrelated,
+               "junit_sha256": execution.sha(unrelated.read_bytes())}
+    with pytest.raises(execution.AuditError, match="diagnostic caller pins"):
+        audit.diagnose_refinement(current_root=current, **changed)
