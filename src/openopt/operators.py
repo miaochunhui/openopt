@@ -58,6 +58,44 @@ def _vector(
         raise ValueError(f"{label} must be finite")
 
 
+def _checked_device_coo(matrix: torch.Tensor) -> torch.Tensor:
+    """Check 2-D COO components on their device before unchecked reconstruction.
+
+    CUDA backend invariant validation can allocate CPU range tensors. Replace
+    that validator, not the invariants, without trusting the coalesced flag.
+    Scalar boolean synchronization is explicit; no index tensor moves to host.
+    """
+    if not isinstance(matrix, torch.Tensor) or matrix.layout != torch.sparse_coo:
+        raise RuntimeError("device COO validation requires a sparse COO tensor")
+    _metadata(tuple(matrix.shape), matrix.device, matrix.dtype)
+    if matrix.sparse_dim() != 2 or matrix.dense_dim() != 0:
+        raise RuntimeError("device COO must have two sparse dimensions and no dense dimensions")
+    indices, values = matrix._indices(), matrix._values()
+    if (
+        indices.layout != torch.strided or indices.dtype != torch.int64
+        or indices.device != matrix.device or indices.ndim != 2 or indices.shape[0] != 2
+    ):
+        raise RuntimeError("device COO indices must be same-device dense int64 with shape (2, nnz)")
+    if (
+        values.layout != torch.strided or values.device != matrix.device
+        or values.dtype != matrix.dtype or values.ndim != 1
+        or values.numel() != indices.shape[1] or matrix._nnz() != values.numel()
+    ):
+        raise RuntimeError("device COO values must match original device/dtype and index nnz")
+    for axis, size in enumerate(matrix.shape):
+        index = indices[axis]
+        if bool((index < 0).any()) or bool((index >= size).any()):
+            raise RuntimeError(f"device COO indices out of original bounds on axis {axis}")
+    if not bool(torch.isfinite(values).all()):
+        raise ValueError("device COO original values must be finite")
+    # Unsorted indices and duplicates are legal uncoalesced COO. Reset a
+    # potentially false flag, then TensorOperator coalesces its owned copy.
+    return torch.sparse_coo_tensor(
+        indices, values, matrix.shape, dtype=matrix.dtype, device=matrix.device,
+        check_invariants=False, is_coalesced=False,
+    )
+
+
 class TensorOperator:
     """Owned dense, sparse COO or sparse CSR matrix; never densifies.
 
@@ -75,13 +113,16 @@ class TensorOperator:
             matrix.sparse_dim() != 2 or matrix.dense_dim() != 0
         ):
             raise ValueError("hybrid sparse tensors are unsupported")
-        # PyTorch sparse constructors normally skip structural validation.
-        # Reconstruct with invariants enabled before coalescing or invoking mm.
+        # Validate before coalescing/mm. Keep CPU/CSR backend checks unchanged;
+        # CUDA COO uses equivalent device-local component checks instead.
         if matrix.layout == torch.sparse_coo:
-            matrix = torch.sparse_coo_tensor(
-                matrix._indices(), matrix._values(), matrix.shape,
-                dtype=matrix.dtype, device=matrix.device, check_invariants=True,
-            )
+            if matrix.device.type == "cuda":
+                matrix = _checked_device_coo(matrix)
+            else:
+                matrix = torch.sparse_coo_tensor(
+                    matrix._indices(), matrix._values(), matrix.shape,
+                    dtype=matrix.dtype, device=matrix.device, check_invariants=True,
+                )
         elif matrix.layout == torch.sparse_csr:
             matrix = torch.sparse_csr_tensor(
                 matrix.crow_indices(), matrix.col_indices(), matrix.values(), matrix.shape,
