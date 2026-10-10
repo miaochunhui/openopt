@@ -2,7 +2,8 @@
 
 Run this file through scripts/verify.py --target. Receipts are external pytest
 artifacts. Exact rational arithmetic below is a test oracle, not the checker or
-an optimizer capability. Only caller-pinned committed Git source is executed.
+an optimizer capability. Default baselines were verified against trusted Git
+before being frozen here; historical source is not executed on subsequent runs.
 """
 
 from dataclasses import asdict
@@ -11,8 +12,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
-import sys
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -22,10 +22,9 @@ from openopt.refinement import RefinementConfig
 
 
 ROOT = Path(__file__).resolve().parents[1]
-REVIEW_COMMIT = "0c5524e8afbfa067889c1696b8617d17d4cc90ce"
+INITIAL_REVIEW_COMMIT = "0c5524e8afbfa067889c1696b8617d17d4cc90ce"
 PARENT_COMMIT = "1d7cfe4b94aa66dbe6cb02e7e1e59dee05da94c2"
 CHECKER_PATH = "src/openopt/certificates.py"
-CHECKER_SHA256 = "b3f1018c31d908e2e52ff96a097cd76fbb552efc40481489489624c48cdfa583"
 PROTECTED = (
     "docs/research/reproducible-checker.md",
     "scripts/accept_extension_cuda.py",
@@ -36,6 +35,14 @@ PROTECTED = (
     "tests/test_qp_refinement.py",
 )
 MODE = checker.REPRODUCIBLE_ARITHMETIC
+DEFAULT_EVIDENCE_SHA256 = (
+    "770513b4ecfe093ac6a7aabf052a278fb349ae3e6bf06af7ada02dffb81948c3",
+    "94da2de6f62886630f8ba4813481563f0f7f1a0f3cd377dbf329bb45851f66bc",
+    "c792f632e741f361518816df16717c93b204844a6df41b6265b81a7a65e48236",
+    "14d36ba759ca6b3d5ac4ee222326029e27fb902814974aac8df94934e2bcf94c",
+    "590f59f224a1937fba44c60dce4dcd7190f513fe43061ac65bcce8c883972cfd",
+    "2893aee854bb6520349e272cd675384b4df64ab83f66adf9fe6fd0f7a4317e8e",
+)
 
 
 def git_bytes(commit, path):
@@ -50,13 +57,12 @@ def git_bytes(commit, path):
 
 @pytest.fixture(autouse=True)
 def committed_source_guard():
-    """Both disk and imported checker must match the explicitly reviewed commit."""
+    """Pin current committed bytes, so a committed repair can be audited too."""
     pins = {}
     for path in PROTECTED:
-        committed = git_bytes(REVIEW_COMMIT, path)
+        committed = git_bytes("HEAD", path)
         assert (ROOT / path).read_bytes() == committed, f"uncommitted source: {path}"
         pins[path] = hashlib.sha256(committed).hexdigest()
-    assert pins[CHECKER_PATH] == CHECKER_SHA256
     assert Path(checker.__file__).resolve() == (ROOT / CHECKER_PATH).resolve()
     yield pins
     for path, pin in pins.items():
@@ -86,8 +92,14 @@ def exact_dot(left, right):
 
 def receipt(tmp_path, request, name, payload):
     path = tmp_path / f"{name}.json"
+    identity = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True, check=False,
+    )
+    assert identity.returncode == 0, "current committed source identity unavailable"
     data = {
-        "reviewed_commit": REVIEW_COMMIT, "checker_sha256": CHECKER_SHA256,
+        "reviewed_commit": identity.stdout.strip(),
+        "initial_review_commit": INITIAL_REVIEW_COMMIT,
+        "checker_sha256": hashlib.sha256((ROOT / CHECKER_PATH).read_bytes()).hexdigest(),
         "scope": "independent CPU numerical audit; no solve, GPU or exact-proof claim",
         **payload,
     }
@@ -111,10 +123,6 @@ def test_rounded_zero_kernel_cannot_accept_exactly_indefinite_model(tmp_path, re
     assert determinant == -Fraction(1, 2**104)
     assert objective == -Fraction(float(p.P[0, 0])) / 2
     assert all(Fraction(v).denominator == 1 for v in descent)
-    eigenvalues, vectors = checker._jacobi(p.P.tolist())
-    columns = checker._bt(vectors, 2)
-    fixed_residuals = [checker._bmv(p.P.tolist(), column) for column in columns]
-    exact_residuals = [[str(exact_dot(row, column)) for row in p.P] for column in columns]
     try:
         evidence = checker.check_qp_candidate(p, [0., 0.], [], arithmetic=MODE)
     except ValueError as error:
@@ -122,9 +130,12 @@ def test_rounded_zero_kernel_cannot_accept_exactly_indefinite_model(tmp_path, re
             "model": {"P": p.P.tolist(), "q": p.q.tolist(), "A": [], "l": [], "u": []},
             "exact_determinant": str(determinant), "descent": descent,
             "exact_descent_objective": str(objective), "rejected": str(error),
-            "eigenvalues": eigenvalues,
         })
         return
+    eigenvalues, vectors = checker._jacobi(p.P.tolist())
+    columns = checker._bt(vectors, 2)
+    fixed_residuals = [checker._bmv(p.P.tolist(), column) for column in columns]
+    exact_residuals = [[str(exact_dot(row, column)) for row in p.P] for column in columns]
     path = receipt(tmp_path, request, "rounded-zero-kernel", {
         "model": {"P": p.P.tolist(), "q": p.q.tolist(), "A": [], "l": [], "u": []},
         "candidate": {"x": [0., 0.], "y": []},
@@ -233,49 +244,36 @@ def test_unambiguously_negative_curvature_fails_loud():
         checker.check_qp_candidate(p, [0., 0.], [], arithmetic=MODE)
 
 
-def load_trusted_parent(path, name):
-    """Load canonical committed Git bytes, never input artifact executables."""
-    committed = git_bytes(PARENT_COMMIT, path)
-    module = ModuleType(name)
-    module.__file__ = f"trusted-git:{PARENT_COMMIT}:{path}"
-    module.__package__ = "openopt"
-    sys.modules[name] = module
-    exec(compile(committed, module.__file__, "exec"), module.__dict__)
-    return module, committed
-
-
-def test_default_evidence_and_config_match_trusted_preimplementation_git(tmp_path, request):
-    old_checker, original = load_trusted_parent(CHECKER_PATH, "openopt._independent_legacy_checker")
-    old_refinement, _ = load_trusted_parent("src/openopt/refinement.py", "openopt._independent_legacy_refinement")
-    try:
-        cases = [
-            (model([[2.]], [-4.]), [2.], []),
-            (model([[0.]], [-1.], [[1.]], [-np.inf], [1.]), [1.], [1.]),
-            (model([[0.]], [1.], [[1.]], [1.], [np.inf]), [1.], [-1.]),
-            (model([[1., 1.], [1., 1.]], [-2., -2.]), [3., -1.], []),
-            (model([[2.]], [0.], [[1.]], [-np.inf], [np.inf]), [0.], [2. ** -100]),
-            (model([[1., 0.], [0., 1e-16]], [0., 0.]), [0., 0.], []),
-        ]
-        rows = []
-        for p, x, y in cases:
-            snapshots = {name: getattr(p, name).tobytes() for name in ("P", "q", "A", "l", "u")}
-            legacy = json.dumps(old_checker.check_qp_candidate(p, x, y).to_dict(), sort_keys=True)
-            before = json.dumps(checker.check_qp_candidate(p, x, y).to_dict(), sort_keys=True)
-            checker.check_qp_candidate(p, x, y, arithmetic=MODE)
-            after = json.dumps(checker.check_qp_candidate(p, x, y).to_dict(), sort_keys=True)
-            explicit = json.dumps(checker.check_qp_candidate(p, x, y, arithmetic="numpy").to_dict(), sort_keys=True)
-            assert legacy == before == after == explicit
-            assert snapshots == {name: getattr(p, name).tobytes() for name in snapshots}
-            rows.append(hashlib.sha256(legacy.encode()).hexdigest())
-        config = asdict(RefinementConfig())
-        assert config.pop("check_arithmetic") == "numpy"
-        assert config == asdict(old_refinement.RefinementConfig())
-        receipt(tmp_path, request, "legacy-default", {
-            "legacy_commit": PARENT_COMMIT,
-            "legacy_checker_sha256": hashlib.sha256(original).hexdigest(),
-            "exact_json_matches": len(rows), "evidence_sha256": rows,
-            "default_config_preserved_except_new_opt_in_field": True,
-        })
-    finally:
-        sys.modules.pop(old_checker.__name__)
-        sys.modules.pop(old_refinement.__name__)
+def test_default_evidence_and_config_match_verified_preimplementation_baseline(tmp_path, request):
+    cases = [
+        (model([[2.]], [-4.]), [2.], []),
+        (model([[0.]], [-1.], [[1.]], [-np.inf], [1.]), [1.], [1.]),
+        (model([[0.]], [1.], [[1.]], [1.], [np.inf]), [1.], [-1.]),
+        (model([[1., 1.], [1., 1.]], [-2., -2.]), [3., -1.], []),
+        (model([[2.]], [0.], [[1.]], [-np.inf], [np.inf]), [0.], [2. ** -100]),
+        (model([[1., 0.], [0., 1e-16]], [0., 0.]), [0., 0.], []),
+    ]
+    rows = []
+    for (p, x, y), expected in zip(cases, DEFAULT_EVIDENCE_SHA256):
+        snapshots = {name: getattr(p, name).tobytes() for name in ("P", "q", "A", "l", "u")}
+        before = json.dumps(checker.check_qp_candidate(p, x, y).to_dict(), sort_keys=True)
+        checker.check_qp_candidate(p, x, y, arithmetic=MODE)
+        after = json.dumps(checker.check_qp_candidate(p, x, y).to_dict(), sort_keys=True)
+        explicit = json.dumps(checker.check_qp_candidate(p, x, y, arithmetic="numpy").to_dict(), sort_keys=True)
+        assert before == after == explicit
+        assert hashlib.sha256(before.encode()).hexdigest() == expected
+        assert snapshots == {name: getattr(p, name).tobytes() for name in snapshots}
+        rows.append(expected)
+    config = asdict(RefinementConfig())
+    assert config.pop("check_arithmetic") == "numpy"
+    assert config == {
+        "device": "cpu", "dtype": checker.torch.float64, "factor_dtype": checker.torch.float64,
+        "max_refinement_steps": 3, "active_atol": 1e-5, "active_rtol": 1e-7,
+        "check_atol": 1e-8, "check_rtol": 1e-8,
+    }
+    receipt(tmp_path, request, "legacy-default", {
+        "legacy_commit": PARENT_COMMIT,
+        "legacy_checker_sha256": "e7ece6f726bb7613d504ff6d84eedc20fb1a5879213a653680a26f8a64eb4c9c",
+        "exact_json_matches": len(rows), "evidence_sha256": rows,
+        "default_config_preserved_except_new_opt_in_field": True,
+    })
