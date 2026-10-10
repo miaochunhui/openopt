@@ -1,5 +1,88 @@
 # Explicit Public CPU Robustness Experiment
 
+## V3 Loaded-Object Repair
+
+Repair branch `codex/release4-20261010-public-v3-loaded-binding-repair` starts
+at `0152d6d4754cb898739faf3947cb96871551db1a`, not main. Only the qualifier,
+its author tests and this document change. HSD is separately frozen at
+`695df3b1f998ab4ede15c0172cd948cba1910173` and its author files are stopped.
+No checker, solver, importer, v1/v2 contract, public model, GPU or infra changes.
+
+Nash's immutable `full-v3/tests-b96kboz5` remains 71 passed / one failed;
+receipt SHA256 `3a29522c6741f3a4dac5891ce324282a552c5529eed0d120df741a3d4b0a9e21`.
+Its loaded/restored-disk counterexample SHA256 is
+`a307d990145ad6579b5318b229f5c1e0893670740c7235347f3191e2e208ab78`.
+The original producer rehashed a restored disk file instead of checking the
+already compiled checker. Its default remained atol=1e-3 while the disk,
+plan, inventory and saved loaded-source pins matched the trusted 1e-8 source.
+That was false loaded-source acceptance, not evidence of a false optimum.
+Neither original artifact is rewritten or retrospectively accepted.
+
+The v3-only low-level loader captures all four source buffers once and compiles
+those buffers in a fresh private module namespace. A returned handle alone is
+untrusted: it must pass `v3_loaded_sources` before configs or numeric checks
+are used. That guard hashes captured trusted disk buffers against the immutable
+base pins, independently constructs a comparison namespace from those verified
+buffers, and compares actual live functions/code/defaults, generated frozen
+dataclass constructors/fields, properties, known decorator code/closure state,
+module constants and cross-module aliases. It checks package/module/cache/
+origin identity and hashes the files again after comparison. The comparison
+does not call a solver, candidate checker, refinement proposal or actual
+configuration constructor. Temporary comparison modules are removed.
+
+Do not treat a loader self-reported hash or an arbitrary `__wrapped__` attribute
+as evidence. A substituted wrapper is rejected even if it names the original.
+Independent instrumentation that replaces numerical entries is also rejected;
+reviewers can use call profiling or a separate external observation harness,
+not expect an arbitrary wrapper to be whitelisted as trusted numerical code.
+This is selected source-object binding, not whole-interpreter attestation
+against a malicious trusted producer/runtime. Native runtime pins retain their
+previous explicitly limited selected-module/thread-library closure.
+Producer byte identity changes, so historical v3 result bytes are not
+replay-qualified by this repair. Numerical settings/gates remain unchanged.
+
+Evidence root:
+`/hf3fs-jd/data/tmp/openopt-release-20261010/public-v3-loaded-binding-repair/`.
+Pre-smoke `pre-smoke/smoke-o1lvkq2a`: 80 passed / four explicit CUDA skips,
+8.83s. Repair-before `loaded-red-v1/tests-0wd52lye`: one passed / nine failed,
+6.08s, rc=1, retained. All nine mutations were incorrectly accepted: restored
+disk, changed default/code/generated constructor/class default/checker alias/
+wrapper/global/package cache. `loaded-green-v1/tests-ycf9xodw` passes the same
+ten tests in 6.19s.
+
+Development actual `actual-independent-v1/tests-k_x4mgg8/verification.json`:
+84 passed / zero failures/errors/skips, 154.76s, source consistency PASS.
+Receipt SHA256 `570f972f787444b9d499713911e1a493da0ff78e0edd6ee4648998f2637c8606`;
+JUnit SHA256 `a2c281848dbab99389930a32ee787d7ffa61000cb88577babfdaeeca41e69820`.
+It executes 12 bounded synthetic workspace solves, four nested OSQP native
+calls and four refinement proposals; all 12 saved original candidates pass
+the unchanged six gates. Result pin is
+`280aaa9010a258af2309feeb03a8ea97b06c5b3164d8b1cf24c9e87b79ae8050`,
+plan pin `b2ec9d3b051533930d9a18ca84fc056f76d9c3261dced2406736bf42c5b249d2`.
+The `pytest-tmp/v3-actual0/replay.json` JSON readback replays 12/12 with zero
+solves and public count zero. The generic verifier also executes its separate
+legacy CPU example; this whole receipt is not a zero-solve-only run.
+
+The author test adapter invokes Nash's original counterexample function from
+unchanged independently owned source SHA256
+`7d2262e7d1550800dddcb72b53341dc9b02efe44a8d62d58feaebe521da7995e`.
+Only its external artifact root is redirected; its mutation, loader, trap and
+assertions are unchanged. `pytest-tmp/test_v3_unchanged_nash_loaded_0/
+loaded-restored-disk-counterexample.json` records the actually loaded
+replacement hash `16c52598f960c5d761308db5c20732f626962dbbf660466ad26cec869206c7ff`,
+default 0.001, restored trusted disk, rejected=true, replay=null, solver_calls=0.
+Rejection is `certificates.py.check_qp_candidate kwdefaults.atol value`.
+This author-run reuse is not Nash's independent frozen-source signoff.
+
+Portable default tests never read Nash's local tree. For this optional original
+counterexample reuse additionally set `OPENOPT_RUN_PUBLIC_V3_NASH_REVIEW=1`
+and `OPENOPT_PUBLIC_V3_NASH_TEST_SOURCE` to its pinned independent file,
+alongside `OPENOPT_RUN_PUBLIC_V3_WORKER_TESTS=1`. Missing source or different
+bytes fails loudly; a disabled review is explicitly skipped, not accepted.
+Clean-source terminal receipts are handed off separately after freeze.
+No real public solve, full generic scope, license, speed or commercial success
+is claimed.
+
 ## V3 Executable Worker Binding
 
 This new scope implements `public-qp-worker-v3` in

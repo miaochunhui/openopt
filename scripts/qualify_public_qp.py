@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
-from dataclasses import asdict
+from dataclasses import MISSING, asdict, fields, is_dataclass
 from datetime import datetime, timezone
 import hashlib
 import importlib.metadata
@@ -24,7 +24,7 @@ import sys
 import subprocess
 import time
 import traceback
-from types import ModuleType, SimpleNamespace
+from types import FunctionType, MethodType, ModuleType, SimpleNamespace
 from urllib.parse import urlsplit
 
 sys.dont_write_bytecode = True
@@ -689,11 +689,166 @@ def v3_sources() -> dict:
 
 
 def v3_core(directory: Path):
-    core = load_core(directory)
-    package = core.qp.__package__
-    core.scaling = load_module(directory / "scaling.py", package + ".scaling")
-    core.refinement = load_module(directory / "refinement.py", package + ".refinement")
-    return core
+    # Capture once, then compile those buffers, never a second pathname read.
+    # This low-level handle is not trusted until v3_loaded_sources validates it.
+    buffers = {name: (directory / name).read_bytes() for name in
+               ("certificates.py", "qp.py", "scaling.py", "refinement.py")}
+    return _v3_buffer_core(directory, buffers)
+
+
+def _v3_buffer_core(directory: Path, buffers: dict) -> SimpleNamespace:
+    package_name = "_public_qp_v3_" + hashlib.sha256(
+        str(directory.resolve()).encode() + b"".join(buffers.values())).hexdigest()[:16]
+    # Each load has a separate cache identity, including the trusted comparison.
+    package_name += "_" + str(time.monotonic_ns())
+    package = ModuleType(package_name)
+    package.__path__ = [str(directory.resolve())]
+    sys.modules[package_name] = package
+    modules = {}
+    try:
+        for filename, raw in buffers.items():
+            name = filename[:-3]
+            path = (directory / filename).resolve(strict=True)
+            spec = importlib.util.spec_from_file_location(package_name + "." + name, path)
+            if spec is None:
+                raise ValueError(f"v3 loaded source spec missing: {filename}")
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module.__name__] = module
+            setattr(package, name, module)
+            exec(compile(raw, str(path), "exec", dont_inherit=True), vars(module))
+            modules[name] = module
+    except BaseException:
+        for name in (package_name, *(package_name + "." + key for key in modules)):
+            sys.modules.pop(name, None)
+        raise
+    return SimpleNamespace(qp=modules["qp"], checker=modules["certificates"],
+                           scaling=modules["scaling"], refinement=modules["refinement"])
+
+
+def _v3_live_binding(actual_modules: dict, trusted_modules: dict) -> None:
+    """Compare live objects to independently executed, hash-checked source buffers.
+
+    No candidate, solver or actual constructor is executed by this comparison.
+    Generated dataclass and known decorator code/closures are compared too.
+    """
+    paired = {id(value): actual_modules[name] for name, value in trusted_modules.items()}
+    for name, module in trusted_modules.items():
+        for key, value in vars(module).items():
+            if isinstance(value, type) and value.__module__ == module.__name__:
+                paired[id(value)] = vars(actual_modules[name]).get(key)
+    visited = set()
+
+    def fail(label):
+        raise ValueError(f"v3 actual loaded source binding differs: {label}")
+
+    def compare(actual, wanted, label):
+        pair = (id(actual), id(wanted))
+        if pair in visited:
+            return
+        visited.add(pair)
+        if id(wanted) in paired:
+            if actual is not paired[id(wanted)]:
+                fail(label + " alias")
+            return
+        if actual is wanted:
+            return
+        if is_dataclass(wanted) and not isinstance(wanted, type):
+            expected_class = paired.get(id(type(wanted)))
+            if type(actual) is not expected_class:
+                fail(label + " default class")
+            compare(vars(actual), vars(wanted), label + " default fields")
+            return
+        if type(actual) is not type(wanted):
+            fail(label + " type")
+        if isinstance(wanted, FunctionType):
+            if actual.__code__ != wanted.__code__:
+                fail(label + " code")
+            expected_globals = next(
+                (vars(actual_modules[name]) for name, module in trusted_modules.items()
+                 if wanted.__globals__ is vars(module)), wanted.__globals__)
+            if actual.__globals__ is not expected_globals:
+                fail(label + " globals")
+            compare(actual.__defaults__, wanted.__defaults__, label + " defaults")
+            compare(actual.__kwdefaults__, wanted.__kwdefaults__, label + " kwdefaults")
+            compare(vars(actual), vars(wanted), label + " wrapper attributes")
+            if len(actual.__closure__ or ()) != len(wanted.__closure__ or ()):
+                fail(label + " closure")
+            for index, (left, right) in enumerate(zip(
+                    actual.__closure__ or (), wanted.__closure__ or ())):
+                compare(left.cell_contents, right.cell_contents, f"{label} closure[{index}]")
+        elif isinstance(wanted, MethodType):
+            compare(actual.__func__, wanted.__func__, label + " method")
+            compare(actual.__self__, wanted.__self__, label + " receiver")
+        elif isinstance(wanted, property):
+            for key in ("fget", "fset", "fdel"):
+                compare(getattr(actual, key), getattr(wanted, key), label + "." + key)
+        elif isinstance(wanted, (staticmethod, classmethod)):
+            compare(actual.__func__, wanted.__func__, label + " descriptor")
+        elif type(wanted) is dict:
+            if actual.keys() != wanted.keys():
+                fail(label + " membership")
+            for key in wanted:
+                compare(actual[key], wanted[key], label + "." + str(key))
+        elif type(wanted) in (tuple, list):
+            if len(actual) != len(wanted):
+                fail(label + " length")
+            for index, value in enumerate(wanted):
+                compare(actual[index], value, f"{label}[{index}]")
+        elif type(wanted) in (str, int, float, bool, bytes, type(None), set, frozenset):
+            if actual != wanted:
+                fail(label + " value")
+        elif type(wanted).__module__.startswith("torch.") and hasattr(wanted, "__dict__"):
+            # no_grad's context-factory receiver: not an arbitrary source object.
+            compare(vars(actual), vars(wanted), label + " torch decorator state")
+        else:
+            fail(label + " unsupported/nonidentical object")
+
+    # Classes are registered before resolving captured config-instance defaults.
+    for name, wanted_module in trusted_modules.items():
+        actual_module = actual_modules[name]
+        wanted_vars = {key: value for key, value in vars(wanted_module).items()
+                       if not key.startswith("__")}
+        actual_vars = {key: value for key, value in vars(actual_module).items()
+                       if not key.startswith("__")}
+        if actual_vars.keys() != wanted_vars.keys():
+            fail(name + " module membership")
+        for key, wanted in wanted_vars.items():
+            actual = actual_vars[key]
+            label = name + "." + key
+            if isinstance(wanted, type) and wanted.__module__ == wanted_module.__name__:
+                if (type(actual) is not type or actual.__module__ != actual_module.__name__
+                        or actual.__bases__ != (object,) or actual.__new__ is not object.__new__):
+                    fail(label + " class identity")
+                left, right = vars(actual), vars(wanted)
+                if left.keys() != right.keys():
+                    fail(label + " class membership")
+                for attr, value in right.items():
+                    if attr in ("__module__", "__dict__", "__weakref__", "__dataclass_fields__",
+                                "__dataclass_params__"):
+                        continue
+                    compare(left[attr], value, label + "." + attr)
+                if is_dataclass(wanted):
+                    if not is_dataclass(actual):
+                        fail(label + " dataclass")
+                    for attr in ("init", "repr", "eq", "order", "unsafe_hash", "frozen"):
+                        compare(getattr(actual.__dataclass_params__, attr),
+                                getattr(wanted.__dataclass_params__, attr),
+                                label + " dataclass parameter " + attr)
+                    if [f.name for f in fields(actual)] != [f.name for f in fields(wanted)]:
+                        fail(label + " dataclass fields")
+                    for a, w in zip(fields(actual), fields(wanted)):
+                        for attr in ("default", "default_factory", "init", "repr", "hash",
+                                     "compare", "kw_only", "type", "metadata"):
+                            value = getattr(w, attr)
+                            if attr == "metadata":
+                                compare(dict(getattr(a, attr)), dict(value), label + "." + a.name)
+                            elif value is MISSING:
+                                if getattr(a, attr) is not MISSING:
+                                    fail(label + "." + a.name + " missing default")
+                            else:
+                                compare(getattr(a, attr), value, label + "." + a.name + "." + attr)
+            else:
+                compare(actual, wanted, label)
 
 
 def v3_contracts_module():
@@ -880,6 +1035,7 @@ def v3_validate_context(output: Path, plan: dict) -> SimpleNamespace:
                         for solver in SOLVERS for mode in V3_MODES)
     v3_exact(plan["rows"], expected, "v3 complete case/backend/mode plan")
     core = v3_core(output / "code")
+    v3_loaded_sources(output, core)
     v3_configs(core)
     v3_exact(core.checker.REPRODUCIBLE_ARITHMETIC, V3_ARITHMETIC, "v3 checker API")
     return core
@@ -890,13 +1046,42 @@ def v3_loaded_sources(output: Path, core) -> dict:
     modules = {"qp.py": core.qp, "certificates.py": core.checker,
                "scaling.py": core.scaling, "refinement.py": core.refinement}
     loaded = {}
+    buffers = {}
+    package_name = core.qp.__package__
+    package = sys.modules.get(package_name)
+    if not isinstance(package, ModuleType) or package.__path__ != [str((output / "code").resolve())]:
+        raise ValueError("v3 actual loaded source package identity differs")
     for name, module in modules.items():
         expected = v3_member(output, "code/" + name).resolve(strict=True)
         origin = Path(module.__spec__.origin).resolve(strict=True)
         if origin != expected or Path(module.__file__).resolve(strict=True) != expected:
             raise ValueError(f"v3 loaded core module escaped frozen source: {name}")
-        v3_exact(digest(origin), pins[name], f"v3 loaded source bytes {name}")
+        if (module.__name__ != package_name + "." + name[:-3]
+                or module.__package__ != package_name
+                or sys.modules.get(module.__name__) is not module
+                or getattr(package, name[:-3], None) is not module):
+            raise ValueError(f"v3 actual loaded source module/cache identity differs: {name}")
+        buffers[name] = origin.read_bytes()
+        v3_exact(hashlib.sha256(buffers[name]).hexdigest(), pins[name],
+                 f"v3 loaded source bytes {name}")
         loaded[name] = {"file": name, "sha256": pins[name]}
+    # Dependency order matters; the trusted source never imports an artifact
+    # through an ordinary loader, and its temporary cache is always removed.
+    ordered = {name: buffers[name] for name in
+               ("certificates.py", "qp.py", "scaling.py", "refinement.py")}
+    trusted = _v3_buffer_core(output / "code", ordered)
+    trusted_modules = {"qp.py": trusted.qp, "certificates.py": trusted.checker,
+                       "scaling.py": trusted.scaling, "refinement.py": trusted.refinement}
+    try:
+        _v3_live_binding(modules, trusted_modules)
+        for name in modules:
+            v3_exact(digest(v3_member(output, "code/" + name)), pins[name],
+                     f"v3 loaded source post-check bytes {name}")
+    finally:
+        trusted_package = trusted.qp.__package__
+        for module in trusted_modules.values():
+            sys.modules.pop(module.__name__, None)
+        sys.modules.pop(trusted_package, None)
     return loaded
 
 

@@ -841,3 +841,97 @@ def test_v3_version_difference_negative_controls_are_portable(monkeypatch, packa
     monkeypatch.setattr(sys, "version", "3.10.20 controlled-test-version")
     with pytest.raises(ValueError, match="runtime (packages|highspy)"):
         runner.v3_runtime()
+
+
+@pytest.fixture
+def v3_loaded_core(tmp_path):
+    """Copied reviewed core only; no runtime observation or solver execution."""
+    output = tmp_path / "loaded-binding"
+    code = output / "code"
+    code.mkdir(parents=True)
+    for name in ("certificates.py", "qp.py", "scaling.py", "refinement.py"):
+        shutil.copyfile(runner.ROOT / runner.V3_SOURCES[name], code / name)
+    return output, runner.v3_core(code)
+
+
+def test_v3_loaded_binding_positive_without_solver(v3_loaded_core):
+    output, core = v3_loaded_core
+    loaded = runner.v3_loaded_sources(output, core)
+    assert set(loaded) == {"certificates.py", "qp.py", "scaling.py", "refinement.py"}
+
+
+@pytest.mark.parametrize("attack", [
+    "restored-disk", "default", "code", "class-init", "class-default",
+    "checker-alias", "wrapped-function", "global", "package-cache",
+])
+def test_v3_actual_loaded_binding_rejects_not_self_reported_hash(
+    v3_loaded_core, monkeypatch, attack, request,
+):
+    output, core = v3_loaded_core
+    checker = core.checker.check_qp_candidate
+    if attack == "restored-disk":
+        source = output / "code/certificates.py"
+        trusted = source.read_bytes()
+        old = b"y: object, *, atol: float = 1e-8, rtol: float = 1e-8,"
+        assert trusted.count(old) == 1
+        altered = trusted.replace(old, old.replace(b"atol: float = 1e-8", b"atol: float = 1e-3"))
+        source.write_bytes(altered)
+        try:
+            core = runner.v3_core(output / "code")
+            assert core.checker.check_qp_candidate.__kwdefaults__["atol"] == 1e-3
+        finally:
+            source.write_bytes(trusted)
+        assert runner.digest(source) == runner.v3_sources()["certificates.py"]
+        request.node.user_properties.append(("actually_loaded_sha256", corpus.sha256(altered)))
+    elif attack == "default":
+        monkeypatch.setattr(checker, "__kwdefaults__", {**checker.__kwdefaults__, "atol": 1e-3})
+    elif attack == "code":
+        monkeypatch.setattr(checker, "__code__", checker.__code__.replace(
+            co_consts=(*checker.__code__.co_consts, "coordinated loaded substitution")))
+    elif attack == "class-init":
+        init = core.qp.QPConfig.__init__
+        monkeypatch.setattr(init, "__code__", init.__code__.replace(
+            co_consts=(*init.__code__.co_consts, "changed generated constructor")))
+    elif attack == "class-default":
+        monkeypatch.setattr(core.refinement.RefinementConfig, "check_arithmetic", "other")
+    elif attack == "checker-alias":
+        monkeypatch.setattr(core.refinement, "check_qp_candidate", lambda *args: None)
+    elif attack == "wrapped-function":
+        import functools
+
+        original = core.scaling.equilibrate_qp
+
+        @functools.wraps(original)
+        def substituted(*args, **kwargs):
+            raise AssertionError("substituted wrapper must never run")
+
+        monkeypatch.setattr(core.scaling, "equilibrate_qp", substituted)
+    elif attack == "global":
+        monkeypatch.setattr(core.checker, "REPRODUCIBLE_ARITHMETIC", "other")
+    else:
+        monkeypatch.setitem(sys.modules, core.qp.__name__, core.checker)
+    with pytest.raises(ValueError, match="loaded"):
+        runner.v3_loaded_sources(output, core)
+
+
+def test_v3_unchanged_nash_loaded_restored_counterexample(
+    v3_actual, tmp_path, monkeypatch, request,
+):
+    """Invoke the reviewer-owned function without copying or editing its bytes."""
+    if os.environ.get("OPENOPT_RUN_PUBLIC_V3_NASH_REVIEW") != "1":
+        pytest.skip("independent source replay requires explicit Nash review opt-in")
+    source = Path(os.environ["OPENOPT_PUBLIC_V3_NASH_TEST_SOURCE"]).resolve(strict=True)
+    pin = "7d2262e7d1550800dddcb72b53341dc9b02efe44a8d62d58feaebe521da7995e"
+    assert runner.digest(source) == pin, "unchanged independent test source required"
+    audit = runner.load_module(source, "_public_v3_unchanged_nash_review")
+    assert audit.producer is runner
+    monkeypatch.setattr(audit, "ARTIFACT_ROOT", tmp_path.resolve())
+    audit.test_restored_disk_does_not_hide_different_loaded_checker_bytes(
+        v3_actual, tmp_path, monkeypatch, request)
+    evidence = tmp_path / "loaded-restored-disk-counterexample.json"
+    receipt = corpus.read_json(evidence)
+    assert receipt["rejected"] and receipt["trusted_disk_restored"]
+    assert receipt["loaded_observations"] and receipt["solver_calls"] == 0
+    assert receipt["replay"] is None
+    assert runner.digest(source) == pin
+    request.node.user_properties.append(("unchanged_independent_test_sha256", pin))
