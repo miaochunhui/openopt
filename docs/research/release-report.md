@@ -252,3 +252,84 @@ suite denominator (native 21, presolve 8, refinement 7) and zero skips, errors
 or failures. This stricter scope does not ban ordinary CPU regression skips.
 UNQUALIFIED status occurrences join the recursively retained failure
 statuses; the count remains occurrences, not distinct failed problems.
+
+## Optional RSOC Receipt Projection
+
+The optional roles `rotated_cuda_acceptance` and `rsoc_extremes_acceptance`
+are separate, independently caller-pinned auditor receipts. They are not
+replaced by top-level GPU PASS, added to CPU counts, or required implicitly
+by historical v4 inputs. Each success requires its own `PREFIX_run`,
+`PREFIX_result` and `PREFIX_junit` descriptor, where PREFIX is `rotated_cuda`
+or `rsoc_extremes`. JUnit roles are XML, other roles JSON. CLI preparation
+uses the unchanged repeated `--input ID PATH SHA256` interface.
+
+The 76 contract consumes `RSOC_EXTREMES_REPLAY_PASS`, exactly 76 unique
+original-coordinate replay identities, zero failures/errors/skips, original
+source commit, all original input descriptors and unique JUnit sidecar pins.
+Its independently versioned domain is 38 represented vectors x primal/dual;
+it is not inferred from supplied receipts or mutable test collection.
+The source manifest, complete snapshot bytes, result source subset, isolated
+run/output paths, result mirror, execution artifacts and all sidecars are
+hash-checked and rechecked under the existing no-follow snapshot rules.
+
+Fixed thirteen additionally requires `rotated_cuda_bundle` and
+`rotated_cuda_pins`. The receipt must be mode `accept`, bind the explicit
+pins manifest digest, and carry a valid auditor digest. Numeric-only replay
+or seal receipts do not substitute for accept. The complete bundle must
+match its explicit caller pins, versioned algorithm, execution source and
+the exact ten positive / three expected-rejection denominator. Every
+original LP/QP or projection check is structurally complete; positives must
+pass, each expected rejected candidate must retain its passed baseline and
+specified false checks. Projection component and Moreau outcomes must pass.
+The complete thirteen JUnit identities and original sidecar set are checked
+in both directions, without dropping expected negative cases.
+
+An input FAIL remains visible with its timestamp and receipt digest even
+when success-only fields are absent. Unknown success schemas, missing roles,
+bad denominators, duplicates, resealed dropped cases, hidden check failures,
+unmatched caller pins, changed snapshots and source substitutions reject
+the render. No mathematical auditor or solver is executed by this renderer.
+These checks bind and project the caller's receipt; they do not attest that
+its author was independent, repeat its arithmetic, or cryptographically
+attest its archived runtime. Owner PASS is not independent signoff.
+
+Public scalars retain each execution source, scope hash and acceptance,
+run/result/JUnit digests. `source_relation` is `historical` whenever the
+execution commit differs from the report's declared numerical source.
+`current` additionally requires the clean CPU source-consistency PASS and
+matching executed numerical/runner/test hashes. Historical CUDA cannot be
+retroactively promoted by a later CPU audit or documentation commit.
+Two passing projections do not establish full release, commercial,
+performance, multi-GPU or online qualification.
+
+Self-contained synthetic archive tests are explicitly non-executed fixtures.
+They prove renderer binding only. A separate real-file test uses two named,
+fixed historical acceptance receipts and checks deterministic generation,
+external byte readback and the actual renderer CLI without GPU/network.
+Its optional absence is a skip, never actual historical acceptance.
+The first development receipt `report-rsoc-extension/mechanism-v1/tests-li_jds8c`
+retains 27 passes and two failed test assertions: a broad leakage assertion
+matched the existing legitimate `synthetic-*` corpus IDs. The chain checks
+passed; the assertion was narrowed to the actual private fixture payload/path.
+No numerical threshold, deadline, denominator or receipt pin was relaxed.
+
+Development validation at `report-rsoc-extension/full-v3/tests-sbhbel7h`
+passed 112 nodes, zero failures/errors/skips, in 116.44 pytest seconds;
+305 source files matched before/after, but that source was still dirty.
+The separate `actual-v2/tests-u2b1rv7s` passed three nodes in 26.83 seconds.
+Its `pytest-tmp/test_real_pinned_rsoc_archives0/evidence/real-rsoc-projection.json`
+records both real historical receipt sets, their original run/result/JUnit
+pins, `cuda_execution=false`, `qualified=false` and actual CLI byte readback.
+This is projection evidence, not independent fixed13 signoff.
+
+The additional CLI negatives retain their first rejection codes, logs,
+rehashed input-manifest digests and absence of output bundles in each isolated
+test artifact. They mutate denominators and drop real contract identities
+while rehashing the changed JSON; an unchanged outer hash is not the reason
+they reject. A same-source synthetic positive supplies the complete matching
+clean CPU snapshot and still remains intermediate/unqualified.
+These six controls passed with zero failures/errors/skips in 15.33 seconds
+at `report-rsoc-extension/final-controls-v4/tests-458s5_wi`; before/after
+source consistency was PASS. The unchanged whole-file clean-source rerun
+is handed off under `report-rsoc-extension/clean-final-v5`; its verification
+JSON and complete JUnit, not this planned coordinate, decide acceptance.

@@ -37,11 +37,21 @@ EXTENSIONS = {
     "extension_presolve": ("presolve", "保守预处理 CUDA"),
     "extension_refinement": ("refinement", "精度修正 CUDA"),
 }
+RSOC_ROLES = {
+    "rotated_cuda_acceptance": ("rotated_cuda", 13, "固定十三 RSOC"),
+    "rsoc_extremes_acceptance": ("rsoc_extremes", 76, "独立七十六 RSOC"),
+}
+RSOC_LINKS = frozenset({
+    *(f"{prefix}_{name}" for prefix, _, _ in RSOC_ROLES.values()
+      for name in ("run", "result", "junit")),
+    "rotated_cuda_bundle", "rotated_cuda_pins",
+})
 OPTIONAL = frozenset({
     "gpu_junit", "cpu_version", "public_qualification", "proof_contract_review",
     "public_robustness", "public_robustness_plan", "public_robustness_corpus",
-    "extension_presolve_run", *EXTENSIONS,
+    "extension_presolve_run", *EXTENSIONS, *RSOC_ROLES, *RSOC_LINKS,
 })
+XML_ROLES = frozenset({"junit", "gpu_junit", "rotated_cuda_junit", "rsoc_extremes_junit"})
 STATUS = frozenset({
     "PASS", "FAIL", "UNVERIFIED", "QUALIFIED", "REJECTED", "INCONCLUSIVE",
     "RUNNING", "PENDING", "COMPLETE", "solved", "max_iterations",
@@ -339,7 +349,7 @@ class Report:
             paths.add(path)
             payload = self.input(path, item["sha256"], name)
             self.descriptors[name] = item
-            self.records[name] = payload if name in {"junit", "gpu_junit"} else parse(payload, name)
+            self.records[name] = payload if name in XML_ROLES else parse(payload, name)
         require(REQUIRED <= self.records.keys(), "missing_required_input", "inputs")
         self.scalars, self.provenance, self.claims = {}, {}, []
 
@@ -699,6 +709,13 @@ class Report:
             self.direct("proof_review_source", role, "/producer/commit")
         if "public_robustness" in r:
             self.robustness()
+        self.rsoc_rows = []
+        for role, (prefix, total, label) in RSOC_ROLES.items():
+            links = {name for name in RSOC_LINKS if name.startswith(prefix + "_")}
+            require(not (links & set(r)) or role in r, "unused_rsoc_link", prefix)
+            if role in r:
+                self.rsoc(role, prefix, total)
+                self.rsoc_rows.append((prefix, label))
         require(not ({"public_robustness_plan", "public_robustness_corpus"} & set(r))
                 or "public_robustness" in r, "unused_robustness_contract", "public_robustness")
         self.failure_rows = []
@@ -723,6 +740,271 @@ class Report:
                 failures(record, role, [])
         self.scalar("evidence_failure_statuses", len(self.failure_rows), "metadata", "",
                     "count-failure-or-unqualified-status-in-all-pinned-json-inputs")
+
+    def rsoc(self, role, prefix, total):
+        """Project pinned auditor receipts; never execute an auditor or a solver."""
+        r, evidence = self.records, self.records[role]
+        success = "PASS" if total == 13 else "RSOC_EXTREMES_REPLAY_PASS"
+        require(evidence.get("verdict") in {success, "FAIL"}, "rsoc_acceptance_status", role)
+        timestamp(evidence.get("checked_at"), role)
+        self.scalar(prefix + "_status", "PASS" if evidence["verdict"] == success else "FAIL",
+                    role, "/verdict", "bounded-auditor-verdict-projection")
+        self.direct(prefix + "_checked", role, "/checked_at")
+        self.scalar(prefix + "_receipt_hash", self.descriptors[role]["sha256"],
+                    role, "", "descriptor-sha256")
+        if evidence["verdict"] == "FAIL":
+            require(all(evidence.get(key, "UNVERIFIED") == "UNVERIFIED"
+                        for key in ("commercial", "performance")),
+                    "rsoc_qualification_overclaim", role)
+            return
+        require(evidence.get("commercial") == evidence.get("performance") == "UNVERIFIED",
+                "rsoc_qualification_overclaim", role)
+        names = {name: prefix + "_" + name for name in ("run", "result", "junit")}
+        if total == 13:
+            names.update(bundle=prefix + "_bundle", pins=prefix + "_pins")
+        require(set(names.values()) <= set(r), "rsoc_complete_links_required", role)
+        run, result = r[names["run"]], r[names["result"]]
+        run_path = shared_path(self.descriptors[names["run"]]["path"], role)
+        result_path = shared_path(self.descriptors[names["result"]]["path"], role)
+        junit_path = shared_path(self.descriptors[names["junit"]]["path"], role)
+        require(run_path.name == "run.json" and result_path.name == "result.json"
+                and result_path.parent.name.startswith("cuda-check-")
+                and result_path.parent.parent == run_path.parent / "case-0"
+                and junit_path == result_path.parent / "pytest.xml",
+                "rsoc_archive_paths", role)
+        expected_counts = {"tests": total, "failures": 0, "errors": 0, "skipped": 0}
+        require(test_counts(result, names["result"]) == expected_counts
+                and result["verdict"] == "PASS" and result.get("returncode") == 0
+                and type(result.get("returncode")) is int
+                and junit_counts(r[names["junit"]], names["junit"]) == expected_counts,
+                "rsoc_complete_counts", role)
+        test = ("tests/test_rotated_conic_cuda.py" if total == 13
+                else "tests/test_rotated_conic_cuda_extremes.py")
+        require(result.get("targets") == ([test] if total == 13 else
+                [test + "::test_cuda_rotated_extreme_coordinates"])
+                and result.get("selection") == ("cuda_rotated" if total == 13 else ""),
+                "rsoc_exact_selection", role)
+        source, identity = run.get("source_hashes"), run.get("source_identity")
+        self.source_hashes(source, role)
+        require(isinstance(identity, dict) and identity.get("clean") is True
+                and isinstance(identity.get("commit"), str) and COMMIT.fullmatch(identity["commit"])
+                and isinstance(identity.get("tree"), str) and COMMIT.fullmatch(identity["tree"])
+                and identity["commit"] == run.get("source_sha")
+                and isinstance(identity.get("sha256"), dict)
+                and all(identity["sha256"].get(name) == digest for name, digest in source.items())
+                and run.get("stage") == "release-regression" and run.get("state") == "SUBMITTED"
+                and isinstance(run.get("jobs"), list) and len(run["jobs"]) == 1,
+                "rsoc_clean_execution_source", role)
+        expected_sources = {name: digest for name, digest in source.items()
+                            if name.startswith("src/openopt/") and name.endswith(".py")}
+        require(expected_sources and test in source and "scripts/gpu_release_check.py" in source,
+                "rsoc_numerical_source_missing", role)
+        expected_sources.update({name: source[name] for name in (test, "scripts/gpu_release_check.py")})
+        require(result.get("source_sha256") == expected_sources, "rsoc_result_source_mismatch", role)
+        expected = rsoc_identities(total)
+        if total == 13:
+            bundle, pins = r[names["bundle"]], r[names["pins"]]
+            require(evidence.get("mode") == "accept"
+                    and evidence.get("pins_sha256") == self.descriptors[names["pins"]]["sha256"]
+                    and isinstance(evidence.get("auditor_sha256"), str)
+                    and HASH.fullmatch(evidence["auditor_sha256"]),
+                    "rsoc_fixed13_accept_receipt", role)
+            require(bundle.get("schema_version") == 1
+                    and bundle.get("algorithm") == "fixed13_original_rational_decimal_v1"
+                    and bundle.get("verdict") == "PASS"
+                    and bundle.get("denominator") == {"positive": 10, "negative": 3, "total": 13}
+                    and bundle.get("certified") is False and bundle.get("old_proof_authority") is False
+                    and bundle.get("commercial") == bundle.get("performance") == "UNVERIFIED"
+                    and bundle.get("caller_pins") == pins,
+                    "rsoc_fixed13_bundle_contract", role)
+            binding = bundle.get("source", {})
+            require(binding.get("execution_commit") == identity["commit"]
+                    and binding.get("execution_tree") == identity["tree"]
+                    and isinstance(binding.get("audit_commit"), str)
+                    and COMMIT.fullmatch(binding["audit_commit"]), "rsoc_audit_source_mismatch", role)
+            scope = {name: digest for name, digest in source.items() if name.startswith("src/")}
+            scope[test] = source[test]
+            require(binding.get("scope_sha256") == scope, "rsoc_scope_source_mismatch", role)
+            require(pins.get("schema_version") == 1
+                    and shared_path(pins.get("run_root", ""), role) == run_path.parent
+                    and isinstance(pins.get("files"), dict) and set(pins["files"]) == {
+                        "run", "result", "junit", "submitted_job", "status", "pod_log", "pytest_log",
+                        "execution_log", "telemetry", "source_manifest", "outer_result",
+                    }, "rsoc_fixed13_pin_membership", role)
+            originals = list(pins["files"].values()) + bundle.get("sidecars", [])
+            members = bundle.get("numeric_cases")
+            require(isinstance(members, list) and len(members) == total,
+                    "rsoc_numeric_membership", role)
+            found = []
+            for member in members:
+                require(isinstance(member, dict) and member.get("identity") in expected,
+                        "rsoc_numeric_identity", role)
+                name = member["identity"]
+                kind, case = expected[name]
+                require(member.get("kind") == kind and member.get("case") == case,
+                        "rsoc_numeric_identity", role)
+                checks, cones = member.get("checks"), member.get("cone_checks")
+                keys = {"primal_equation", "primal_cone", "original_slack_cone", "dual_cone",
+                        "stationarity", "complementarity_block_0", "dual_objective_available",
+                        "duality_gap"}
+                if kind != "projection":
+                    keys.add("complementarity_block_1")
+                require(isinstance(checks, dict) and set(checks) == keys
+                        and all(type(value) is bool for value in checks.values())
+                        and isinstance(cones, dict) and set(cones) ==
+                        {"supplied_slack", "original_slack", "dual"}, "rsoc_numeric_checks", role)
+                for values in cones.values():
+                    require(isinstance(values, dict) and set(values) == (
+                        {"block_0"} if kind == "projection" else {"block_0", "block_1"})
+                        and all(type(value) is bool for value in values.values()),
+                        "rsoc_numeric_checks", role)
+                for name_key, cone_key in (("primal_cone", "supplied_slack"),
+                                          ("original_slack_cone", "original_slack"),
+                                          ("dual_cone", "dual")):
+                    require(checks[name_key] is all(cones[cone_key].values()),
+                            "rsoc_numeric_checks", role)
+                require(member.get("passed") is all(checks.values()), "rsoc_hidden_numeric_failure", role)
+                if kind == "original_rejection":
+                    required = {"wrong-equality-dual": ("stationarity",),
+                                "planted-slack": ("primal_equation", "original_slack_cone"),
+                                "wrong-dual-cone": ("dual_cone",)}[case]
+                    require(member["passed"] is False and member.get("baseline_passed") is True
+                            and all(checks[key] is False for key in required),
+                            "rsoc_expected_rejection_missing", role)
+                else:
+                    require(member["passed"] is True, "rsoc_hidden_numeric_failure", role)
+                    if kind == "projection":
+                        projection = member.get("projection", {})
+                        require(isinstance(projection.get("component_checks"), list)
+                                and len(projection["component_checks"]) == (4 if case == "tail-overflow-float64" else 3)
+                                and all(value is True for value in projection["component_checks"])
+                                and projection.get("moreau_orthogonal") is True
+                                and projection.get("precision_crosscheck") == [800, 1000]
+                                and projection.get("cone") == projection.get("negative_residual_dual") ==
+                                {"block_0": True}, "rsoc_projection_checks", role)
+                found.append(name)
+        else:
+            require(evidence.get("schema_version") == 1
+                    and evidence.get("tests") == expected_counts
+                    and evidence.get("source_commit") == identity["commit"]
+                    and evidence.get("qualified") is False
+                    and evidence.get("remote_attestation") == "NOT_PROVIDED",
+                    "rsoc_extremes_contract", role)
+            originals = evidence.get("inputs")
+            members = evidence.get("members")
+            require(isinstance(members, list) and len(members) == total
+                    and all(isinstance(member, dict) and set(member) == {"case", "verdict"}
+                            and member["verdict"] == "ORIGINAL_COORDINATES_REPLAYED"
+                            and isinstance(member["case"], str) for member in members),
+                    "rsoc_numeric_membership", role)
+            found = [member["case"] for member in members]
+            scope = {name: source.get(name) for name in (
+                "src/openopt/conic.py", "src/openopt/native_conic.py",
+                "tests/test_rotated_conic_independent.py", test)}
+            self.source_hashes(scope, role)
+        require(len(found) == len(set(found)) and set(found) == set(expected),
+                "rsoc_numeric_membership", role)
+        bound = self.rsoc_originals(originals, role, run_path.parent)
+        for key in ("run", "result", "junit"):
+            selected = self.descriptors[names[key]]
+            require(bound.get(shared_path(selected["path"], role)) == selected["sha256"],
+                    "rsoc_selected_pin_mismatch", role)
+        source_manifest = run_path.parent / "source/source-hashes.json"
+        require(source_manifest in bound
+                and parse(self.snapshots[source_manifest][0], role) == source,
+                "rsoc_source_manifest_mismatch", role)
+        for name, digest in source.items():
+            self.input(run_path.parent / "source" / name, digest, role)
+        outer = run_path.parent / "case-0/result.json"
+        require(outer in bound and self.snapshots[outer][0] == self.snapshots[result_path][0],
+                "rsoc_result_mirror_mismatch", role)
+        job = run["jobs"][0]
+        require(shared_path(job.get("output", ""), role) == result_path.parent.parent
+                and shared_path(job.get("manifest", ""), role) == run_path.parent / "job-0.json"
+                and run_path.parent / "job-0.json" in bound, "rsoc_run_output_binding", role)
+        execution = (bundle if total == 13 else evidence).get("execution", {})
+        require(isinstance(execution, dict) and execution.get("job") == job.get("job")
+                and isinstance(execution.get("pod"), str) and execution["pod"]
+                and all(root_path in bound for root_path in (
+                    run_path.parent / (execution["job"] + "-status.json"),
+                    run_path.parent / (execution["pod"] + ".log"),
+                    result_path.parent / "pytest.log", result_path.parent / "execution.log",
+                    result_path.parent / "telemetry.json")),
+                "rsoc_execution_pins_missing", role)
+        self.rsoc_sidecars(r[names["junit"]], expected, bound, result_path.parent, scope, total, role)
+        require(len(bound) == 11 + total, "rsoc_original_pin_membership", role)
+        if identity["commit"] == self.manifest["source_sha"]:
+            cpu_source = r["cpu"].get("source", {})
+            current = cpu_source.get("sha256", {})
+            require(cpu_source.get("commit") == identity["commit"] and cpu_source.get("clean") is True
+                    and self.scalars["cpu_source_consistency"] == "PASS"
+                    and all(current.get(name) == digest for name, digest in expected_sources.items()),
+                    "rsoc_current_source_mismatch", role)
+        for key in ("run", "result", "junit"):
+            self.scalar(prefix + "_" + key + "_hash", self.descriptors[names[key]]["sha256"],
+                        names[key], "", "descriptor-sha256")
+        self.scalar(prefix + "_source", identity["commit"], names["run"], "/source_sha")
+        self.scalar(prefix + "_source_relation",
+                    "current" if identity["commit"] == self.manifest["source_sha"] else "historical",
+                    names["run"], "/source_sha", "compare-execution-commit-with-report-source")
+        self.scalar(prefix + "_tests", total, names["junit"], "",
+                    "exact-suite-count-and-bidirectional-identity-membership")
+        self.scalar(prefix + "_scope_hash", sha(encoded(scope)), names["run"], "/source_hashes",
+                    "sha256-canonical-audited-scope-json")
+
+    def source_hashes(self, values, role):
+        require(isinstance(values, dict) and values and all(
+            isinstance(name, str) and name and not name.startswith("/")
+            and ".." not in name.split("/") and isinstance(digest, str) and HASH.fullmatch(digest)
+            for name, digest in values.items()), "rsoc_source_hashes", role)
+
+    def rsoc_originals(self, originals, role, root):
+        require(isinstance(originals, list) and originals, "rsoc_original_pins_missing", role)
+        bound = {}
+        for item in originals:
+            require(isinstance(item, dict) and set(item) in (
+                {"path", "sha256"}, {"path", "sha256", "bytes"}),
+                "rsoc_original_pin_schema", role)
+            path = shared_path(item.get("path", ""), role)
+            require(path.is_relative_to(root) and path not in bound, "rsoc_original_pin_membership", role)
+            payload = self.input(path, item.get("sha256"), role)
+            if "bytes" in item:
+                require(type(item["bytes"]) is int and item["bytes"] == len(payload),
+                        "rsoc_original_byte_count", role)
+            bound[path] = item["sha256"]
+        return bound
+
+    def rsoc_sidecars(self, payload, expected, bound, root, scope, total, role):
+        tree = ElementTree.fromstring(payload)
+        found, paths = set(), set()
+        prop = "rotated_conic_acceptance" if total == 13 else "rsoc_cuda_extremes"
+        for case in tree.iter("testcase"):
+            name = case.get("classname", "") + "::" + case.get("name", "")
+            require(name in expected and name not in found, "rsoc_junit_membership", role)
+            found.add(name)
+            properties = case.findall("properties/property")
+            values = {item.get("name"): item.get("value") for item in properties}
+            require(len(properties) == len(values) == 2 and set(values) ==
+                    {prop + "_path", prop + "_sha256"}, "rsoc_junit_properties", role)
+            path = shared_path(values[prop + "_path"], role)
+            require(path not in paths and path.is_relative_to(root / "pytest-tmp")
+                    and path.name == ("rotated-conic.json" if total == 13 else "rotated-conic-extreme.json")
+                    and bound.get(path) == values[prop + "_sha256"],
+                    "rsoc_sidecar_pin_mismatch", role)
+            paths.add(path)
+            saved = parse(self.snapshots[path][0], role)
+            require(saved.get("source_sha256") == scope, "rsoc_sidecar_source_mismatch", role)
+            if total == 13:
+                require(saved.get("test_identity") == name, "rsoc_sidecar_identity", role)
+            else:
+                case_id, dual = expected[name]
+                require(saved.get("case") == case_id and saved.get("dual") is dual
+                        and saved.get("nodeid") ==
+                        "tests/test_rotated_conic_cuda_extremes.py::" + name.split("::", 1)[1],
+                        "rsoc_sidecar_identity", role)
+        require(found == set(expected) and paths == {path for path in bound
+                if path.is_relative_to(root / "pytest-tmp")},
+                "rsoc_junit_membership", role)
 
     def robustness(self):
         role = "public_robustness"
@@ -906,6 +1188,25 @@ class Report:
                  s(f"{role}_tests") if f"{role}_tests" in self.scalars else "失败验收不授予计数",
                  s(f"{role}_source") if f"{role}_source" in self.scalars else "失败记录未提供"]
                 for role, label, keys in self.extension_rows])
+        if self.rsoc_rows:
+            body += ("<h3>RSOC 固定回执投影</h3><p>逐项检查完整集合、源码与原产物哈希关联，"
+                     "不等于本报告重新执行数学独审；owner PASS 不代替独审签收。"
+                     "历史 execution source 不追认为 current；两套分母不合并，"
+                     "不授予完整发行、商用、性能或远程认证资格。</p>")
+            body += self.table("独立固定的 RSOC 回执，不扩资格",
+                               ["范围", "投影门", "回执时间", "完整节点", "执行源码关系"], [
+                [label, s(prefix + "_status"), s(prefix + "_checked"),
+                 s(prefix + "_tests") if prefix + "_tests" in self.scalars else "失败不授予计数",
+                 s(prefix + "_source_relation") if prefix + "_source_relation" in self.scalars
+                 else "失败未绑定"]
+                for prefix, label in self.rsoc_rows])
+            for prefix, _ in self.rsoc_rows:
+                body += f'<p>回执 SHA256：<code>{s(prefix + "_receipt_hash")}</code>。</p>'
+                if prefix + "_source" in self.scalars:
+                    body += (f'<p>原始 execution source：<code>{s(prefix + "_source")}</code>；'
+                             f'已审 scope hash：<code>{s(prefix + "_scope_hash")}</code>。</p>')
+                    for key in ("run", "result", "junit"):
+                        body += f'<p>{key} SHA256：<code>{s(prefix + "_" + key + "_hash")}</code>。</p>'
         if "proof_review_status" in self.scalars:
             body += (f'<p>数值证明生产/回放合同审查：{s("proof_review_status")}；'
                      f'时间 {s("proof_review_finished")}；'
@@ -1072,6 +1373,33 @@ summary {{ padding:.7rem 0; cursor:pointer; min-height:44px; }} code {{ overflow
 def generate(manifest, manifest_sha256):
     """Return a small byte bundle; callers decide any authorized repo writes."""
     return Report(manifest, manifest_sha256).build()
+
+
+def rsoc_identities(total):
+    """Versioned denominator, independent of receipts and producer collection."""
+    if total == 13:
+        targets = {
+            "original_model": ("test_cuda_rotated_original_model", (
+                "rotated_lp-float32", "rotated_lp-float64", "rotated_qp-float32", "rotated_qp-float64")),
+            "projection": ("test_cuda_rotated_projection_extremes", (
+                "interior-asymmetric-float64", "interior-overflow-float64", "near-polar-float64",
+                "small-head-float64", "small-head-float32", "tail-overflow-float64")),
+            "original_rejection": ("test_cuda_rotated_original_rejections", (
+                "wrong-equality-dual", "planted-slack", "wrong-dual-cone")),
+        }
+        return {f"tests.test_rotated_conic_cuda::{function}[{case}]": (kind, case)
+                for kind, (function, cases) in targets.items() for case in cases}
+    require(total == 76, "unknown_rsoc_contract", "rsoc")
+    labels = (
+        "remote-unit-last", "remote-unit-first", "remote-unit-middle", "remote-signed",
+        "remote-middle-last", "remote-middle-first", "remote-two-levels-last", "remote-two-levels-first",
+        "polar-sqrt2", "polar-dyadic", "negative-head", "small-head", "overflowing-norm",
+        "positive-unit-last", "positive-unit-first", "positive-unit-middle", "positive-boundary",
+        "positive-inside-last", "positive-inside-first",
+    )
+    return {f"tests.test_rotated_conic_cuda_extremes::test_cuda_rotated_extreme_coordinates"
+            f"[{dtype}-{label}-{orientation}]": (f"{dtype}-{label}", orientation == "dual")
+            for dtype in ("f64", "f32") for label in labels for orientation in ("primal", "dual")}
 
 
 def prepare_inputs(output, inputs, source_sha, modified_at, doc_source_sha=None,

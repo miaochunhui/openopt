@@ -8,6 +8,7 @@ import subprocess
 import sys
 
 import pytest
+from xml.etree import ElementTree as ET
 
 from scripts import render_release_report as report
 
@@ -645,6 +646,417 @@ def test_optional_public_qualification_no_invented_run(inputs, false_pass):
         files = report.generate(path, pin)
         assert json.loads(files["summary.json"])["scalars"]["public_status"] == "UNVERIFIED"
         assert b'data-scalar="public_attempted">0' in files["benchmark-report-v4.html"]
+
+
+def rsoc_fixture(path, total):
+    """Self-described synthetic archives, never actual CUDA/numerical evidence."""
+    prefix = "rotated_cuda" if total == 13 else "rsoc_extremes"
+    role = prefix + "_acceptance"
+    root = path.parent / (prefix + "-archive")
+    output = root / "case-0/cuda-check-fixture"
+    output.mkdir(parents=True)
+    test = ("tests/test_rotated_conic_cuda.py" if total == 13
+            else "tests/test_rotated_conic_cuda_extremes.py")
+    source_names = ["src/openopt/conic.py", "src/openopt/native_conic.py", test,
+                    "scripts/gpu_release_check.py"]
+    if total == 76:
+        source_names.append("tests/test_rotated_conic_independent.py")
+    source = {}
+    for name in source_names:
+        target = root / "source" / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = ("# synthetic source " + name + "\n").encode()
+        target.write_bytes(payload)
+        source[name] = report.sha(payload)
+    execution = {"job": "fixture-job", "pod": "fixture-pod"}
+    run = {"stage": "release-regression", "state": "SUBMITTED", "source_sha": "c" * 40,
+           "source_hashes": source,
+           "source_identity": {"commit": "c" * 40, "tree": "d" * 40, "clean": True, "sha256": source},
+           "jobs": [{"job": execution["job"], "output": str(output.parent),
+                     "manifest": str(root / "job-0.json")}]}
+    counts = {"tests": total, "failures": 0, "errors": 0, "skipped": 0}
+    result = {"verdict": "PASS", "returncode": 0, "tests": counts,
+              "targets": [test] if total == 13 else [test + "::test_cuda_rotated_extreme_coordinates"],
+              "selection": "cuda_rotated" if total == 13 else "",
+              "source_sha256": {key: digest for key, digest in source.items()
+                                if key.startswith("src/openopt/") or key in (test, "scripts/gpu_release_check.py")}}
+    files = {
+        "run": (root / "run.json", run), "result": (output / "result.json", result),
+        "submitted_job": (root / "job-0.json", {"kind": "fixture"}),
+        "status": (root / "fixture-job-status.json", {"kind": "fixture"}),
+        "pod_log": (root / "fixture-pod.log", b"synthetic\n"),
+        "pytest_log": (output / "pytest.log", b"synthetic\n"),
+        "execution_log": (output / "execution.log", b"synthetic\n"),
+        "telemetry": (output / "telemetry.json", {"synthetic": True}),
+        "source_manifest": (root / "source/source-hashes.json", source),
+        "outer_result": (output.parent / "result.json", result),
+    }
+    junit = ET.Element("testsuites")
+    suite = ET.SubElement(junit, "testsuite", {key: str(value) for key, value in counts.items()})
+    scope = {name: digest for name, digest in source.items()
+             if name not in ("scripts/gpu_release_check.py",)}
+    sidecars, numeric = [], []
+    for index, (identity, details) in enumerate(report.rsoc_identities(total).items()):
+        classname, name = identity.split("::")
+        case = ET.SubElement(suite, "testcase", classname=classname, name=name)
+        properties = ET.SubElement(case, "properties")
+        sidecar = output / "pytest-tmp" / str(index) / (
+            "rotated-conic.json" if total == 13 else "rotated-conic-extreme.json")
+        sidecar.parent.mkdir(parents=True)
+        saved = {"source_sha256": scope, "synthetic": True}
+        if total == 13:
+            saved["test_identity"] = identity
+            kind, name = details
+            checks = {key: True for key in (
+                "primal_equation", "primal_cone", "original_slack_cone", "dual_cone",
+                "stationarity", "complementarity_block_0", "dual_objective_available", "duality_gap")}
+            if kind != "projection":
+                checks["complementarity_block_1"] = True
+            cones = {key: {"block_0": True, **({"block_1": True} if kind != "projection" else {})}
+                     for key in ("supplied_slack", "original_slack", "dual")}
+            if kind == "original_rejection":
+                checks[{"wrong-equality-dual": "stationarity", "planted-slack": "primal_equation",
+                        "wrong-dual-cone": "dual_cone"}[name]] = False
+                if name == "planted-slack":
+                    checks["original_slack_cone"] = False
+                    cones["original_slack"]["block_1"] = False
+                if name == "wrong-dual-cone":
+                    cones["dual"]["block_1"] = False
+            member = {"identity": identity, "kind": kind, "case": name, "checks": checks,
+                      "cone_checks": cones, "passed": all(checks.values())}
+            if kind == "original_rejection":
+                member["baseline_passed"] = True
+            elif kind == "projection":
+                member["projection"] = {
+                    "component_checks": [True] * (4 if name == "tail-overflow-float64" else 3),
+                    "moreau_orthogonal": True, "precision_crosscheck": [800, 1000],
+                    "cone": {"block_0": True}, "negative_residual_dual": {"block_0": True},
+                }
+            numeric.append(member)
+        else:
+            name, dual = details
+            saved.update(case=name, dual=dual,
+                         nodeid=test + "::" + identity.split("::", 1)[1])
+        descriptor = save(sidecar, saved)
+        descriptor.pop("id")
+        sidecars.append(descriptor)
+        prop = "rotated_conic_acceptance" if total == 13 else "rsoc_cuda_extremes"
+        for key, value in ((prop + "_path", descriptor["path"]), (prop + "_sha256", descriptor["sha256"])):
+            ET.SubElement(properties, "property", name=key, value=value)
+    files["junit"] = (output / "pytest.xml", ET.tostring(junit))
+    originals = {}
+    for name, (target, value) in files.items():
+        descriptor = save(target, value)
+        descriptor.pop("id")
+        originals[name] = descriptor
+    for name in ("run", "result", "junit"):
+        manifest = json.loads(path.read_bytes())
+        manifest["inputs"].append({"id": prefix + "_" + name, **originals[name]})
+        save(path, manifest)
+    if total == 13:
+        pins = {"schema_version": 1, "run_root": str(root), "files": originals}
+        pin = optional_record(path, prefix + "_pins", pins)
+        bundle = {"schema_version": 1, "algorithm": "fixed13_original_rational_decimal_v1",
+                  "verdict": "PASS", "denominator": {"positive": 10, "negative": 3, "total": 13},
+                  "certified": False, "old_proof_authority": False, "commercial": "UNVERIFIED",
+                  "performance": "UNVERIFIED", "caller_pins": pins, "sidecars": sidecars,
+                  "numeric_cases": numeric, "execution": execution,
+                  "source": {"execution_commit": run["source_sha"], "execution_tree": "d" * 40,
+                             "audit_commit": "e" * 40, "scope_sha256": scope}}
+        optional_record(path, prefix + "_bundle", bundle)
+        selected = next(row for row in json.loads(path.read_bytes())["inputs"]
+                        if row["id"] == prefix + "_pins")
+        evidence = {"verdict": "PASS", "mode": "accept", "pins_sha256": selected["sha256"],
+                    "auditor_sha256": report.sha(b"synthetic auditor")}
+    else:
+        evidence = {"schema_version": 1, "verdict": "RSOC_EXTREMES_REPLAY_PASS", "tests": counts,
+                    "source_commit": run["source_sha"], "qualified": False,
+                    "remote_attestation": "NOT_PROVIDED", "execution": execution,
+                    "inputs": [{**item, "bytes": Path(item["path"]).stat().st_size}
+                               for item in [*originals.values(), *sidecars]],
+                    "members": [{"case": name, "verdict": "ORIGINAL_COORDINATES_REPLAYED"}
+                                for name in report.rsoc_identities(total)]}
+    evidence.update(checked_at="2026-10-10T10:00:00+00:00",
+                    commercial="UNVERIFIED", performance="UNVERIFIED")
+    pin = optional_record(path, role, evidence)
+    return pin, {role: evidence, prefix + "_run": run, prefix + "_result": result,
+                 prefix + "_junit": ET.tostring(junit),
+                 **({prefix + "_bundle": bundle, prefix + "_pins": pins} if total == 13 else {})}
+
+
+@pytest.mark.parametrize("total", [13, 76])
+def test_rsoc_complete_receipt_projection_deterministic_and_historical(inputs, total):
+    path, _, _ = inputs
+    pin, _ = rsoc_fixture(path, total)
+    before = {item["path"]: Path(item["path"]).read_bytes()
+              for item in json.loads(path.read_bytes())["inputs"]}
+    files = report.generate(path, pin)
+    assert files == report.generate(path, pin)
+    assert before == {name: Path(name).read_bytes() for name in before}
+    prefix = "rotated_cuda" if total == 13 else "rsoc_extremes"
+    scalars = json.loads(files["summary.json"])["scalars"]
+    assert scalars[prefix + "_tests"] == total
+    assert scalars[prefix + "_status"] == "PASS"
+    assert scalars[prefix + "_source_relation"] == "historical"
+    assert scalars[prefix + "_source"] != scalars["source_sha"]
+    assert scalars["online_status"] == scalars["commercial_status"] == "UNVERIFIED"
+    assert len(report.rsoc_identities(total)) == total
+    assert b"synthetic source" not in files["benchmark-report-v4.html"]
+    assert b"cuda-check-fixture" not in files["benchmark-report-v4.html"]
+    assert "owner PASS 不代替独审签收" in files["design-v4.html"].decode()
+
+
+@pytest.mark.parametrize("total", [13, 76])
+@pytest.mark.parametrize("mutation", [
+    "denominator", "drop_member", "duplicate_member", "unknown_member", "selected_pin",
+    "source", "sidecar_hash", "junit_drop", "junit_duplicate", "snapshot_drift",
+])
+def test_rsoc_rehashed_false_receipt_rejected(inputs, total, mutation):
+    path, _, _ = inputs
+    _, records = rsoc_fixture(path, total)
+    prefix = "rotated_cuda" if total == 13 else "rsoc_extremes"
+    role = prefix + "_acceptance"
+    record_role = prefix + "_bundle" if total == 13 else role
+    value = records[record_role]
+    members = value["numeric_cases" if total == 13 else "members"]
+    if mutation == "denominator":
+        if total == 13:
+            value["denominator"]["total"] = 1
+        else:
+            value["tests"]["tests"] = 1
+    elif mutation == "drop_member":
+        members.pop()
+    elif mutation == "duplicate_member":
+        members[-1] = members[0]
+    elif mutation == "unknown_member":
+        members[0]["identity" if total == 13 else "case"] += "-unknown"
+    elif mutation in ("selected_pin", "sidecar_hash"):
+        original = (value["caller_pins"]["files"]["result"] if mutation == "selected_pin"
+                    else value["sidecars"][0]) if total == 13 else value["inputs"][0 if mutation == "selected_pin" else 11]
+        original["sha256"] = "0" * 64
+    elif mutation == "source":
+        if total == 13:
+            value["source"]["execution_commit"] = "f" * 40
+        else:
+            value["source_commit"] = "f" * 40
+    elif mutation == "snapshot_drift":
+        run = records[prefix + "_run"]
+        run_path = next(row["path"] for row in json.loads(path.read_bytes())["inputs"]
+                        if row["id"] == prefix + "_run")
+        (Path(run_path).parent / "source" / next(iter(run["source_hashes"]))).write_bytes(b"# changed\n")
+    else:
+        tree = ET.fromstring(records[prefix + "_junit"])
+        suite = tree.find("testsuite")
+        cases = suite.findall("testcase")
+        if mutation == "junit_drop":
+            suite.remove(cases[-1])
+            suite.set("tests", str(total - 1))
+        else:
+            cases[-1].set("name", cases[0].get("name"))
+        records[prefix + "_junit"] = ET.tostring(tree)
+        digest = report.sha(records[prefix + "_junit"])
+        if total == 13:
+            value["caller_pins"]["files"]["junit"]["sha256"] = digest
+            records[prefix + "_pins"]["files"]["junit"]["sha256"] = digest
+        else:
+            original = next(item for item in value["inputs"] if item["path"].endswith("/pytest.xml"))
+            original.update(sha256=digest, bytes=len(records[prefix + "_junit"]))
+        reseal(path, records, prefix + "_junit")
+    if total == 13:
+        reseal(path, records, prefix + "_pins")
+        descriptor = next(row for row in json.loads(path.read_bytes())["inputs"]
+                          if row["id"] == prefix + "_pins")
+        records[role]["pins_sha256"] = descriptor["sha256"]
+        reseal(path, records, role)
+    with pytest.raises(report.Rejected):
+        report.generate(path, reseal(path, records, record_role))
+
+
+@pytest.mark.parametrize("mutation", ["top_only", "seal_only", "numeric_replay", "hidden_check",
+                                     "baseline", "projection", "pins_mismatch"])
+def test_fixed13_top_pass_and_hidden_math_do_not_qualify(inputs, mutation):
+    path, _, _ = inputs
+    _, records = rsoc_fixture(path, 13)
+    role = "rotated_cuda_acceptance"
+    bundle = records["rotated_cuda_bundle"]
+    if mutation == "top_only":
+        manifest = json.loads(path.read_bytes())
+        manifest["inputs"] = [item for item in manifest["inputs"] if item["id"] != "rotated_cuda_bundle"]
+        save(path, manifest)
+    elif mutation in ("seal_only", "numeric_replay"):
+        records[role]["mode"] = "seal" if mutation == "seal_only" else "numeric-replay"
+    elif mutation == "hidden_check":
+        bundle["numeric_cases"][0]["checks"]["stationarity"] = False
+    elif mutation == "baseline":
+        bundle["numeric_cases"][-1]["baseline_passed"] = False
+    elif mutation == "projection":
+        bundle["numeric_cases"][4]["projection"]["component_checks"][0] = False
+    else:
+        records[role]["pins_sha256"] = "0" * 64
+    if mutation != "top_only":
+        reseal(path, records, "rotated_cuda_bundle")
+    with pytest.raises(report.Rejected):
+        report.generate(path, reseal(path, records, role))
+
+
+def test_rsoc_omitted_and_failed_roles_never_imply_full_release(inputs):
+    path, pin, _ = inputs
+    assert not any(key.startswith(("rotated_cuda_", "rsoc_extremes_"))
+                   for key in json.loads(report.generate(path, pin)["summary.json"])["scalars"])
+    value = {"verdict": "FAIL", "checked_at": "2026-10-10T10:00:00+00:00",
+             "commercial": "UNVERIFIED", "performance": "UNVERIFIED",
+             "error": "/private/hidden"}
+    files = report.generate(path, optional_record(path, "rsoc_extremes_acceptance", value))
+    scalars = json.loads(files["summary.json"])["scalars"]
+    assert scalars["rsoc_extremes_status"] == "FAIL"
+    assert "rsoc_extremes_tests" not in scalars
+    assert b"/private/hidden" not in files["design-v4.html"]
+
+
+@pytest.mark.parametrize("total", [13, 76])
+def test_rsoc_false_current_source_rejected(inputs, total):
+    path, _, records = inputs
+    _, added = rsoc_fixture(path, total)
+    records.update(added)
+    records["metadata"]["source_sha"] = "c" * 40
+    manifest = json.loads(path.read_bytes())
+    manifest["source_sha"] = "c" * 40
+    save(path, manifest)
+    with_source_gate(records)
+    reseal(path, records, "cpu")
+    with pytest.raises(report.Rejected, match="rsoc_current_source_mismatch"):
+        report.generate(path, reseal(path, records, "metadata"))
+
+
+@pytest.mark.parametrize("total", [13, 76])
+def test_rsoc_current_source_requires_matching_clean_cpu_snapshot(inputs, total):
+    path, _, records = inputs
+    _, added = rsoc_fixture(path, total)
+    records.update(added)
+    prefix = "rotated_cuda" if total == 13 else "rsoc_extremes"
+    records["metadata"]["source_sha"] = records[prefix + "_run"]["source_sha"]
+    manifest = json.loads(path.read_bytes())
+    manifest["source_sha"] = records["metadata"]["source_sha"]
+    save(path, manifest)
+    with_source_gate(records)
+    records["cpu"]["source"]["sha256"] = records[prefix + "_run"]["source_hashes"]
+    records["cpu"]["source_consistency"]["files"] = len(records["cpu"]["source"]["sha256"])
+    reseal(path, records, "cpu")
+    files = report.generate(path, reseal(path, records, "metadata"))
+    assert files == report.generate(path, report.sha(path.read_bytes()))
+    scalars = json.loads(files["summary.json"])["scalars"]
+    assert scalars[prefix + "_source_relation"] == "current"
+    assert scalars["commercial_status"] == scalars["online_status"] == "UNVERIFIED"
+    assert scalars["regression_scope"] == "intermediate_snapshot"
+
+
+@pytest.mark.parametrize("total", [13, 76])
+@pytest.mark.parametrize("mutation", ["denominator", "drop_member"])
+def test_rsoc_rehashed_invalid_receipt_cli_rejects_with_evidence(inputs, total, mutation):
+    path, _, _ = inputs
+    _, records = rsoc_fixture(path, total)
+    prefix = "rotated_cuda" if total == 13 else "rsoc_extremes"
+    role = prefix + ("_bundle" if total == 13 else "_acceptance")
+    value = records[role]
+    if mutation == "denominator":
+        if total == 13:
+            value["denominator"]["total"] -= 1
+        else:
+            value["tests"]["tests"] -= 1
+    else:
+        value["numeric_cases" if total == 13 else "members"].pop()
+    pin = reseal(path, records, role)
+    with pytest.raises(report.Rejected) as error:
+        report.generate(path, pin)
+    expected = ("rsoc_fixed13_bundle_contract" if total == 13 else "rsoc_extremes_contract"
+                ) if mutation == "denominator" else "rsoc_numeric_membership"
+    assert error.value.code == expected
+    output = path.parent / "rejected-render"
+    command = [sys.executable, "-B", str(report.ROOT / "scripts/render_release_report.py"),
+               "--manifest", str(path), "--manifest-sha256", pin, "--output-dir", str(output)]
+    result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=30)
+    (path.parent / "rsoc-negative-cli.log").write_text(result.stdout + result.stderr)
+    assert result.returncode == 1
+    assert f"RELEASE_REPORT verdict=FAIL code={expected}" in result.stderr
+    assert not output.exists(), "rejected receipt must not write a successful output bundle"
+    (path.parent / "rsoc-negative-receipt.json").write_bytes(report.encoded({
+        "verdict": "REJECTED", "total": total, "mutation": mutation,
+        "returncode": result.returncode, "first_failure": expected,
+        "rehashed_manifest_sha256": pin, "output_absent": not output.exists(),
+        "cuda_execution": False, "qualified": False,
+    }))
+
+
+def test_real_pinned_rsoc_archives_project_only(inputs):
+    """Read two explicit historical receipts; no producer or GPU invocation."""
+    path, _, _ = inputs
+    base = Path("/hf3fs-jd/data/tmp/openopt-release-20261010")
+    selections = {
+        "rsoc_extremes_acceptance": (
+            base / "owner-main-c0565b0-rsoc-replay-v1/rsoc-audit-tgd87z6i/acceptance.json",
+            "0c0175fd1b6166106cdb34c248c8c16cdd0636ff356e1f8f2117a65f901da68f"),
+        "rotated_cuda_acceptance": (base / "fixed13-numeric-audit/historical-accept/acceptance.json",
+                                    "dbc3a1e5699c5d3feb904465344eaf11972c6a7e80bd1516904de3b972d5b7f3"),
+        "rotated_cuda_bundle": (base / "fixed13-numeric-audit/historical-accept/bundle.json",
+                               "ee47f512e6790f6a7044c1690548236021d2fd898ebcea33949b3494198f7a3e"),
+        "rotated_cuda_pins": (base / "fixed13-numeric-audit/historical-inventory-v1/pins.json",
+                              "a0d802d9e496df48c6ad81cf016758047f8d07860c93af75d72b1e7784128b51"),
+    }
+    if not all(target.is_file() for target, _ in selections.values()):
+        pytest.skip("explicit local historical receipts absent; fixtures do not qualify them")
+    for role, (target, pin) in selections.items():
+        payload = target.read_bytes()
+        assert report.sha(payload) == pin, "explicit historical caller pin changed"
+    extremes = json.loads(selections["rsoc_extremes_acceptance"][0].read_bytes())
+    fixed = json.loads(selections["rotated_cuda_pins"][0].read_bytes())
+    for prefix, originals in (("rsoc_extremes", extremes["inputs"]),
+                              ("rotated_cuda", list(fixed["files"].values()))):
+        for name in ("run", "result", "junit"):
+            target = (Path(fixed["files"][name]["path"]) if prefix == "rotated_cuda" else
+                      Path(extremes["inputs"][("result", "run", "junit").index(name)]["path"]))
+            original = next(item for item in originals if Path(item["path"]) == target)
+            selections[prefix + "_" + name] = (target, original["sha256"])
+    manifest = json.loads(path.read_bytes())
+    manifest["inputs"].extend({"id": role, "path": str(target), "sha256": pin}
+                              for role, (target, pin) in selections.items())
+    pin = save(path, manifest)["sha256"]
+    files = report.generate(path, pin)
+    assert files == report.generate(path, pin)
+    scalars = json.loads(files["summary.json"])["scalars"]
+    assert scalars["rsoc_extremes_tests"] == 76 and scalars["rotated_cuda_tests"] == 13
+    assert scalars["rsoc_extremes_status"] == scalars["rotated_cuda_status"] == "PASS"
+    assert scalars["rsoc_extremes_source_relation"] == scalars["rotated_cuda_source_relation"] == "historical"
+    assert scalars["online_status"] == scalars["commercial_status"] == "UNVERIFIED"
+    output = path.parent / "historical-render"
+    report.write_bundle(output, files)
+    report.write_bundle(output, files, check=True)
+    command = [sys.executable, "-B", str(report.ROOT / "scripts/render_release_report.py"),
+               "--manifest", str(path), "--manifest-sha256", pin,
+               "--output-dir", str(output), "--check"]
+    result = subprocess.run(command, capture_output=True, text=True, check=False, timeout=120)
+    (path.parent / "real-rsoc-cli.log").write_text(result.stdout + result.stderr)
+    assert result.returncode == 0, result.stderr
+    assert "RELEASE_REPORT verdict=PASS" in result.stdout
+    (path.parent / "real-rsoc-projection.json").write_bytes(report.encoded({
+        "verdict": "PASS", "scope": "caller-pinned historical receipt projection only",
+        "cuda_execution": False, "qualified": False,
+        "cli_returncode": result.returncode,
+        "counts": {"rotated_cuda": 13, "rsoc_extremes": 76},
+        "receipts": {role: {"path": str(target), "sha256": pin}
+                     for role, (target, pin) in selections.items()},
+        "public_manifest_sha256": report.sha(files["manifest.json"]),
+    }))
+
+
+@pytest.mark.parametrize("role", ["rotated_cuda_acceptance", "rsoc_extremes_acceptance"])
+def test_real_minimal_auditor_fail_is_visible_without_success_fields(inputs, role):
+    path, _, _ = inputs
+    evidence = {"verdict": "FAIL", "checked_at": "2026-10-10T10:00:00+00:00",
+                "error": "/private/not-public"}
+    files = report.generate(path, optional_record(path, role, evidence))
+    prefix = role.removesuffix("_acceptance")
+    assert json.loads(files["summary.json"])["scalars"][prefix + "_status"] == "FAIL"
+    assert b"/private/not-public" not in files["benchmark-report-v4.html"]
 
 
 def scan_submission_with_existing_gate(paths=None, source_root=None):
