@@ -63,6 +63,18 @@ def installed_probe(target):
         raise ValueError("isolated wheel solve did not converge")
     if float((result.weights.sum(dim=1) - 1.0).abs().max()) > 1e-6:
         raise ValueError("isolated wheel budget constraint failed")
+    general = openopt.QPProblem(
+        P=torch.eye(2, dtype=torch.float64),
+        q=torch.tensor([-1.0, 2.0], dtype=torch.float64),
+        A=torch.eye(2, dtype=torch.float64),
+        l=torch.zeros(2, dtype=torch.float64),
+        u=torch.ones(2, dtype=torch.float64),
+    )
+    solved = openopt.solve_qp(general)
+    if solved.status != "solved" or not torch.allclose(
+        solved.x, torch.tensor([1.0, 0.0], dtype=torch.float64), atol=1e-6,
+    ):
+        raise ValueError("isolated wheel general QP solve failed")
     print(f"WHEEL_IMPORT verdict=PASS api_objects={len(openpo.__all__)} version={openopt.__version__}")
 
 

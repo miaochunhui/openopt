@@ -2,8 +2,9 @@
 
 - This repository is the independent maintenance home for the imported OpenPO
   foundation. Do not modify infra or optimizer as a side effect of work here.
-- `openopt` is the project/distribution name. Preserve `openpo` compatibility;
-  the current models are portfolio-specific, not a general optimization API.
+- `openopt` is the project/distribution name. Preserve `openpo` compatibility.
+  Legacy models are portfolio-specific; `src/openopt/qp.py` is a separate
+  experimental real dense convex QP/LP core, not a complete general optimizer.
 - Product direction: a general-purpose GPU-accelerated optimizer targeting
   commercial-grade correctness, robustness and performance. Gurobi and CPLEX
   are LP/QP/MIP baselines; MOSEK is a convex/conic baseline. This is a target,
@@ -12,7 +13,9 @@
   work, and after edits. `python3 scripts/verify.py` is the complete local
   regression entry. Neither is a performance-release qualification.
 - Changes to algorithms, solver parameters or benchmark methodology must update
-  `docs/design.html` and `docs/benchmark-report.html`.
+  `docs/qp-design.md` and the generated `docs/design.html` /
+  `docs/benchmark-report.html`. Use `scripts/render_qp_report.py` with external
+  machine-readable evidence; do not manually edit generated HTML.
 - Compare continuous LP/QP against OSQP and Clarabel. Compare future discrete
   optimization against SCIP and HiGHS, as well as licensed commercial
   baselines where available. Missing commercial evidence is UNVERIFIED,

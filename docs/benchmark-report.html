@@ -1,80 +1,132 @@
 <!doctype html>
-<html lang="en">
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>openopt Verification Status</title>
-<style>
-body { margin: 0; color: #18362f; background: linear-gradient(140deg, #f4f0e6, #e6eee6);
-  font: 18px/1.6 Georgia, serif; }
-main { max-width: 900px; margin: auto; padding: 48px 24px; }
-h1 { font-size: clamp(2rem, 6vw, 3.4rem); line-height: 1.15; }
-h2 { margin-top: 2rem; }
-code { font: .9em/1.5 monospace; overflow-wrap: anywhere; }
-a { color: #bb4c24; }
-</style>
-<main>
-<p>Foundation extraction / 2026-10-10</p>
-<h1>Verification Is Not A Speedup Claim</h1>
-<p>No historical performance output was imported as current evidence.
-Independent test results are produced by
-<code>python3 scripts/verify.py</code>. The output records actual counts,
-failures, skips, dependency versions and whether CUDA is available.</p>
-<h2>Correctness Surface</h2>
-<p>The smaller <code>scripts/iteration_gate.py smoke</code> checks core API,
-projection, solver and constraint contracts. Full verification includes the
-complete migrated test suite and byte-level provenance checks. GPU skips mean
-that GPU cases were not verified; CPU passes must not be relabeled GPU passes.</p>
-<h2>Verified Extraction / 2026-10-10</h2>
-<p>The independent service fixes passed the complete local regression at
-06:46:21 UTC: <strong>1068 passed, zero failures, zero errors, zero skips</strong>.
-The run recorded 125 upstream OSQP deprecation warnings. Deterministic tests
-cover delayed divergence publication and audited-reset replay; the pre-fix
-failures are retained with the verification artifacts.</p>
-<p>Python 3.10.20; PyTorch 2.8.0+cu128; CUDA runtime 12.8; NumPy 2.2.6;
-SciPy 1.15.3; pytest 8.4.2; OSQP 1.0.4; Clarabel 0.11.1; HiGHS Python
-1.15.1. The host reports 256 logical CPUs and two NVIDIA GeForce RTX 3080
-devices. Explicit CPU and <code>cuda:0</code> synthetic QP examples converged,
-with maximum constraint residual 0.0. This is not a multi-GPU qualification.</p>
-<p>The 48-module wheel passed an isolated install, public API identity checks
-and synthetic solve. Import provenance verifies 110 original files and
-1,750,809 bytes in the initial commit; independent fixes remain separate.</p>
-<p>Reproduction: <code>python3 scripts/verify.py --require-cuda</code> and
-<code>python3 scripts/check_distribution.py</code>.
-Local evidence:
-<code>/hf3fs-jd/data/tmp/openopt-verification/tests-cl__yanf/verification.json</code>
-and
-<code>/hf3fs-jd/data/tmp/openopt-distribution/wheel-bx3101xo/distribution.json</code>.
-Evidence paths are local artifacts, not files distributed in the repository.</p>
-<h2>License And GPU Contract / 2026-10-10</h2>
-<p>The product now targets commercial-grade optimization under 0BSD, with GPU
-acceleration as a first-class execution path. The
-<a href="strategy.html">commercial comparison contract</a> defines matched
-Gurobi/CPLEX/MOSEK baselines and separate correctness/performance gates.
-Commercial comparisons remain <strong>UNVERIFIED</strong>: no licensed
-commercial run or comparative speedup was performed for this change.</p>
-<p>The updated smoke gate passed 44 tests, including wheel-license positive and
-negative cases, actual CPU/CUDA result tensor placement, and unavailable-GPU
-rejection. Explicit CPU and cuda:0 examples passed. The isolated 48-module wheel
-passed import/solve checks and verified <code>License-Expression: 0BSD</code>
-plus the exact shipped license payload.</p>
-<p>Local artifacts:
-<code>/hf3fs-jd/data/tmp/openopt-verification/smoke-6wfvvg__/verification.json</code>
-and
-<code>/hf3fs-jd/data/tmp/openopt-distribution/wheel-gxio4w2y/distribution.json</code>.
-The numerical solver implementation was not changed in this product/licensing
-update; the full regression result above belongs to the preceding source
-revision, not a new full-suite run.</p>
-<h2>Performance Qualification</h2>
-<p>Timing comparisons require the same objective and constraints, matched
-input hashes, explicit CPU/CUDA devices, warm-up separation, cold/hot timings,
-p50/p95, success rate, objective gaps, residuals and hardware/software versions.
-No KEEP verdict, universal acceleration, multi-GPU efficiency or production
-SLA is asserted by this extraction.</p>
-<p>The imported research benchmark tools retain their original methodology.
-Use explicit output paths outside the repository and verify their artifacts
-before drawing conclusions. The old report-rendering and canonical-result
-pipeline was not migrated.</p>
-<p>See <a href="design.html">design</a> and <a href="MIGRATION.md">migration
-scope</a>.</p>
-</main>
-</html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>openopt RTX PRO 4500 Experiment / v2</title><style>
+:root{--paper:#f4f0e6;--ink:#18362f;--accent:#bb4c24;--muted:#59695e}
+*{box-sizing:border-box}body{margin:0;color:var(--ink);
+background:radial-gradient(ellipse at top right,#dce8dd,transparent 70%),
+linear-gradient(140deg,var(--paper),#edf0e7);font:18px/1.6 Georgia,serif}
+main{max-width:1080px;margin:auto;padding:48px 24px}h1{font-size:clamp(2rem,6vw,4rem);
+line-height:1.1}h2{border-top:1px solid #b9c7ba;padding-top:1rem;margin-top:2rem}
+a{color:var(--accent)}code{font:0.86em/1.5 monospace;overflow-wrap:anywhere}
+.table{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:0.9em}
+td,th{text-align:left;padding:10px;border-bottom:1px solid #c6ccc2}
+.note{color:var(--muted)}svg{width:100%;height:auto;max-height:450px}
+select{max-width:100%;padding:8px;color:var(--ink);background:var(--paper)}
+footer{font-size:.8em;border-top:1px solid #c6ccc2;margin-top:2rem;padding-top:1rem}
+</style></head>
+<body><main><label>Document version <select onchange="location.href=this.value">
+<option value="benchmark-report-v1.html">v1: historical foundation</option>
+<option value="benchmark-report-v2.html" selected>v2: dense QP experiment</option></select></label>
+<noscript><a href="benchmark-report-v1.html">Historical v1</a> / <a href="benchmark-report-v2.html">Current v2</a></noscript><h1>openopt RTX PRO 4500 Experiment / v2</h1>
+<p><strong>1024-variable paired dense QP: 5.11x model-cold and
+6.65x prepared GPU speedup against this project's CPU prototype.</strong>
+The smallest tested problem is slower on GPU. Commercial performance, representative-corpus
+robustness and a multi-GPU solver remain UNVERIFIED.</p>
+<p class="note">Model-cold includes validation, input transfers, factorization, iterations and
+host outputs after one untimed warmup. Prepared excludes setup but includes host outputs.
+Process/Pod startup is outside these latency measurements. Each row is a single seeded
+synthetic dense QP, not a general optimization corpus.</p>
+<figure><svg viewBox="0 0 900 355" role="img"
+aria-label="Paired model-cold CPU and GPU latency"><text x="5" y="25" fill="#18362f">
+Model-cold p50, lower is better; same four-thread CPU prototype</text><text x="5" y="70" fill="#18362f">64 variables</text>
+<rect x="190" y="55" width="11.62" height="22" fill="#18362f"/>
+<text x="211.62" y="71" font-size="14">6.50 ms CPU</text>
+<rect x="190" y="85" width="28.52" height="22" fill="#bb4c24"/>
+<text x="228.52" y="101" font-size="14">15.96 ms GPU</text><text x="5" y="165" fill="#18362f">384 variables</text>
+<rect x="190" y="150" width="46.96" height="22" fill="#18362f"/>
+<text x="246.96" y="166" font-size="14">26.27 ms CPU</text>
+<rect x="190" y="180" width="43.74" height="22" fill="#bb4c24"/>
+<text x="243.74" y="196" font-size="14">24.47 ms GPU</text><text x="5" y="260" fill="#18362f">1024 variables</text>
+<rect x="190" y="245" width="530.00" height="22" fill="#18362f"/>
+<text x="730.00" y="261" font-size="14">296.49 ms CPU</text>
+<rect x="190" y="275" width="103.81" height="22" fill="#bb4c24"/>
+<text x="303.81" y="291" font-size="14">58.07 ms GPU</text></svg>
+<figcaption>Small dense QPs lose on GPU; larger dense QPs accelerate this prototype.
+This is not a commercial or open-source solver ranking.</figcaption></figure>
+<h2>Paired Latency</h2><div class="table"><table>
+<tr><th>Variables</th><th>Mode</th><th>CPU p50 / p95 ms</th><th>GPU p50 / p95 ms</th><th>p50 ratio</th><th>Samples</th></tr>
+<tr><td>64</td><td>cold</td><td>6.503 / 12.033</td><td>15.956 / 18.094</td><td>0.408x</td><td>10</td></tr><tr><td>64</td><td>prepared</td><td>4.078 / 4.464</td><td>14.121 / 14.631</td><td>0.289x</td><td>10</td></tr><tr><td>384</td><td>cold</td><td>26.270 / 45.886</td><td>24.467 / 24.955</td><td>1.074x</td><td>10</td></tr><tr><td>384</td><td>prepared</td><td>15.956 / 17.144</td><td>15.638 / 19.167</td><td>1.020x</td><td>10</td></tr><tr><td>1024</td><td>cold</td><td>296.489 / 308.936</td><td>58.075 / 60.708</td><td>5.105x</td><td>10</td></tr><tr><td>1024</td><td>prepared</td><td>186.112 / 211.451</td><td>27.986 / 28.081</td><td>6.650x</td><td>10</td></tr></table></div>
+<p>CPU/GPU order alternates. CPU uses 4 library threads;
+the live cgroup quota read was <code>max 100000</code>,
+so this is not a comparison against all host CPU cores. There is no statistical
+confidence bound from a broad workload population. Negative and borderline cases are retained.</p>
+<details><summary>All accepted sequential exploratory ladders, not substituted for paired results</summary>
+<div class="table"><table><tr><th>Variables</th><th>Model-cold ratio</th><th>Prepared ratio</th><th>Measured at</th></tr>
+<tr><td>64</td><td>0.398x</td><td>0.275x</td><td>2026-10-10T07:10:03.364416+00:00</td></tr><tr><td>64</td><td>0.393x</td><td>0.281x</td><td>2026-10-10T07:11:24.985036+00:00</td></tr><tr><td>64</td><td>0.394x</td><td>0.278x</td><td>2026-10-10T07:16:24.472950+00:00</td></tr><tr><td>192</td><td>0.567x</td><td>0.639x</td><td>2026-10-10T07:12:52.306909+00:00</td></tr><tr><td>256</td><td>0.671x</td><td>0.689x</td><td>2026-10-10T07:12:52.607859+00:00</td></tr><tr><td>384</td><td>1.091x</td><td>1.045x</td><td>2026-10-10T07:12:54.774698+00:00</td></tr><tr><td>384</td><td>1.112x</td><td>1.074x</td><td>2026-10-10T07:16:25.745799+00:00</td></tr><tr><td>768</td><td>5.626x</td><td>7.414x</td><td>2026-10-10T07:14:08.100994+00:00</td></tr><tr><td>1024</td><td>5.190x</td><td>6.820x</td><td>2026-10-10T07:14:09.310983+00:00</td></tr><tr><td>1024</td><td>5.129x</td><td>7.641x</td><td>2026-10-10T07:16:41.597037+00:00</td></tr><tr><td>1152</td><td>5.173x</td><td>7.272x</td><td>2026-10-10T07:14:11.126256+00:00</td></tr></table></div></details>
+<h2>Correctness And References</h2>
+<p>Independent CPU checks across these current paired cases: maximum primal residual
+2.370e-08, stationarity residual 8.476e-09,
+signed-bound normal-cone residual 1.778e-08,
+relative objective error 7.602e-09 and solution error
+3.352e-08. These are approximate numerical checks, not exact certificates.</p>
+<div class="table"><table><tr><th>Variables</th><th>Reference</th><th>Frozen problem hash</th><th>Result</th></tr>
+<tr><td>64</td><td>osqp</td><td>97ef99c672372ccd44b4ab81a81f9714194d818c0d432d7f15f0f3f1c92aae51</td><td>PASS: independent known-KKT quality check</td></tr><tr><td>64</td><td>clarabel</td><td>97ef99c672372ccd44b4ab81a81f9714194d818c0d432d7f15f0f3f1c92aae51</td><td>PASS: independent known-KKT quality check</td></tr><tr><td>384</td><td>osqp</td><td>e4ad8a9e74de127bf90188606d3667cf6c780492baac0e6a15564fcf1374bec6</td><td>PASS: independent known-KKT quality check</td></tr><tr><td>384</td><td>clarabel</td><td>e4ad8a9e74de127bf90188606d3667cf6c780492baac0e6a15564fcf1374bec6</td><td>PASS: independent known-KKT quality check</td></tr><tr><td>1024</td><td>osqp</td><td>1482bdab1a6ca107b223d2c9338f86cc5ae58830c332a7499da77bdd016cda74</td><td>PASS: independent known-KKT quality check</td></tr><tr><td>1024</td><td>clarabel</td><td>1482bdab1a6ca107b223d2c9338f86cc5ae58830c332a7499da77bdd016cda74</td><td>PASS: independent known-KKT quality check</td></tr></table></div>
+<p>OSQP and Clarabel run in a different existing CPU environment against identical frozen
+arrays. Their latencies are retained in raw artifacts, but are deliberately not ranked
+against the cluster CPU/GPU measurements. Gurobi, CPLEX and MOSEK SDKs were unavailable
+in the selected runtime; no matched commercial run occurred. Missing evidence is not a win.</p>
+<h2>Resources And Bottleneck</h2><div class="table"><table>
+<tr><th>Variables</th><th>Node</th><th>GPU mean / peak utilization</th><th>Peak MiB</th><th>Cgroup CPU seconds / window seconds</th></tr>
+<tr><td>64</td><td>h3c2</td><td>36.6 / 53%</td><td>404</td><td>2.807 / 2.247</td></tr><tr><td>384</td><td>h3c2</td><td>38.6 / 85%</td><td>424</td><td>7.003 / 3.669</td></tr><tr><td>1024</td><td>h3c0</td><td>26.9 / 96%</td><td>550</td><td>67.271 / 17.541</td></tr></table></div>
+<p>Resource samples cover the combined CPU/GPU/A-B experiment, including intentional CPU
+control intervals. They do not describe a sustained GPU-only workload. The GPU's visible
+total memory is recorded by the environment probe; allocated memory is not peak capacity.
+No node load average is used as Pod CPU evidence.</p>
+<p>Runtime: NVIDIA RTX PRO 4500 Blackwell, 595.91.07, 32623 MiB; PyTorch 2.13.0+cu130, CUDA
+13.0, compute capability [12, 0];
+NumPy 2.3.5, SciPy 1.18.1.
+Pinned observed image <code>m.daocloud.io/docker.io/lmsysorg/sglang@sha256:4a5d132a06a77c8331e15845f2e925adc788b00105097ad55409afa3f4fa4860</code>.
+Nsight and dependency versions are recorded alongside each source/result hash.</p>
+<div class="table"><table>
+<tr><th>Variables</th><th>Kernel total ms</th><th>Profiled prepared end-to-end ms</th><th>Kernel share</th><th>Kernel events</th></tr>
+<tr><td>64</td><td>5.841</td><td>25.441</td><td>23.0%</td><td>1695</td></tr><tr><td>384</td><td>10.873</td><td>25.739</td><td>42.2%</td><td>1695</td></tr><tr><td>1024</td><td>25.561</td><td>31.488</td><td>81.2%</td><td>1695</td></tr></table></div>
+<p>Nsight profiles a separate optional triangular-path prepared solve including host output.
+The small case spends substantial time outside kernels and launches many tiny kernels.
+The larger case is dominated by repeated triangular solves. Profile overhead means these
+end-to-end durations must not replace unprofiled latency. This establishes actual CUDA
+execution and measured bottlenecks, not a hardware peak-throughput qualification.</p>
+<h2>Controlled Optional Change</h2>
+<p>The optional triangular factor-application path is compared with the original Cholesky
+path plus an identical-config control on the same GPU. The original remains default.
+Per-arm p50/p95, quality and measured noise floor are in the machine-readable summary.
+Switching the option restores the baseline. Small benefits are scoped work values;
+they do not justify an automatic routing or universal acceleration claim.</p>
+<h2>Failures And Parallel Scope</h2><ul><li>submission: observer identity denied Job creation; no Pod created; evidence <code>/3fs/research3fs/data/tmp/openopt-4500/probe-gkc7keyc</code></li><li>container startup: StartError/128: CUDA base has no Python; evidence <code>/3fs/research3fs/data/tmp/openopt-4500/probe-wy6qvauf</code></li><li>smoke: RuntimeError: Nsight capture failed rc=135; see nsys.log; evidence <code>/3fs/research3fs/data/tmp/openopt-4500/smoke-cebpgx8a/case-0/result.json</code></li></ul>
+<p>Each failed execution remains in the ledger. No identical automatic retry was used.
+Subsequent changed configurations required another single-card gate. Larger ladders used
+three independent one-GPU Jobs, with no more than three live cards. This proves parallel
+independent experiments, not strong/weak scaling of a single multi-GPU solve.</p>
+<div class="table"><table><tr><th>Paired confirmation Job</th><th>Node</th><th>Scheduling/startup seconds</th>
+<th>Container wall seconds</th><th>Restarts</th></tr><tr><td>openopt-ladder-y4oiidcn-0</td><td>h3c2</td><td>1.0</td><td>16.0</td><td>0</td></tr><tr><td>openopt-ladder-y4oiidcn-1</td><td>h3c2</td><td>1.0</td><td>18.0</td><td>0</td></tr><tr><td>openopt-ladder-y4oiidcn-2</td><td>h3c0</td><td>1.0</td><td>34.0</td><td>0</td></tr></table></div>
+<p>The paired confirmation stage's observed container makespan is 34.0
+seconds versus 68.0 summed container-seconds. These container intervals include
+imports, experiment repetitions, profiling and output; they do not substitute for
+solver latency. Different-sized problems have different costs, so this is not a balanced
+three-card throughput claim. Current read 2026-10-10T07:26:27.831353+00:00 found
+4 Ready nodes and 0 active
+openopt Pods. Failed Job evidence is retained.</p>
+<h2>Verification And Remaining Work</h2>
+<p>Full regression artifact: 1111 tests, 0 failures,
+0 errors, 28 skips, finished 2026-10-10T07:24:11.929093+00:00.
+This test environment is not the formal cluster performance environment.
+Formal explicit-device CUDA regression on h3c2: 7 tests,
+0 failures, 0 errors,
+0 skips, collected 2026-10-10T07:20:31.671249+00:00.
+Final smoke: 81 tests, 0 failures, 0 errors, 0 skips, finished 2026-10-10T07:26:46.133412+00:00.
+Wheel acceptance: PASS, 49 modules, license expression
+0BSD, license payload verified True.</p>
+<p>Unsupported/unqualified: sparse and matrix-free operators, presolve/scaling, infeasible
+and unbounded certificates, nonconvex/global optimization, conic and mixed-integer scope,
+representative ill-conditioned/degenerate corpora, licensed commercial parity, hardware
+lower bounds, real multi-GPU scaling and production SLAs. See <a href="qp-design.md">design boundary</a>.</p>
+<h2>Evidence And Reproduction</h2>
+<p>Bundle <code>/3fs/research3fs/data/tmp/openopt-4500/report-bundle.json</code>; all raw results, frozen arrays, source
+hashes, GPU/cgroup telemetry and Nsight reports remain outside Git on shared storage.
+The generator validates matching hashes for references, nonempty quality data and
+passing run artifacts before rendering. Re-running from identical evidence produces
+identical page bytes. This report has not been published online: no openopt entry
+exists in the current shared publication configuration.</p><ul><li>64 variables: <code>97ef99c672372ccd44b4ab81a81f9714194d818c0d432d7f15f0f3f1c92aae51</code>; <code>/3fs/research3fs/data/tmp/openopt-4500/ladder-y4oiidcn/case-0/result.json</code></li><li>384 variables: <code>e4ad8a9e74de127bf90188606d3667cf6c780492baac0e6a15564fcf1374bec6</code>; <code>/3fs/research3fs/data/tmp/openopt-4500/ladder-y4oiidcn/case-1/result.json</code></li><li>1024 variables: <code>1482bdab1a6ca107b223d2c9338f86cc5ae58830c332a7499da77bdd016cda74</code>; <code>/3fs/research3fs/data/tmp/openopt-4500/ladder-y4oiidcn/case-2/result.json</code></li></ul>
+
+<footer>Last modified: 2026-10-10 15:27:49 +08:00<br>Generated by scripts/render_qp_report.py from external evidence.
+<a href="design-v2.html">Design</a> / <a href="benchmark-report-v2.html">Measurements</a> /
+<a href="BACKLOG.md">Remaining work</a></footer></main></body></html>

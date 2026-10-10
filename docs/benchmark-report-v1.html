@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>openopt Historical Foundation / v1 (benchmark-report)</title><style>
+:root{--paper:#f4f0e6;--ink:#18362f;--accent:#bb4c24;--muted:#59695e}
+*{box-sizing:border-box}body{margin:0;color:var(--ink);
+background:radial-gradient(ellipse at top right,#dce8dd,transparent 70%),
+linear-gradient(140deg,var(--paper),#edf0e7);font:18px/1.6 Georgia,serif}
+main{max-width:1080px;margin:auto;padding:48px 24px}h1{font-size:clamp(2rem,6vw,4rem);
+line-height:1.1}h2{border-top:1px solid #b9c7ba;padding-top:1rem;margin-top:2rem}
+a{color:var(--accent)}code{font:0.86em/1.5 monospace;overflow-wrap:anywhere}
+.table{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:0.9em}
+td,th{text-align:left;padding:10px;border-bottom:1px solid #c6ccc2}
+.note{color:var(--muted)}svg{width:100%;height:auto;max-height:450px}
+select{max-width:100%;padding:8px;color:var(--ink);background:var(--paper)}
+footer{font-size:.8em;border-top:1px solid #c6ccc2;margin-top:2rem;padding-top:1rem}
+</style></head>
+<body><main><label>Document version <select onchange="location.href=this.value">
+<option value="benchmark-report-v1.html">v1: historical foundation</option>
+<option value="benchmark-report-v2.html" selected>v2: dense QP experiment</option></select></label>
+<noscript><a href="benchmark-report-v1.html">Historical v1</a> / <a href="benchmark-report-v2.html">Current v2</a></noscript><h1>openopt Historical Foundation / v1 (benchmark-report)</h1><p class="note">Historical v1 snapshot. Its numbers and future-tense
+statements belong to the earlier foundation revision, not current acceptance.
+The current v2 document supersedes it; original content is retained below.</p>
+<p>Foundation extraction / 2026-10-10</p>
+<h1>Verification Is Not A Speedup Claim</h1>
+<p>No historical performance output was imported as current evidence.
+Independent test results are produced by
+<code>python3 scripts/verify.py</code>. The output records actual counts,
+failures, skips, dependency versions and whether CUDA is available.</p>
+<h2>Correctness Surface</h2>
+<p>The smaller <code>scripts/iteration_gate.py smoke</code> checks core API,
+projection, solver and constraint contracts. Full verification includes the
+complete migrated test suite and byte-level provenance checks. GPU skips mean
+that GPU cases were not verified; CPU passes must not be relabeled GPU passes.</p>
+<h2>Verified Extraction / 2026-10-10</h2>
+<p>The independent service fixes passed the complete local regression at
+06:46:21 UTC: <strong>1068 passed, zero failures, zero errors, zero skips</strong>.
+The run recorded 125 upstream OSQP deprecation warnings. Deterministic tests
+cover delayed divergence publication and audited-reset replay; the pre-fix
+failures are retained with the verification artifacts.</p>
+<p>Python 3.10.20; PyTorch 2.8.0+cu128; CUDA runtime 12.8; NumPy 2.2.6;
+SciPy 1.15.3; pytest 8.4.2; OSQP 1.0.4; Clarabel 0.11.1; HiGHS Python
+1.15.1. The host reports 256 logical CPUs and two NVIDIA GeForce RTX 3080
+devices. Explicit CPU and <code>cuda:0</code> synthetic QP examples converged,
+with maximum constraint residual 0.0. This is not a multi-GPU qualification.</p>
+<p>The 48-module wheel passed an isolated install, public API identity checks
+and synthetic solve. Import provenance verifies 110 original files and
+1,750,809 bytes in the initial commit; independent fixes remain separate.</p>
+<p>Reproduction: <code>python3 scripts/verify.py --require-cuda</code> and
+<code>python3 scripts/check_distribution.py</code>.
+Local evidence:
+<code>/hf3fs-jd/data/tmp/openopt-verification/tests-cl__yanf/verification.json</code>
+and
+<code>/hf3fs-jd/data/tmp/openopt-distribution/wheel-bx3101xo/distribution.json</code>.
+Evidence paths are local artifacts, not files distributed in the repository.</p>
+<h2>License And GPU Contract / 2026-10-10</h2>
+<p>The product now targets commercial-grade optimization under 0BSD, with GPU
+acceleration as a first-class execution path. The
+<a href="strategy.html">commercial comparison contract</a> defines matched
+Gurobi/CPLEX/MOSEK baselines and separate correctness/performance gates.
+Commercial comparisons remain <strong>UNVERIFIED</strong>: no licensed
+commercial run or comparative speedup was performed for this change.</p>
+<p>The updated smoke gate passed 44 tests, including wheel-license positive and
+negative cases, actual CPU/CUDA result tensor placement, and unavailable-GPU
+rejection. Explicit CPU and cuda:0 examples passed. The isolated 48-module wheel
+passed import/solve checks and verified <code>License-Expression: 0BSD</code>
+plus the exact shipped license payload.</p>
+<p>Local artifacts:
+<code>/hf3fs-jd/data/tmp/openopt-verification/smoke-6wfvvg__/verification.json</code>
+and
+<code>/hf3fs-jd/data/tmp/openopt-distribution/wheel-gxio4w2y/distribution.json</code>.
+The numerical solver implementation was not changed in this product/licensing
+update; the full regression result above belongs to the preceding source
+revision, not a new full-suite run.</p>
+<h2>Performance Qualification</h2>
+<p>Timing comparisons require the same objective and constraints, matched
+input hashes, explicit CPU/CUDA devices, warm-up separation, cold/hot timings,
+p50/p95, success rate, objective gaps, residuals and hardware/software versions.
+No KEEP verdict, universal acceleration, multi-GPU efficiency or production
+SLA is asserted by this extraction.</p>
+<p>The imported research benchmark tools retain their original methodology.
+Use explicit output paths outside the repository and verify their artifacts
+before drawing conclusions. The old report-rendering and canonical-result
+pipeline was not migrated.</p>
+<p>See <a href="design.html">design</a> and <a href="MIGRATION.md">migration
+scope</a>.</p>
+
+<footer>Last modified: 2026-10-10 15:27:49 +08:00<br>Generated by scripts/render_qp_report.py from external evidence.
+<a href="design-v2.html">Design</a> / <a href="benchmark-report-v2.html">Measurements</a> /
+<a href="BACKLOG.md">Remaining work</a></footer></main></body></html>

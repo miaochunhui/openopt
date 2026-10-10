@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>openopt Historical Foundation / v1 (design)</title><style>
+:root{--paper:#f4f0e6;--ink:#18362f;--accent:#bb4c24;--muted:#59695e}
+*{box-sizing:border-box}body{margin:0;color:var(--ink);
+background:radial-gradient(ellipse at top right,#dce8dd,transparent 70%),
+linear-gradient(140deg,var(--paper),#edf0e7);font:18px/1.6 Georgia,serif}
+main{max-width:1080px;margin:auto;padding:48px 24px}h1{font-size:clamp(2rem,6vw,4rem);
+line-height:1.1}h2{border-top:1px solid #b9c7ba;padding-top:1rem;margin-top:2rem}
+a{color:var(--accent)}code{font:0.86em/1.5 monospace;overflow-wrap:anywhere}
+.table{overflow-x:auto}table{border-collapse:collapse;width:100%;font-size:0.9em}
+td,th{text-align:left;padding:10px;border-bottom:1px solid #c6ccc2}
+.note{color:var(--muted)}svg{width:100%;height:auto;max-height:450px}
+select{max-width:100%;padding:8px;color:var(--ink);background:var(--paper)}
+footer{font-size:.8em;border-top:1px solid #c6ccc2;margin-top:2rem;padding-top:1rem}
+</style></head>
+<body><main><label>Document version <select onchange="location.href=this.value">
+<option value="design-v1.html">v1: historical foundation</option>
+<option value="design-v2.html" selected>v2: dense QP experiment</option></select></label>
+<noscript><a href="design-v1.html">Historical v1</a> / <a href="design-v2.html">Current v2</a></noscript><h1>openopt Historical Foundation / v1 (design)</h1><p class="note">Historical v1 snapshot. Its numbers and future-tense
+statements belong to the earlier foundation revision, not current acceptance.
+The current v2 document supersedes it; original content is retained below.</p>
+<p>Foundation extraction / 2026-10-10</p>
+<h1>openopt</h1>
+<p>A GPU-accelerated optimization project, starting from the existing OpenPO
+portfolio implementation. This extraction is not a general-purpose optimizer
+release and does not redesign the algorithms.</p>
+<h2>Product Target</h2>
+<p>Build a general-purpose, GPU-accelerated open optimizer under 0BSD, targeting
+commercial-grade accuracy, robustness and performance. Qualify LP/QP and future
+mixed-integer scope against Gurobi/CPLEX, and convex/conic scope against MOSEK.
+These are benchmark targets, not an achieved ranking. See the
+<a href="strategy.html">scope and acceptance contract</a>.</p>
+<h2>Architecture</h2>
+<p><code>src/openpo</code> owns the imported implementation and independent fixes: low-rank factor
+models, projections, batched solvers, linear constraints, exact references,
+portfolio adapters, multi-period research and certification service libraries.
+<code>src/openopt</code> reexports the same public objects, preserving identity
+and compatibility without copying solver logic.</p>
+<h2>Generalization Boundary</h2>
+<p>The current API still names alpha, holdings and portfolio risk. The next
+stage must define a domain-neutral quadratic operator and LP/QP contract, then
+move portfolio semantics behind adapters. A general model must not disguise
+portfolio assumptions with renamed classes.</p>
+<p>The future general core must own GPU-resident dense/sparse/matrix-free
+operators, explicit device/dtype contracts, batching, presolve/scaling and
+reusable workspaces. Portfolio semantics remain adapters. GPU accuracy,
+hardware compatibility and transfer-inclusive performance are separate gates.
+CPU references and measured automatic routing remain supported; an explicit
+CUDA request must never silently execute on CPU.</p>
+<h2>Correctness Before Speed</h2>
+<p>The independent smoke gate and full migrated test suite verify numerical
+behavior and API compatibility. They are not performance gates. Continuous
+reference comparisons remain OSQP/Clarabel; future discrete comparisons must
+use SCIP/HiGHS under equivalent formulations and budgets.</p>
+<p>Provenance validates the imported bytes in the initial Git commit, while
+regression tests validate current code. The exact-snapshot check is a separate
+tool, not a permanent ban on independent algorithm changes. Wheel validation
+checks the module set and solves a synthetic problem from an isolated install.</p>
+<p>The first independent fix closes a durable-service publication race.
+Successful terminal readers validate the result and enforce its divergence
+circuit before reporting readiness; admission also rechecks the circuit after
+online solving. Fenced rejected results still cannot open circuits. Numerical
+solvers and their parameters are unchanged. An audited reset fences replay of
+the same divergence evidence inside the circuit transaction, while new
+divergence evidence may still open the route.</p>
+<h2>Maintenance And Release</h2>
+<p>Private deployment, proprietary data, credentials, commercial PDFs and
+historical results are excluded. Results and logs stay outside the worktree.
+The user selected 0BSD on 2026-10-10. Project code uses that license; dependencies
+and optional commercial SDKs retain their own terms. Wheel acceptance checks
+the license expression and shipped license text.</p>
+<p>See <a href="benchmark-report.html">verification and benchmark status</a>,
+<a href="MIGRATION.md">migration boundary</a> and
+<a href="BACKLOG.md">development ledger</a>.</p>
+
+<footer>Last modified: 2026-10-10 15:27:49 +08:00<br>Generated by scripts/render_qp_report.py from external evidence.
+<a href="design-v2.html">Design</a> / <a href="benchmark-report-v2.html">Measurements</a> /
+<a href="BACKLOG.md">Remaining work</a></footer></main></body></html>

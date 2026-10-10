@@ -9,7 +9,7 @@ import openpo
 
 
 def test_openopt_reexports_the_entire_existing_api() -> None:
-    assert openopt.__all__ == openpo.__all__
+    assert set(openpo.__all__).issubset(openopt.__all__)
     for name in openpo.__all__:
         assert getattr(openopt, name) is getattr(openpo, name)
 

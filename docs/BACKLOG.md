@@ -15,7 +15,9 @@ The user selected 0BSD on 2026-10-10. Licensing is implemented in `LICENSE`,
 package metadata and wheel acceptance; it does not relicense dependencies.
 The product target and release gates are in `strategy.html`.
 
-1. General model: specify a domain-neutral LP/QP problem contract, quadratic
+1. General model: an experimental real dense convex QP/LP contract is now
+   implemented in `src/openopt/qp.py`, with explicit dtype/device, approximate
+   result status and independent KKT validation. Extend the quadratic
    operator interface, constraints, dtype/device semantics and result status.
    Keep portfolio adapters outside the general core; design GPU-resident
    dense, sparse and matrix-free operators, batching and prepared workspaces.
@@ -38,8 +40,24 @@ The product target and release gates are in `strategy.html`.
 
 ## Explicit Non-Claims
 
-- No general-purpose `minimize` interface is implemented in this extraction.
+- No universal `minimize`, sparse/conic/MIP backend or infeasibility/unboundedness
+  certificate is implemented; the dense QP API is experimental.
 - No universal GPU speedup or production qualification is asserted.
 - No commercial solver parity or world-leading ranking is asserted.
-- No cluster, service, credential or networking changes are authorized here.
+- The user authorized this experiment's K8s Jobs with at most three 4500 cards.
+  No service, credential, RBAC, networking or shared publication changes were made.
 - Historical research decisions are not current runtime validation.
+
+## Current Experiment
+
+The 4500 experiment and failures are recorded externally under
+`/hf3fs-jd/data/tmp/openopt-4500/`. `scripts/render_qp_report.py` generates current
+design and benchmark pages from accepted result/verification artifacts.
+Model-cold and prepared timings are separate. Comparisons to the project's CPU
+prototype do not establish performance against OSQP/Clarabel/commercial solvers.
+Three independent one-card Jobs do not establish a multi-GPU solver.
+
+Remaining qualification: licensed commercial matched runs, representative
+diverse/ill-conditioned/sparse corpora, certificates, actual multi-GPU scaling,
+hardware lower-bound analysis and publication through an authorized project
+entry. These are not promoted to DONE.

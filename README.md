@@ -8,10 +8,11 @@ Extracted from OpenPO into an independent repository.
 redistribution are permitted without copyleft or attribution conditions.
 Dependencies and optional commercial solver SDKs retain their own licenses.
 
-**Current status:** the implementation is a portfolio-optimization research
-foundation. A general-purpose optimization API is the next development stage,
-not an already implemented feature. Commercial parity and GPU speedups are
-goals, not results already established by this repository.
+**Current status:** the portfolio research foundation now has a separate,
+experimental domain-neutral dense convex QP/LP interface. It is not a complete
+general-purpose optimizer release. Commercial parity remains unverified.
+Measured GPU benefits and negative results are scoped to synthetic dense QPs
+and this project's CPU prototype; see [the report](docs/benchmark-report.html).
 
 ## Commercial Target
 
@@ -62,16 +63,26 @@ different location.
 - Independent verification, a runnable example, and selected benchmark tools.
 
 Existing `from openpo import ...` imports continue to work.
-`from openopt import ...` exposes the same existing public API without
+`from openopt import ...` preserves the existing public API without
 renaming classes or duplicating solver implementation:
 
 ```python
 from openopt import FactorRiskModel, PortfolioProblem, SolveConfig, solve
 ```
 
-There is no `openopt.minimize` or universal problem model yet. The API currently
-uses portfolio concepts. GPU acceleration is not automatically preferable:
-small or sparse problems may favor the CPU reference solvers.
+The separate experimental interface is:
+
+```python
+from openopt import QPProblem, QPConfig, solve_qp, prepare_qp
+
+# P/q/A/l/u are real dense tensors. Minimize .5*x.T@P@x + q.T@x.
+result = solve_qp(QPProblem(P, q, A, l, u), QPConfig(device="cuda:0"))
+```
+
+There is no universal `openopt.minimize`, sparse/conic/MIP backend, or
+infeasible/unbounded certificate. See [the exact boundary](docs/qp-design.md).
+GPU acceleration is not automatically preferable: small problems measured
+slower on GPU. Explicit requests never silently fall back.
 
 ## Maintenance
 
