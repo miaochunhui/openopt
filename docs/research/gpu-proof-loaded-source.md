@@ -168,3 +168,114 @@ and `sys-compat-clean-smoke/`; read the actual report source commit, clean
 status, byte hashes and terminal counts rather than assuming a PASS.
 This follow-up does not establish final Nash integration, a whole-file timing
 below three minutes, independent P1 closure or formal GPU qualification.
+
+## Independent Fixture-Cost Follow-Up
+
+The new branch `codex/release4-20261010-proof-fixture-cost` starts at clean
+`fa25d31a18c5e8ee32f9994942924fdd1b8f484e`. The previous reviewed worktree is
+untouched. This follow-up changes only this document and the producer tests;
+`scripts/gpu_release_proof.py` and all numerical/source identity gates remain
+unchanged. No GPU, cluster, installation or remote push is involved.
+
+The opt-in `tests/test_gpu_release_proof.py --fixture-cost` entry records
+actual profiler calls, source snapshots, external logs/JUnit and the separately
+owned Helmholtz fixture audit. It requires explicit targets or a pinned,
+same-source collection group; it never defaults to running the entire file.
+`--no-profile` measures real selected execution without profiler overhead.
+`--baseline-collection` checks the complete original parameterized nodeids,
+not merely equal counts. New helper code is not executed as artifact snapshot
+code. Historical JUnit is labelled historical, never current runtime proof.
+
+Evidence below is relative to
+`/hf3fs-jd/data/tmp/openopt-release-20261010/proof-fixture-cost/`:
+
+| Controlled test change | Evidence | Actual outcome |
+| --- | --- | --- |
+| Clean precondition | `precondition/smoke-6mbmsjng` | 80 passed, 4 explicit CUDA skips |
+| Original copy profile | `baseline-profile-v3` | 16 passed; wall 62.620 s |
+| Sealed manifest reuse only | `manifest-profile-v1` | 16 passed; wall 57.269 s |
+| Direct byte copy follow-up | `direct-profile-v1` | 16 passed; wall 49.968 s |
+| Nine-case bytes and fresh checker compatibility | `copy-compat-v1/tests-y46pdu0d` | 15 passed; pytest 121.00 s |
+| Reversible sealed mutations | `restoration-v1/tests-uk1wlcfe` | 9 passed; pytest 31.96 s |
+
+The profiler proves calls occurred: the baseline had 2703 `shutil.copyfile`
+calls / 27.590 cumulative seconds, 11 `case_copy` calls / 12.647 seconds,
+and 36 live guard calls / 2.716 seconds. These cumulative times overlap and
+must not be summed into wall time. Manifest reuse reduced original `read`
+calls from 8582 to 7757, but only modestly reduced `case_copy` to 11.959 seconds.
+The direct-copy run had the same 2703 copy calls and 36 guard calls.
+Runs were ordered local samples, not randomized throughput qualification;
+contention and filesystem variation remain possible. No producer optimization
+or live identity cache was introduced.
+
+`case_copy` selects from the real sealed fixture inventory instead of hashing
+the same original files again. Its destination inventory still verifies every
+selected byte and exact membership against the sealed original descriptors.
+Fresh caller-trusted source copies and selected evidence copies use ordinary
+independent files, not hard links, array reconstruction or solver replay.
+The nine-case selfcheck independently inventories the complete original tree,
+checks every copied case/model/extension byte, replays all nine original models,
+mutates each private copy and verifies the original remains unchanged.
+Three existing missing/extra/same-length-hash negatives retain their nodeids
+and now mutate the actual copy helper.
+
+The full-tree A/B selfcheck used the same real 467-file / 1,370,418-byte fixture:
+shutil copy plus byte checking 6.922 seconds, direct copy plus byte checking
+5.119 seconds. These are single ordered test-fixture measurements, not
+optimizer performance. All inventories are external in
+`test_fixture_copy_ab_preserves0/nine-case-copy-ab.json` under the 15-test run.
+
+The four sealed disk-tamper tests use the genuine module-owned fixture
+sequentially instead of cloning it four times. Each proves the full original
+inventory equals the sealed inventory before mutation, catches the real replay
+rejection, restores in `finally` and verifies every original file/byte afterwards.
+A failed restoration fails loudly. The explicit module dependency stays visible
+to Helmholtz; no resource edge is hidden and no fixture is shared across workers.
+
+The original full collection contains 269 nodes: one genuine 214-node
+`produced(module)` component and 55 singleton components. Its runtime AST/pytest
+closure audit is in `baseline-collection-v3` and `manifest-collection-v1`.
+The historical 68-node / 334.420-second component is not the current denominator.
+Final-source collection and unprofiled selected-component runs are recorded
+separately under `final-collection-*` and `final-group-*`. Read their actual
+counts, source hashes and budget fields. No whole-file run is implied by a
+profile or by a sum of overlapping targeted counts. The explicit cost goal
+remains selected batches below 180 seconds and the heaviest actual component
+at most 300 seconds; these are not waived or increased.
+
+Two initial diagnostic startup mistakes occurred before pytest execution:
+comparing a resolved 3FS alias with an unresolved root, and omitting repository
+root from the script import path. They were corrected explicitly; neither
+startup error was a solver failure or a passing test run.
+
+### Fixed New-Checker Compatibility
+
+The fresh-process compatibility test uses the fixed Git checker revision
+`0c5524e8afbfa067889c1696b8617d17d4cc90ce`, SHA256
+`b3f1018c31d908e2e52ff96a097cd76fbb552efc40481489489624c48cdfa583`.
+It copies those caller-trusted bytes before pin/import, not from a changing
+Nash tree or frozen evidence executable. The live identity includes
+`_binary64_runtime`, `_jacobi` and `_reproducible_candidate`. All six original
+candidate checks pass with the versioned arithmetic; default `arithmetic`
+remains `"numpy"`.
+
+Function-local `import ctypes` / `import ctypes.util` is covered by actual
+helper code equality, not the module-level import allowlist. No allowlist was
+expanded. Four real same-source mutations are rejected: runtime-helper code
+containing those imports, new spectral-helper code, checker keyword default
+and `REPRODUCIBLE_ARITHMETIC` global constant. The actual rejection coordinates
+and callable identities are in `compatibility.json` under the 15-test run.
+Mutation inside trusted runtime/ctypes dependencies remains outside the
+guard's attestation scope. This fixture is not final Nash/RSOC integration:
+the main agent must freeze the integrated current source and independently
+repeat fresh-process/code/defaults/ray acceptance on that new source.
+
+The fixed-revision probe is an explicit diagnostic option
+`--checker-revision`, not a mandatory collected test: history-free source
+packages must not require that Git object. The ordinary added test uses a
+clearly labelled synthetic trusted checker with function-local ctypes imports,
+one new helper, literal keyword default and module constant. It preserves all
+four real mutation categories without claiming that synthetic code is Nash's
+implementation. The original 269 nodeids are preserved; the final two added
+nodeids are the nine-case copy selfcheck and
+`test_function_local_imports_and_new_helper_defaults_rejected`.

@@ -1,13 +1,19 @@
 """Real CPU producer/replay and adversarial evidence, never GPU qualification."""
 
 from copy import deepcopy
+import argparse
+from collections import Counter
+import cProfile
 import importlib.util
 import json
+import os
 from pathlib import Path
+import pstats
 import shutil
 import subprocess
 import sys
 import time
+from xml.etree import ElementTree
 
 import numpy as np
 import pytest
@@ -129,10 +135,37 @@ def produced(tmp_path_factory):
     return result, bundle_path
 
 
+def copy_evidence_file(source, destination):
+    """Copy test bytes without sendfile/stat overhead; never alias mutable fixtures."""
+    source, destination = Path(source), Path(destination)
+    assert source.is_file() and not source.is_symlink()
+    with destination.open("xb") as output:
+        output.write(source.read_bytes())
+    return destination
+
+
+def copy_evidence_tree(source, destination):
+    source, destination = Path(source), Path(destination)
+    assert not destination.exists()
+    files = []
+    for path in sorted(source.rglob("*")):
+        assert not path.is_symlink()
+        if path.is_file():
+            files.append(path.relative_to(source))
+    assert files
+    for directory in sorted({destination, *((destination / path).parent for path in files)}):
+        directory.mkdir(parents=True, exist_ok=True)
+    for path in files:
+        copy_evidence_file(source / path, destination / path)
+    return destination
+
+
 def case_copy(produced, tmp_path, name):
-    result, _ = produced
+    result, bundle_path = produced
     root = tmp_path / "evidence"
-    saved = json.loads((result.parent / (name + ".json")).read_bytes())
+    sealed = json.loads(bundle_path.read_bytes())["files"]
+    case_path = proof.bound(result.parent, sealed[name + ".json"])
+    saved = json.loads(case_path.read_bytes())
     files = {name + ".json", "result.json", "execution.log", "telemetry.json"}
 
     def references(value):
@@ -147,13 +180,13 @@ def case_copy(produced, tmp_path, name):
                 references(item)
 
     references(saved)
-    files.update(path.relative_to(result.parent).as_posix()
-                 for path in (result.parent / "source").rglob("*") if path.is_file())
-    expected = {name: proof.descriptor(result.parent, result.parent / name) for name in files}
+    files.update(path for path in sealed if path.startswith("source/"))
+    expected = {name: sealed[name] for name in files}
+    for directory in sorted({(root / name).parent for name in files}):
+        directory.mkdir(parents=True, exist_ok=True)
     for name in sorted(files):
         target = root / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(result.parent / name, target)
+        copy_evidence_file(result.parent / name, target)
     copied = proof.inventory(root)
     assert set(copied) == files, "case-copy file membership differs"
     assert copied == expected, "case-copy original byte descriptors differ"
@@ -243,24 +276,39 @@ def test_replay_never_calls_solvers_or_test_factories(produced, monkeypatch):
 @pytest.mark.parametrize("mutation", ["bytes", "added", "removed", "source"])
 def test_sealed_inventory_rejects_real_disk_tamper(produced, tmp_path, mutation):
     result, bundle_path = produced
-    root = tmp_path / "frozen"
-    shutil.copytree(result.parent, root)
+    root = result.parent
     bundle = json.loads(bundle_path.read_text())
-    bundle["evidence_root"] = str(root)
-    new_bundle = tmp_path / "bundle.json"
-    proof.write(new_bundle, bundle)
+    before = proof.inventory(root)
+    assert before == bundle["files"]
     if mutation == "bytes":
         path = next((root / "arrays").glob("*.npy"))
-        path.write_bytes(path.read_bytes() + b"tamper")
     elif mutation == "added":
-        (root / "unexpected.json").write_text("{}")
+        path = root / "unexpected.json"
     elif mutation == "removed":
-        (root / "gap_lp.json").unlink()
+        path = root / "gap_lp.json"
     else:
         path = root / "source/src/openopt/qp.py"
-        path.write_bytes(path.read_bytes() + b"\n# tamper\n")
-    with pytest.raises(proof.ProofError, match="added, removed or changed"):
-        proof.replay(new_bundle, proof.sha(new_bundle.read_bytes()), ROOT, allow_cpu_smoke=True)
+    original = None if mutation == "added" else path.read_bytes()
+    assert mutation != "added" or not path.exists()
+    try:
+        if mutation == "removed":
+            path.unlink()
+        elif mutation == "added":
+            path.write_bytes(b"{}")
+        else:
+            path.write_bytes(original + (b"tamper" if mutation == "bytes" else b"\n# tamper\n"))
+        with pytest.raises(proof.ProofError, match="added, removed or changed"):
+            proof.replay(bundle_path, proof.sha(bundle_path.read_bytes()), ROOT, allow_cpu_smoke=True)
+    finally:
+        if original is None:
+            path.unlink()
+        else:
+            path.write_bytes(original)
+        assert proof.inventory(root) == before, "shared sealed fixture not fully restored"
+    (tmp_path / "sealed-mutation.json").write_bytes(proof.encode({
+        "verdict": "PASS", "mutation": mutation, "restored_inventory": before,
+        "qualification": "sequential reversible test mutation, no fixture sharing across workers",
+    }))
 
 
 @pytest.mark.parametrize("mutation", ["missing_base", "planted_base", "negated_ray", "checkpoint"])
@@ -742,9 +790,9 @@ def test_foreign_module_metadata_cannot_hide_actual_code(produced, tmp_path, mon
 def test_loaded_source_fresh_process(mode, tmp_path):
     """Execute this checked-in test file, not inline code or artifact snapshot code."""
     root = tmp_path / "trusted"
-    shutil.copytree(ROOT / "src", root / "src")
+    copy_evidence_tree(ROOT / "src", root / "src")
     (root / "scripts").mkdir()
-    shutil.copyfile(ROOT / proof.RUNNER, root / proof.RUNNER)
+    copy_evidence_file(ROOT / proof.RUNNER, root / proof.RUNNER)
     if mode == "sys_float_info":
         path = root / "src/openopt/certificates.py"
         data = path.read_bytes()
@@ -813,7 +861,7 @@ def test_single_case_fixture_preserves_all_referenced_bytes(produced, tmp_path):
     proof.replay_case(root, proof.descriptor(root, root / "gap_lp.json"), "cpu")
     whole_start = time.perf_counter()
     whole = tmp_path / "whole-evidence"
-    shutil.copytree(result.parent, whole)
+    copy_evidence_tree(result.parent, whole)
     assert proof.inventory(whole) == original
     whole_elapsed = time.perf_counter() - whole_start
     (tmp_path / "fixture-cost.json").write_bytes(proof.encode({
@@ -832,7 +880,7 @@ def test_single_case_fixture_rejects_file_set_mutations(produced, tmp_path, monk
     result, _ = produced
     saved = json.loads((result.parent / "gap_lp.json").read_bytes())
     chosen = saved["model"]["q"]["components"]["values"]["path"]
-    real_copy = shutil.copyfile
+    real_copy = copy_evidence_file
     calls = []
 
     def mutated_copy(source, destination):
@@ -851,7 +899,7 @@ def test_single_case_fixture_rejects_file_set_mutations(produced, tmp_path, monk
             Path(destination).write_bytes(changed)
         return answer
 
-    monkeypatch.setattr(shutil, "copyfile", mutated_copy)
+    monkeypatch.setitem(case_copy.__globals__, "copy_evidence_file", mutated_copy)
     with pytest.raises(AssertionError, match="case-copy"):
         case_copy(produced, tmp_path, "gap_lp")
     assert chosen in calls
@@ -859,6 +907,103 @@ def test_single_case_fixture_rejects_file_set_mutations(produced, tmp_path, monk
         "verdict": "PASS", "mutation": mutation, "chosen": chosen, "copy_calls": calls,
         "qualification": "fixture membership/hash rejection, not numerical performance",
     }))
+
+
+def test_fixture_copy_ab_preserves_nine_cases_and_original_bytes(produced, tmp_path):
+    result, bundle = produced
+    original = proof.inventory(result.parent)
+    measurements = []
+    for label, copier in (("shutil", shutil.copytree), ("direct", copy_evidence_tree)):
+        destination = tmp_path / label
+        start = time.perf_counter()
+        copier(result.parent, destination)
+        actual = proof.inventory(destination)
+        elapsed = time.perf_counter() - start
+        assert actual == original
+        measurements.append({"method": label, "copy_and_byte_check_s": elapsed,
+                             "files": len(actual), "bytes": sum(v["bytes"] for v in actual.values())})
+    cases = {}
+    for case in proof.CASES:
+        root, saved = case_copy(produced, tmp_path / case, case)
+        copied = proof.inventory(root)
+        assert all(record == original[name] for name, record in copied.items())
+        assert saved == json.loads((result.parent / (case + ".json")).read_bytes())
+        cases[case] = {"files": copied, "status": saved["status"],
+                       "passed": proof.replay_case(
+                           root, proof.descriptor(root, root / (case + ".json")), "cpu")["passed"]}
+        chosen = saved["model"]["q"]["components"]["values"]["path"]
+        path = root / chosen
+        data = path.read_bytes()
+        path.write_bytes(data[:-1] + bytes([data[-1] ^ 1]))
+        assert (result.parent / chosen).read_bytes() == data, "copies must not alias original files"
+        with pytest.raises(proof.ProofError, match="byte hash mutation"):
+            proof.bound(root, original[chosen])
+    assert len(cases) == 9 and all(case["passed"] for case in cases.values())
+    assert proof.inventory(result.parent) == original
+    assert json.loads(bundle.read_bytes())["files"] == original
+    (tmp_path / "nine-case-copy-ab.json").write_bytes(proof.encode({
+        "verdict": "PASS", "methods": measurements, "cases": cases,
+        "original_inventory": original,
+        "qualification": "ordered local test-fixture copy comparison, not solver performance",
+    }))
+
+
+def pinned_reproducible_checker_compatibility(tmp_path, revision):
+    """Fixed Git checker bytes, not a moving agent tree or an artifact code import."""
+    command = ["git", "show", revision + ":src/openopt/certificates.py"]
+    checkout = subprocess.run(command, cwd=ROOT, capture_output=True, check=False)
+    assert checkout.returncode == 0, checkout.stderr.decode()
+    root = tmp_path / "trusted"
+    copy_evidence_tree(ROOT / "src", root / "src")
+    (root / "scripts").mkdir()
+    copy_evidence_file(ROOT / proof.RUNNER, root / proof.RUNNER)
+    checker = root / "src/openopt/certificates.py"
+    checker.write_bytes(checkout.stdout)
+    output = tmp_path / "compatibility.json"
+    completed = subprocess.run(
+        [sys.executable, "-B", str(Path(__file__).resolve()), "--loaded-source-child",
+         "reproducible_checker", str(root), str(tmp_path / "evidence"), str(output)],
+        capture_output=True, text=True, check=False)
+    (tmp_path / "compatibility.log").write_text(completed.stdout + completed.stderr)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    saved = json.loads(output.read_bytes())
+    assert saved["verdict"] == "PASS" and saved["negative_count"] >= 3
+    assert saved["checker_sha256"] == proof.sha(checkout.stdout)
+    assert saved["original_candidate_checks"] == {
+        name: True for name in ("primal_feasibility", "stationarity", "bound_sign",
+                               "complementarity", "dual_objective_available", "duality_gap")}
+    assert {"openopt.certificates._binary64_runtime",
+            "openopt.certificates._reproducible_candidate",
+            "openopt.certificates._jacobi"} <= set(saved["loaded_source_identity"]["callables"])
+
+
+def test_function_local_imports_and_new_helper_defaults_rejected(tmp_path):
+    root = tmp_path / "trusted"
+    copy_evidence_tree(ROOT / "src", root / "src")
+    (root / "scripts").mkdir()
+    copy_evidence_file(ROOT / proof.RUNNER, root / proof.RUNNER)
+    path = root / "src/openopt/certificates.py"
+    path.write_bytes(path.read_bytes() + (
+        b"\n_FIXTURE_ALGORITHM = 'fixture_v1'\n"
+        b"\ndef _fixture_runtime_probe(*, algorithm='fixture_v1'):\n"
+        b"    import ctypes\n"
+        b"    import ctypes.util\n"
+        b"    return (_FIXTURE_ALGORITHM, algorithm, ctypes.c_double(1.).value)\n"
+        b"\ndef _fixture_new_helper(value):\n"
+        b"    return value\n"
+    ))
+    output = tmp_path / "local-imports.json"
+    completed = subprocess.run(
+        [sys.executable, "-B", str(Path(__file__).resolve()), "--loaded-source-child",
+         "local_imports", str(root), str(tmp_path / "evidence"), str(output)],
+        capture_output=True, text=True, check=False)
+    (tmp_path / "local-imports.log").write_text(completed.stdout + completed.stderr)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    saved = json.loads(output.read_bytes())
+    assert saved["verdict"] == "PASS" and saved["negative_count"] == 4
+    assert {"openopt.certificates._fixture_runtime_probe",
+            "openopt.certificates._fixture_new_helper"} <= set(
+                saved["loaded_source_identity"]["callables"])
 
 
 def mutate_checker_runtime(monkeypatch, mutation):
@@ -1005,7 +1150,77 @@ def loaded_source_child(mode, root, artifact, output):
     spec = importlib.util.spec_from_file_location("fresh_trusted_producer", root / proof.RUNNER)
     runner = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(runner)
-    if mode == "sys_float_info":
+    if mode == "local_imports":
+        expected = runner.source_map(root)
+        identity = runner.loaded_source_check(root, expected)
+        import openopt.certificates as certificates
+
+        assert certificates._fixture_runtime_probe() == ("fixture_v1", "fixture_v1", 1.)
+        errors = {}
+        for mutation in ("internal_import_code", "new_helper_code", "new_keyword_default",
+                         "new_global_constant"):
+            with pytest.MonkeyPatch.context() as patch:
+                if mutation in ("internal_import_code", "new_helper_code"):
+                    helper = (certificates._fixture_runtime_probe
+                              if mutation == "internal_import_code"
+                              else certificates._fixture_new_helper)
+                    patch.setattr(helper, "__code__", helper.__code__.replace(co_consts=(None, "forged")))
+                elif mutation == "new_keyword_default":
+                    patch.setattr(certificates._fixture_runtime_probe, "__kwdefaults__", {
+                        "algorithm": "forged"})
+                else:
+                    patch.setattr(certificates, "_FIXTURE_ALGORITHM", "forged")
+                assert runner.source_map(root) == expected
+                try:
+                    runner.loaded_source_check(root, expected)
+                except runner.ProofError as error:
+                    errors[mutation] = str(error)
+                else:
+                    raise AssertionError(f"new helper mutation accepted: {mutation}")
+            assert runner.loaded_source_check(root, expected) == identity
+            assert certificates._fixture_runtime_probe() == ("fixture_v1", "fixture_v1", 1.)
+        value = {"verdict": "PASS", "negative_count": len(errors), "rejections": errors,
+                 "loaded_source_identity": identity,
+                 "qualification": "synthetic function-local-import fixture, not Nash integration"}
+    elif mode == "reproducible_checker":
+        expected = runner.source_map(root)
+        identity = runner.loaded_source_check(root, expected)
+        import openopt.certificates as certificates
+
+        assert certificates.check_qp_candidate.__kwdefaults__["arithmetic"] == "numpy"
+        certificates._binary64_runtime()
+        problem = runner.make_problem("gap_lp")
+        candidate = certificates.check_qp_candidate(
+            problem, [0., 3., -1.], [-1., 2., -.5],
+            arithmetic=certificates.REPRODUCIBLE_ARITHMETIC)
+        assert candidate.passed, candidate.to_dict()
+        errors = {}
+        for mutation in ("internal_import_code", "new_helper_code", "new_keyword_default",
+                         "new_global_constant"):
+            with pytest.MonkeyPatch.context() as patch:
+                if mutation in ("internal_import_code", "new_helper_code"):
+                    helper = (certificates._binary64_runtime if mutation == "internal_import_code"
+                              else certificates._jacobi)
+                    patch.setattr(helper, "__code__", helper.__code__.replace(co_consts=(None, "forged")))
+                elif mutation == "new_keyword_default":
+                    patch.setattr(certificates.check_qp_candidate, "__kwdefaults__", {
+                        **certificates.check_qp_candidate.__kwdefaults__, "arithmetic": "forged"})
+                else:
+                    patch.setattr(certificates, "REPRODUCIBLE_ARITHMETIC", "forged")
+                assert runner.source_map(root) == expected
+                try:
+                    runner.loaded_source_check(root, expected)
+                except runner.ProofError as error:
+                    errors[mutation] = str(error)
+                else:
+                    raise AssertionError(f"new checker mutation accepted: {mutation}")
+            assert runner.loaded_source_check(root, expected) == identity
+        value = {"verdict": "PASS", "mode": mode, "negative_count": len(errors),
+                 "rejections": errors, "loaded_source_identity": identity,
+                 "original_candidate_checks": candidate.checks,
+                 "checker_sha256": expected["src/openopt/certificates.py"],
+                 "qualification": "pinned checker compatibility fixture; not integrated final source"}
+    elif mode == "sys_float_info":
         expected = runner.source_map(root)
         identity = runner.loaded_source_check(root, expected)
         import openopt.certificates as certificates
@@ -1109,7 +1324,153 @@ def loaded_source_child(mode, root, artifact, output):
     return 0
 
 
-if __name__ == "__main__":
+def fixture_cost_main(argv):
+    """Opt-in CPU diagnosis; explicit nodes, external logs and actual fixture closure."""
+    parser = argparse.ArgumentParser(description=fixture_cost_main.__doc__)
+    parser.add_argument("--artifact-dir", type=Path, required=True)
+    parser.add_argument("--target", action="append", default=[])
+    parser.add_argument("--collect", action="store_true")
+    parser.add_argument("--sharder", type=Path)
+    parser.add_argument("--history-junit", type=Path, action="append", default=[])
+    parser.add_argument("--baseline-collection", type=Path)
+    parser.add_argument("--group-collection", type=Path)
+    parser.add_argument("--group-collection-sha256")
+    parser.add_argument("--group-index", type=int)
+    parser.add_argument("--no-profile", action="store_true")
+    parser.add_argument("--checker-revision")
+    args = parser.parse_args(argv)
+    output = args.artifact_dir.resolve()
+    assert output.is_relative_to(Path("/hf3fs-jd/data/tmp").resolve())
+    assert not output.is_relative_to(ROOT)
+    output.mkdir(parents=True, exist_ok=False)
+    os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+    os.environ["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    sys.path.insert(0, str(ROOT))
+    sys.path.insert(0, str(ROOT / "src"))
+    from scripts.verify import source_snapshot, check_source_consistency
+
+    before = source_snapshot(ROOT)
+    selected_nodes = None
+    if args.group_collection is not None:
+        raw = args.group_collection.read_bytes()
+        assert proof.sha(raw) == args.group_collection_sha256
+        selection = json.loads(raw)
+        assert selection["source"]["sha256"] == before["sha256"]
+        selected_nodes = (
+            [node for group in selection["groups"] if len(group["nodeids"]) == 1
+             for node in group["nodeids"]] if args.group_index == -1 else
+            max(selection["groups"], key=lambda group: len(group["nodeids"]))["nodeids"]
+            if args.group_index == -2 else selection["groups"][args.group_index]["nodeids"])
+        assert selected_nodes
+    report = {"verdict": "RUNNING", "source": before, "targets": args.target,
+              "qualification": "CPU test cost/coverage only, not solver or GPU performance"}
+    plugins = []
+    if args.collect:
+        assert args.sharder is not None and args.sharder.is_file()
+        spec = importlib.util.spec_from_file_location("scripts.verify_sharded", args.sharder)
+        sharder = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(sharder)
+        plugins.append(sharder)
+        os.environ["OPENOPT_SHARD_COLLECTION"] = str(output / "collection.json")
+        os.environ["OPENOPT_SHARD_GROUPING"] = sharder.FIXTURE_CONTRACT
+        os.environ["OPENOPT_SHARD_FIXTURE_FILES"] = json.dumps(["tests/test_gpu_release_proof.py"])
+        report["sharder"] = {"path": str(args.sharder.resolve()),
+                             "sha256": proof.sha(args.sharder.read_bytes())}
+    else:
+        assert args.target or selected_nodes, "explicit targets required; no blind whole-file run"
+    command = ["-q", "-ra", "-o", f"cache_dir={output / 'cache'}",
+               "--basetemp", str(output / "pytest-tmp"),
+               f"--junitxml={output / 'pytest.xml'}"]
+    if args.collect:
+        command += ["--collect-only", "tests/test_gpu_release_proof.py"]
+    else:
+        command += selected_nodes or [
+            "tests/test_gpu_release_proof.py::" + target for target in args.target]
+    profile = cProfile.Profile()
+    started = time.perf_counter()
+    try:
+        if args.checker_revision:
+            pinned_reproducible_checker_compatibility(output, args.checker_revision)
+            report["checker_revision"] = args.checker_revision
+        with (output / "pytest.log").open("x") as log:
+            from contextlib import redirect_stdout, redirect_stderr
+            with redirect_stdout(log), redirect_stderr(log):
+                rc = (pytest.main(command, plugins=plugins) if args.no_profile else
+                      profile.runcall(pytest.main, command, plugins=plugins))
+        profile.dump_stats(output / "profile.pstats")
+        report["wall_s"] = time.perf_counter() - started
+        report["returncode"] = int(rc)
+        report["costs"] = [
+            {"path": path, "line": line, "function": function,
+             "primitive_calls": counts[0], "calls": counts[1],
+             "self_s": counts[2], "cumulative_s": counts[3]}
+            for (path, line, function), counts in (
+                {} if args.no_profile else pstats.Stats(profile).stats).items()
+            if function in {"case_copy", "copyfile", "copy_evidence_file", "copy_evidence_tree",
+                            "read", "descriptor", "inventory",
+                            "loaded_source_check", "freeze_sources", "run_cases",
+                            "replay", "replay_case", "validate_result"}
+        ]
+        assert rc == 0, f"pytest failed rc={rc}; see {output / 'pytest.log'}"
+        if args.collect:
+            collection = json.loads((output / "collection.json").read_bytes())
+            report["groups"] = sharder.fixture_groups(
+                collection["nodeids"], collection["fixture_audit"])
+            historical = {}
+            for path in args.history_junit:
+                suites = ElementTree.parse(path).getroot()
+                totals = Counter()
+                for item in suites.iter("testcase"):
+                    name = item.attrib["name"].split("[", 1)[0]
+                    if item.attrib.get("classname") == "tests.test_gpu_release_proof":
+                        totals[name] += float(item.attrib.get("time", 0))
+                historical[str(path)] = dict(totals)
+            report["historical_function_s"] = historical
+            report["nodeids"] = collection["nodeids"]
+            if args.baseline_collection is not None:
+                baseline = json.loads(args.baseline_collection.read_bytes())["nodeids"]
+                report["coverage_delta"] = {
+                    "removed": sorted(set(baseline) - set(collection["nodeids"])),
+                    "added": sorted(set(collection["nodeids"]) - set(baseline))}
+                assert not report["coverage_delta"]["removed"]
+                assert report["coverage_delta"]["added"] == sorted([
+                    "tests/test_gpu_release_proof.py::"
+                    "test_fixture_copy_ab_preserves_nine_cases_and_original_bytes",
+                    "tests/test_gpu_release_proof.py::"
+                    "test_function_local_imports_and_new_helper_defaults_rejected"])
+                report["baseline_collection_sha256"] = proof.sha(
+                    args.baseline_collection.read_bytes())
+            report["node_count"] = len(collection["nodeids"])
+            report["group_sizes"] = sorted(
+                (len(group["nodeids"]) for group in report["groups"]), reverse=True)
+        else:
+            suites = ElementTree.parse(output / "pytest.xml").getroot()
+            report["counts"] = {
+                key: sum(int(s.attrib.get(key, 0)) for s in suites.findall("testsuite"))
+                for key in ("tests", "failures", "errors", "skipped")}
+            assert report["counts"]["tests"] > 0
+            report["nodeids"] = selected_nodes
+            report["under_180s"] = report["wall_s"] < 180
+            report["under_300s"] = report["wall_s"] <= 300
+        report["source_consistency"] = check_source_consistency(before, source_snapshot(ROOT))
+        assert report["source_consistency"]["verdict"] == "PASS"
+        report["verdict"] = "PASS"
+    except Exception as error:
+        report["verdict"] = "FAIL"
+        report["error"] = f"{type(error).__name__}: {error}"
+        raise
+    finally:
+        (output / "cost-report.json").write_bytes(proof.encode(report))
+        print(f"FIXTURE_COST verdict={report['verdict']} report={output / 'cost-report.json'}")
+        print(proof.encode({key: value for key, value in report.items()
+                            if key in {"counts", "wall_s", "group_sizes", "node_count",
+                                       "costs", "coverage_delta", "under_180s", "under_300s"}}).decode())
+    return 0
+
+
+if __name__ == "__main__" and sys.argv[1:2] == ["--fixture-cost"]:
+    raise SystemExit(fixture_cost_main(sys.argv[2:]))
+elif __name__ == "__main__":
     assert len(sys.argv) == 6 and sys.argv[1] == "--loaded-source-child"
     raise SystemExit(loaded_source_child(
         sys.argv[2], Path(sys.argv[3]), Path(sys.argv[4]), Path(sys.argv[5])))
