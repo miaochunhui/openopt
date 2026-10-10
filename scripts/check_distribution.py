@@ -75,6 +75,21 @@ def installed_probe(target):
         solved.x, torch.tensor([1.0, 0.0], dtype=torch.float64), atol=1e-6,
     ):
         raise ValueError("isolated wheel general QP solve failed")
+    batched = openopt.solve_batch_qp(openopt.BatchQPProblem.stack([general, general]))
+    if batched.status != ("solved", "solved") or not torch.allclose(
+        batched.x, solved.x.expand(2, -1), atol=1e-6,
+    ):
+        raise ValueError("isolated wheel batched QP solve failed")
+    evidence = openopt.check_qp_candidate(general, solved.x, solved.y)
+    if not evidence.passed:
+        raise ValueError("isolated wheel independent evidence failed")
+    sparse = openopt.OperatorQPProblem(
+        general.P.to_sparse_coo(), general.q, general.A.to_sparse_coo(),
+        general.l, general.u, assume_psd=True,
+    )
+    operator = openopt.solve_operator_qp(sparse)
+    if operator.status != "solved" or not torch.allclose(operator.x, solved.x, atol=1e-6):
+        raise ValueError("isolated wheel sparse QP solve failed")
     print(f"WHEEL_IMPORT verdict=PASS api_objects={len(openpo.__all__)} version={openopt.__version__}")
 
 

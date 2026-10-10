@@ -71,6 +71,7 @@ def submit(args: argparse.Namespace) -> None:
     )
     if active_cards + len(args.sizes) > 3:
         raise RuntimeError(f"three-card cap exceeded: active={active_cards} requested={len(args.sizes)}")
+    validate_performance_prerequisite(args)
     if args.stage == "ladder":
         if args.prerequisite is None:
             raise ValueError("ladder requires a passing previous run")
@@ -92,6 +93,8 @@ def submit(args: argparse.Namespace) -> None:
     script = {
         "probe": "gpu_probe.py", "regression": "cluster_regression.py",
         "smoke": "benchmark_general_qp.py", "ladder": "benchmark_general_qp.py",
+        "campaign": "gpu_qp_campaign.py",
+        "comparison": "benchmark_solver_comparison.py",
     }[args.stage]
     for index, size in enumerate(args.sizes):
         output = run / f"case-{index}"
@@ -104,6 +107,12 @@ def submit(args: argparse.Namespace) -> None:
         ]
         if args.stage in ("smoke", "ladder"):
             main_command += ["--size", str(size), "--repeats", str(args.repeats)]
+        if args.stage == "campaign":
+            main_command += ["--size", str(size), "--repeats", str(args.repeats),
+                             "--mode", args.campaign_mode]
+        if args.stage == "comparison":
+            main_command += ["--size", str(size), "--repeats", str(args.repeats),
+                             "--devices", "cpu", "cuda:0"]
         env = [
             {"name": "PYTHONPATH", "value": str(source / "src")},
             {"name": "PYTHONDONTWRITEBYTECODE", "value": "1"},
@@ -131,9 +140,15 @@ def submit(args: argparse.Namespace) -> None:
                     "allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]},
                 },
                 "resources": {"requests": resources, "limits": resources},
-                "volumeMounts": [{"name": "threefs", "mountPath": "/3fs", "mountPropagation": "HostToContainer"}],
+                "volumeMounts": [
+                    {"name": "threefs", "mountPath": "/3fs", "mountPropagation": "HostToContainer"},
+                    {"name": "shared-memory", "mountPath": "/dev/shm"},
+                ],
             }],
-            "volumes": [{"name": "threefs", "persistentVolumeClaim": {"claimName": args.pvc}}],
+            "volumes": [
+                {"name": "threefs", "persistentVolumeClaim": {"claimName": args.pvc}},
+                {"name": "shared-memory", "emptyDir": {"medium": "Memory", "sizeLimit": "512Mi"}},
+            ],
         }
         manifest = {
             "apiVersion": "batch/v1", "kind": "Job",
@@ -199,11 +214,46 @@ def collect(run: Path) -> None:
         raise RuntimeError(f"cluster failure; evidence={run}")
 
 
+def validate_performance_prerequisite(args: argparse.Namespace) -> None:
+    if args.stage not in ("campaign", "comparison") or (
+        args.stage == "campaign" and args.campaign_mode == "correctness"
+    ):
+        return
+    if args.prerequisite is None:
+        raise ValueError("new performance paths require a passing campaign correctness run")
+    previous = json.loads((args.prerequisite / "run.json").read_text())
+    if previous["stage"] != "campaign" or len(previous["jobs"]) != 1:
+        raise ValueError("prerequisite must be a one-card campaign gate")
+    item = previous["jobs"][0]
+    result = json.loads((Path(item["output"]) / "result.json").read_text())
+    if result.get("verdict") != "PASS" or result.get("mode") != "correctness":
+        raise ValueError("campaign correctness prerequisite did not pass")
+    if args.acceptance_bundle is None or not args.acceptance_sha256:
+        raise ValueError("performance admission requires a pinned independent acceptance bundle")
+    if __package__:
+        from .accept_qp_campaign import accept
+    else:
+        from accept_qp_campaign import accept
+    accepted = accept(args.acceptance_bundle, args.acceptance_sha256)
+    correct_path = str((Path(item["output"]) / "result.json").resolve())
+    if not any(str(Path(entry["result_path"]).resolve()) == correct_path
+               and entry.get("tests", {}).get("tests", 0) > 0
+               for entry in accepted["entries"]):
+        raise ValueError("independent acceptance does not cover this correctness prerequisite")
+    hashes = previous["source_hashes"]
+    if not any(relative.startswith("src/openopt/") for relative in hashes):
+        raise ValueError("prerequisite contains no openopt core source")
+    for relative, digest in hashes.items():
+        if relative.startswith("src/openopt/") and hashlib.sha256((ROOT / relative).read_bytes()).hexdigest() != digest:
+            raise ValueError(f"core changed since campaign prerequisite: {relative}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
     launch = sub.add_parser("submit")
-    launch.add_argument("--stage", choices=("probe", "smoke", "ladder", "regression"), required=True)
+    launch.add_argument("--stage", choices=("probe", "smoke", "ladder", "regression", "campaign", "comparison"), required=True)
+    launch.add_argument("--campaign-mode", choices=("correctness", "adaptive", "batch", "operators"), default="correctness")
     launch.add_argument("--artifact-root", type=Path, required=True)
     launch.add_argument("--namespace", required=True)
     launch.add_argument("--pvc", required=True)
@@ -215,12 +265,16 @@ def main() -> int:
     launch.add_argument("--repeats", type=int, default=5)
     launch.add_argument("--cpu", type=int, default=4)
     launch.add_argument("--prerequisite", type=Path)
+    launch.add_argument("--acceptance-bundle", type=Path)
+    launch.add_argument("--acceptance-sha256")
     read = sub.add_parser("collect")
     read.add_argument("run", type=Path)
     args = parser.parse_args()
     if args.action == "submit":
         if not 1 <= len(args.sizes) <= 3 or (args.stage in ("probe", "smoke", "regression") and len(args.sizes) != 1):
             parser.error("probe/smoke require one card; any launch is limited to three")
+        if args.stage == "campaign" and args.campaign_mode == "correctness" and len(args.sizes) != 1:
+            parser.error("campaign correctness is a one-card gate")
         submit(args)
     else:
         collect(args.run)

@@ -1,6 +1,6 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>openopt RTX PRO 4500 Experiment / v2</title><style>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Openopt / v3 实测与商用差距</title><style>
 :root{--paper:#f4f0e6;--ink:#18362f;--accent:#bb4c24;--muted:#59695e}
 *{box-sizing:border-box}body{margin:0;color:var(--ink);
 background:radial-gradient(ellipse at top right,#dce8dd,transparent 70%),
@@ -15,118 +15,20 @@ select{max-width:100%;padding:8px;color:var(--ink);background:var(--paper)}
 footer{font-size:.8em;border-top:1px solid #c6ccc2;margin-top:2rem;padding-top:1rem}
 </style></head>
 <body><main><label>Document version <select onchange="location.href=this.value">
-<option value="benchmark-report-v1.html">v1: historical foundation</option>
-<option value="benchmark-report-v2.html" selected>v2: dense QP experiment</option></select></label>
-<noscript><a href="benchmark-report-v1.html">Historical v1</a> / <a href="benchmark-report-v2.html">Current v2</a></noscript><h1>openopt RTX PRO 4500 Experiment / v2</h1>
-<p><strong>1024-variable paired dense QP: 5.11x model-cold and
-6.65x prepared GPU speedup against this project's CPU prototype.</strong>
-The smallest tested problem is slower on GPU. Commercial performance, representative-corpus
-robustness and a multi-GPU solver remain UNVERIFIED.</p>
-<p class="note">Model-cold includes validation, input transfers, factorization, iterations and
-host outputs after one untimed warmup. Prepared excludes setup but includes host outputs.
-Process/Pod startup is outside these latency measurements. Each row is a single seeded
-synthetic dense QP, not a general optimization corpus.</p>
-<figure><svg viewBox="0 0 900 355" role="img"
-aria-label="Paired model-cold CPU and GPU latency"><text x="5" y="25" fill="#18362f">
-Model-cold p50, lower is better; same four-thread CPU prototype</text><text x="5" y="70" fill="#18362f">64 variables</text>
-<rect x="190" y="55" width="11.62" height="22" fill="#18362f"/>
-<text x="211.62" y="71" font-size="14">6.50 ms CPU</text>
-<rect x="190" y="85" width="28.52" height="22" fill="#bb4c24"/>
-<text x="228.52" y="101" font-size="14">15.96 ms GPU</text><text x="5" y="165" fill="#18362f">384 variables</text>
-<rect x="190" y="150" width="46.96" height="22" fill="#18362f"/>
-<text x="246.96" y="166" font-size="14">26.27 ms CPU</text>
-<rect x="190" y="180" width="43.74" height="22" fill="#bb4c24"/>
-<text x="243.74" y="196" font-size="14">24.47 ms GPU</text><text x="5" y="260" fill="#18362f">1024 variables</text>
-<rect x="190" y="245" width="530.00" height="22" fill="#18362f"/>
-<text x="730.00" y="261" font-size="14">296.49 ms CPU</text>
-<rect x="190" y="275" width="103.81" height="22" fill="#bb4c24"/>
-<text x="303.81" y="291" font-size="14">58.07 ms GPU</text></svg>
-<figcaption>Small dense QPs lose on GPU; larger dense QPs accelerate this prototype.
-This is not a commercial or open-source solver ranking.</figcaption></figure>
-<h2>Paired Latency</h2><div class="table"><table>
-<tr><th>Variables</th><th>Mode</th><th>CPU p50 / p95 ms</th><th>GPU p50 / p95 ms</th><th>p50 ratio</th><th>Samples</th></tr>
-<tr><td>64</td><td>cold</td><td>6.503 / 12.033</td><td>15.956 / 18.094</td><td>0.408x</td><td>10</td></tr><tr><td>64</td><td>prepared</td><td>4.078 / 4.464</td><td>14.121 / 14.631</td><td>0.289x</td><td>10</td></tr><tr><td>384</td><td>cold</td><td>26.270 / 45.886</td><td>24.467 / 24.955</td><td>1.074x</td><td>10</td></tr><tr><td>384</td><td>prepared</td><td>15.956 / 17.144</td><td>15.638 / 19.167</td><td>1.020x</td><td>10</td></tr><tr><td>1024</td><td>cold</td><td>296.489 / 308.936</td><td>58.075 / 60.708</td><td>5.105x</td><td>10</td></tr><tr><td>1024</td><td>prepared</td><td>186.112 / 211.451</td><td>27.986 / 28.081</td><td>6.650x</td><td>10</td></tr></table></div>
-<p>CPU/GPU order alternates. CPU uses 4 library threads;
-the live cgroup quota read was <code>max 100000</code>,
-so this is not a comparison against all host CPU cores. There is no statistical
-confidence bound from a broad workload population. Negative and borderline cases are retained.</p>
-<details><summary>All accepted sequential exploratory ladders, not substituted for paired results</summary>
-<div class="table"><table><tr><th>Variables</th><th>Model-cold ratio</th><th>Prepared ratio</th><th>Measured at</th></tr>
-<tr><td>64</td><td>0.398x</td><td>0.275x</td><td>2026-10-10T07:10:03.364416+00:00</td></tr><tr><td>64</td><td>0.393x</td><td>0.281x</td><td>2026-10-10T07:11:24.985036+00:00</td></tr><tr><td>64</td><td>0.394x</td><td>0.278x</td><td>2026-10-10T07:16:24.472950+00:00</td></tr><tr><td>192</td><td>0.567x</td><td>0.639x</td><td>2026-10-10T07:12:52.306909+00:00</td></tr><tr><td>256</td><td>0.671x</td><td>0.689x</td><td>2026-10-10T07:12:52.607859+00:00</td></tr><tr><td>384</td><td>1.091x</td><td>1.045x</td><td>2026-10-10T07:12:54.774698+00:00</td></tr><tr><td>384</td><td>1.112x</td><td>1.074x</td><td>2026-10-10T07:16:25.745799+00:00</td></tr><tr><td>768</td><td>5.626x</td><td>7.414x</td><td>2026-10-10T07:14:08.100994+00:00</td></tr><tr><td>1024</td><td>5.190x</td><td>6.820x</td><td>2026-10-10T07:14:09.310983+00:00</td></tr><tr><td>1024</td><td>5.129x</td><td>7.641x</td><td>2026-10-10T07:16:41.597037+00:00</td></tr><tr><td>1152</td><td>5.173x</td><td>7.272x</td><td>2026-10-10T07:14:11.126256+00:00</td></tr></table></div></details>
-<h2>Correctness And References</h2>
-<p>Independent CPU checks across these current paired cases: maximum primal residual
-2.370e-08, stationarity residual 8.476e-09,
-signed-bound normal-cone residual 1.778e-08,
-relative objective error 7.602e-09 and solution error
-3.352e-08. These are approximate numerical checks, not exact certificates.</p>
-<div class="table"><table><tr><th>Variables</th><th>Reference</th><th>Frozen problem hash</th><th>Result</th></tr>
-<tr><td>64</td><td>osqp</td><td>97ef99c672372ccd44b4ab81a81f9714194d818c0d432d7f15f0f3f1c92aae51</td><td>PASS: independent known-KKT quality check</td></tr><tr><td>64</td><td>clarabel</td><td>97ef99c672372ccd44b4ab81a81f9714194d818c0d432d7f15f0f3f1c92aae51</td><td>PASS: independent known-KKT quality check</td></tr><tr><td>384</td><td>osqp</td><td>e4ad8a9e74de127bf90188606d3667cf6c780492baac0e6a15564fcf1374bec6</td><td>PASS: independent known-KKT quality check</td></tr><tr><td>384</td><td>clarabel</td><td>e4ad8a9e74de127bf90188606d3667cf6c780492baac0e6a15564fcf1374bec6</td><td>PASS: independent known-KKT quality check</td></tr><tr><td>1024</td><td>osqp</td><td>1482bdab1a6ca107b223d2c9338f86cc5ae58830c332a7499da77bdd016cda74</td><td>PASS: independent known-KKT quality check</td></tr><tr><td>1024</td><td>clarabel</td><td>1482bdab1a6ca107b223d2c9338f86cc5ae58830c332a7499da77bdd016cda74</td><td>PASS: independent known-KKT quality check</td></tr></table></div>
-<p>OSQP and Clarabel run in a different existing CPU environment against identical frozen
-arrays. Their latencies are retained in raw artifacts, but are deliberately not ranked
-against the cluster CPU/GPU measurements. Gurobi, CPLEX and MOSEK SDKs were unavailable
-in the selected runtime; no matched commercial run occurred. Missing evidence is not a win.</p>
-<h2>Resources And Bottleneck</h2><div class="table"><table>
-<tr><th>Variables</th><th>Node</th><th>GPU mean / peak utilization</th><th>Peak MiB</th><th>Cgroup CPU seconds / window seconds</th></tr>
-<tr><td>64</td><td>h3c2</td><td>36.6 / 53%</td><td>404</td><td>2.807 / 2.247</td></tr><tr><td>384</td><td>h3c2</td><td>38.6 / 85%</td><td>424</td><td>7.003 / 3.669</td></tr><tr><td>1024</td><td>h3c0</td><td>26.9 / 96%</td><td>550</td><td>67.271 / 17.541</td></tr></table></div>
-<p>Resource samples cover the combined CPU/GPU/A-B experiment, including intentional CPU
-control intervals. They do not describe a sustained GPU-only workload. The GPU's visible
-total memory is recorded by the environment probe; allocated memory is not peak capacity.
-No node load average is used as Pod CPU evidence.</p>
-<p>Runtime: NVIDIA RTX PRO 4500 Blackwell, 595.91.07, 32623 MiB; PyTorch 2.13.0+cu130, CUDA
-13.0, compute capability [12, 0];
-NumPy 2.3.5, SciPy 1.18.1.
-Pinned observed image <code>m.daocloud.io/docker.io/lmsysorg/sglang@sha256:4a5d132a06a77c8331e15845f2e925adc788b00105097ad55409afa3f4fa4860</code>.
-Nsight and dependency versions are recorded alongside each source/result hash.</p>
-<div class="table"><table>
-<tr><th>Variables</th><th>Kernel total ms</th><th>Profiled prepared end-to-end ms</th><th>Kernel share</th><th>Kernel events</th></tr>
-<tr><td>64</td><td>5.841</td><td>25.441</td><td>23.0%</td><td>1695</td></tr><tr><td>384</td><td>10.873</td><td>25.739</td><td>42.2%</td><td>1695</td></tr><tr><td>1024</td><td>25.561</td><td>31.488</td><td>81.2%</td><td>1695</td></tr></table></div>
-<p>Nsight profiles a separate optional triangular-path prepared solve including host output.
-The small case spends substantial time outside kernels and launches many tiny kernels.
-The larger case is dominated by repeated triangular solves. Profile overhead means these
-end-to-end durations must not replace unprofiled latency. This establishes actual CUDA
-execution and measured bottlenecks, not a hardware peak-throughput qualification.</p>
-<h2>Controlled Optional Change</h2>
-<p>The optional triangular factor-application path is compared with the original Cholesky
-path plus an identical-config control on the same GPU. The original remains default.
-Per-arm p50/p95, quality and measured noise floor are in the machine-readable summary.
-Switching the option restores the baseline. Small benefits are scoped work values;
-they do not justify an automatic routing or universal acceleration claim.</p>
-<h2>Failures And Parallel Scope</h2><ul><li>submission: observer identity denied Job creation; no Pod created; evidence <code>/3fs/research3fs/data/tmp/openopt-4500/probe-gkc7keyc</code></li><li>container startup: StartError/128: CUDA base has no Python; evidence <code>/3fs/research3fs/data/tmp/openopt-4500/probe-wy6qvauf</code></li><li>smoke: RuntimeError: Nsight capture failed rc=135; see nsys.log; evidence <code>/3fs/research3fs/data/tmp/openopt-4500/smoke-cebpgx8a/case-0/result.json</code></li></ul>
-<p>Each failed execution remains in the ledger. No identical automatic retry was used.
-Subsequent changed configurations required another single-card gate. Larger ladders used
-three independent one-GPU Jobs, with no more than three live cards. This proves parallel
-independent experiments, not strong/weak scaling of a single multi-GPU solve.</p>
-<div class="table"><table><tr><th>Paired confirmation Job</th><th>Node</th><th>Scheduling/startup seconds</th>
-<th>Container wall seconds</th><th>Restarts</th></tr><tr><td>openopt-ladder-y4oiidcn-0</td><td>h3c2</td><td>1.0</td><td>16.0</td><td>0</td></tr><tr><td>openopt-ladder-y4oiidcn-1</td><td>h3c2</td><td>1.0</td><td>18.0</td><td>0</td></tr><tr><td>openopt-ladder-y4oiidcn-2</td><td>h3c0</td><td>1.0</td><td>34.0</td><td>0</td></tr></table></div>
-<p>The paired confirmation stage's observed container makespan is 34.0
-seconds versus 68.0 summed container-seconds. These container intervals include
-imports, experiment repetitions, profiling and output; they do not substitute for
-solver latency. Different-sized problems have different costs, so this is not a balanced
-three-card throughput claim. Current read 2026-10-10T07:29:16.415801+00:00 found
-4 Ready nodes and 0 active
-openopt Pods. Failed Job evidence is retained.</p>
-<h2>Verification And Remaining Work</h2>
-<p>Full regression artifact: 1111 tests, 0 failures,
-0 errors, 28 skips, finished 2026-10-10T07:24:11.929093+00:00.
-This test environment is not the formal cluster performance environment.
-Formal explicit-device CUDA regression on h3c2: 7 tests,
-0 failures, 0 errors,
-0 skips, collected 2026-10-10T07:20:31.671249+00:00.
-Final smoke: 81 tests, 0 failures, 0 errors, 0 skips, finished 2026-10-10T07:26:46.133412+00:00.
-Wheel acceptance: PASS, 49 modules, license expression
-0BSD, license payload verified True.</p>
-<p>Unsupported/unqualified: sparse and matrix-free operators, presolve/scaling, infeasible
-and unbounded certificates, nonconvex/global optimization, conic and mixed-integer scope,
-representative ill-conditioned/degenerate corpora, licensed commercial parity, hardware
-lower bounds, real multi-GPU scaling and production SLAs. See <a href="qp-design.md">design boundary</a>.</p>
-<h2>Evidence And Reproduction</h2>
-<p>Bundle <code>/3fs/research3fs/data/tmp/openopt-4500/report-bundle.json</code>; all raw results, frozen arrays, source
-hashes, GPU/cgroup telemetry and Nsight reports remain outside Git on shared storage.
-The generator validates matching hashes for references, nonempty quality data and
-passing run artifacts before rendering. Re-running from identical evidence produces
-identical page bytes. This report has not been published online: no openopt entry
-exists in the current shared publication configuration.</p><ul><li>64 variables: <code>97ef99c672372ccd44b4ab81a81f9714194d818c0d432d7f15f0f3f1c92aae51</code>; <code>/3fs/research3fs/data/tmp/openopt-4500/ladder-y4oiidcn/case-0/result.json</code></li><li>384 variables: <code>e4ad8a9e74de127bf90188606d3667cf6c780492baac0e6a15564fcf1374bec6</code>; <code>/3fs/research3fs/data/tmp/openopt-4500/ladder-y4oiidcn/case-1/result.json</code></li><li>1024 variables: <code>1482bdab1a6ca107b223d2c9338f86cc5ae58830c332a7499da77bdd016cda74</code>; <code>/3fs/research3fs/data/tmp/openopt-4500/ladder-y4oiidcn/case-2/result.json</code></li></ul>
-
-<footer>Last modified: 2026-10-10 15:30:06 +08:00<br>Generated by scripts/render_qp_report.py from external evidence.
-<a href="design-v2.html">Design</a> / <a href="benchmark-report-v2.html">Measurements</a> /
+<option value="benchmark-report-v1.html">v1: historical foundation</option><option value="benchmark-report-v2.html">v2: historical dense experiment</option><option value="benchmark-report-v3.html" selected>v3: independent QP campaign</option></select></label><noscript>
+<a href="benchmark-report-v1.html">v1</a> / <a href="benchmark-report-v2.html">v2</a> /
+<a href="benchmark-report-v3.html">Current v3</a></noscript><h1>Openopt / v3 实测与商用差距</h1>
+<p><strong>尚不能证明全面胜过顶尖商用优化器。</strong>本轮有实测批量收益，
+但它只相对本项目的逐题 GPU 执行；商用许可同题实测仍未验证。</p>
+<p>8 个独立职责的写集均已审计通过，工具实际同时在飞上限为六席，完成后补位。
+主代理统一投递，GPU 同时不超过三张。独立回读共检查
+883 条候选解；不以自报 PASS 替代验收。</p>
+<h2>批量收益</h2><p>同形状稠密 QP，八份相同题目；比较一批求解与八次逐题执行，
+不是异构题库、商用加速或单题多 GPU。冷求解加速范围
+2.53x 至 4.58x。每组各臂的样本数、
+逐题状态和独立残差均在不可变证据中。冷计时包含模型校验、传输和求解；
+prepared 为复用准备状态。独立 CPU 验收在计时区间外，不把它算进加速比。</p>
+<figure><svg viewBox="0 0 900 334" role="img" aria-label="批量 cold 中位延迟，越低越好"><text x="5" y="22">批量 cold 中位延迟，越低越好</text><text x="5" y="57" font-size="14">64变量 / 逐题</text><rect x="245" y="40" width="422.97" height="23" fill="#18362f"/><text x="677.97" y="57" font-size="14">145.941 ms</text><text x="5" y="101" font-size="14">64变量 / 批量</text><rect x="245" y="84" width="92.28" height="23" fill="#bb4c24"/><text x="347.28" y="101" font-size="14">31.840 ms</text><text x="5" y="145" font-size="14">128变量 / 逐题</text><rect x="245" y="128" width="470.00" height="23" fill="#18362f"/><text x="725.00" y="145" font-size="14">162.169 ms</text><text x="5" y="189" font-size="14">128变量 / 批量</text><rect x="245" y="172" width="110.47" height="23" fill="#bb4c24"/><text x="365.47" y="189" font-size="14">38.115 ms</text><text x="5" y="233" font-size="14">256变量 / 逐题</text><rect x="245" y="216" width="406.66" height="23" fill="#18362f"/><text x="661.66" y="233" font-size="14">140.315 ms</text><text x="5" y="277" font-size="14">256变量 / 批量</text><rect x="245" y="260" width="160.80" height="23" fill="#bb4c24"/><text x="415.80" y="277" font-size="14">55.482 ms</text></svg><figcaption>批量 cold 中位延迟，越低越好，每根柱来自原始记录，不作跨机排名。</figcaption></figure><figure><svg viewBox="0 0 900 334" role="img" aria-label="批量 prepared 中位延迟，越低越好"><text x="5" y="22">批量 prepared 中位延迟，越低越好</text><text x="5" y="57" font-size="14">64变量 / 逐题</text><rect x="245" y="40" width="468.96" height="23" fill="#18362f"/><text x="723.96" y="57" font-size="14">132.393 ms</text><text x="5" y="101" font-size="14">64变量 / 批量</text><rect x="245" y="84" width="103.21" height="23" fill="#bb4c24"/><text x="358.21" y="101" font-size="14">29.138 ms</text><text x="5" y="145" font-size="14">128变量 / 逐题</text><rect x="245" y="128" width="470.00" height="23" fill="#18362f"/><text x="725.00" y="145" font-size="14">132.686 ms</text><text x="5" y="189" font-size="14">128变量 / 批量</text><rect x="245" y="172" width="116.29" height="23" fill="#bb4c24"/><text x="371.29" y="189" font-size="14">32.829 ms</text><text x="5" y="233" font-size="14">256变量 / 逐题</text><rect x="245" y="216" width="316.90" height="23" fill="#18362f"/><text x="571.90" y="233" font-size="14">89.464 ms</text><text x="5" y="277" font-size="14">256变量 / 批量</text><rect x="245" y="260" width="132.77" height="23" fill="#bb4c24"/><text x="387.77" y="277" font-size="14">37.482 ms</text></svg><figcaption>批量 prepared 中位延迟，越低越好，每根柱来自原始记录，不作跨机排名。</figcaption></figure><h2>负收益与未证实收益</h2><figure><svg viewBox="0 0 900 246" role="img" aria-label="adaptive / 1024变量：同题路径工作值"><text x="5" y="22">adaptive / 1024变量：同题路径工作值</text><text x="5" y="57" font-size="14">冷 / 默认</text><rect x="245" y="40" width="468.68" height="23" fill="#18362f"/><text x="723.68" y="57" font-size="14">59.031 ms</text><text x="5" y="101" font-size="14">冷 / 可选</text><rect x="245" y="84" width="470.00" height="23" fill="#bb4c24"/><text x="725.00" y="101" font-size="14">59.198 ms</text><text x="5" y="145" font-size="14">prepared / 默认</text><rect x="245" y="128" width="229.82" height="23" fill="#18362f"/><text x="484.82" y="145" font-size="14">28.946 ms</text><text x="5" y="189" font-size="14">prepared / 可选</text><rect x="245" y="172" width="229.56" height="23" fill="#bb4c24"/><text x="484.56" y="189" font-size="14">28.914 ms</text></svg><figcaption>adaptive / 1024变量：同题路径工作值，每根柱来自原始记录，不作跨机排名。</figcaption></figure><p>自适应路径本题差异在实测对照噪声内，不宣称提速。默认关闭。</p><figure><svg viewBox="0 0 900 246" role="img" aria-label="operators / 128变量：同题路径工作值"><text x="5" y="22">operators / 128变量：同题路径工作值</text><text x="5" y="57" font-size="14">冷 / 默认</text><rect x="245" y="40" width="19.43" height="23" fill="#18362f"/><text x="274.43" y="57" font-size="14">8.698 ms</text><text x="5" y="101" font-size="14">冷 / 可选</text><rect x="245" y="84" width="470.00" height="23" fill="#bb4c24"/><text x="725.00" y="101" font-size="14">210.365 ms</text><text x="5" y="145" font-size="14">prepared / 默认</text><rect x="245" y="128" width="12.75" height="23" fill="#18362f"/><text x="267.75" y="145" font-size="14">5.705 ms</text><text x="5" y="189" font-size="14">prepared / 可选</text><rect x="245" y="172" width="428.76" height="23" fill="#bb4c24"/><text x="683.76" y="189" font-size="14">191.907 ms</text></svg><figcaption>operators / 128变量：同题路径工作值，每根柱来自原始记录，不作跨机排名。</figcaption></figure><p>当前稀疏 CG 小题明显更慢。它使用调用者 PSD 声明，与稠密全谱验证不等价，不作资格排名、不启用自动路由。Nsight 显示大量微小 kernel、主机同步与检查开销。</p><h2>同机 CPU 参考</h2><figure><svg viewBox="0 0 900 202" role="img" aria-label="384变量 / 4线程 / cold"><text x="5" y="22">384变量 / 4线程 / cold</text><text x="5" y="57" font-size="14">openopt:cpu:baseline</text><rect x="245" y="40" width="17.87" height="23" fill="#18362f"/><text x="272.87" y="57" font-size="14">34.876 ms</text><text x="5" y="101" font-size="14">osqp</text><rect x="245" y="84" width="61.93" height="23" fill="#bb4c24"/><text x="316.93" y="101" font-size="14">120.892 ms</text><text x="5" y="145" font-size="14">clarabel</text><rect x="245" y="128" width="470.00" height="23" fill="#18362f"/><text x="725.00" y="145" font-size="14">917.499 ms</text></svg><figcaption>384变量 / 4线程 / cold，每根柱来自原始记录，不作跨机排名。</figcaption></figure><figure><svg viewBox="0 0 900 202" role="img" aria-label="64变量 / 1线程 / cold"><text x="5" y="22">64变量 / 1线程 / cold</text><text x="5" y="57" font-size="14">openopt:cpu:baseline</text><rect x="245" y="40" width="470.00" height="23" fill="#18362f"/><text x="725.00" y="57" font-size="14">15.252 ms</text><text x="5" y="101" font-size="14">osqp</text><rect x="245" y="84" width="195.94" height="23" fill="#bb4c24"/><text x="450.94" y="101" font-size="14">6.358 ms</text><text x="5" y="145" font-size="14">clarabel</text><rect x="245" y="128" width="288.97" height="23" fill="#18362f"/><text x="543.97" y="145" font-size="14">9.377 ms</text></svg><figcaption>64变量 / 1线程 / cold，每根柱来自原始记录，不作跨机排名。</figcaption></figure><p>只展示同机同题原坐标精度通过的工作值，不能与集群 GPU 跨机拼加速比。不同尺寸方向不同，单题不能外推整个优化领域。</p><h2>压力题资格</h2><figure><svg viewBox="0 0 900 202" role="img" aria-label="合成压力题合格数，不是工业题库排名"><text x="5" y="22">合成压力题合格数，不是工业题库排名</text><text x="5" y="57" font-size="14">openopt</text><rect x="245" y="40" width="352.50" height="23" fill="#18362f"/><text x="607.50" y="57" font-size="14">18.000 题</text><text x="5" y="101" font-size="14">osqp</text><rect x="245" y="84" width="430.83" height="23" fill="#bb4c24"/><text x="685.83" y="101" font-size="14">22.000 题</text><text x="5" y="145" font-size="14">clarabel</text><rect x="245" y="128" width="470.00" height="23" fill="#18362f"/><text x="725.00" y="145" font-size="14">24.000 题</text></svg><figcaption>合成压力题合格数，不是工业题库排名，每根柱来自原始记录，不作跨机排名。</figcaption></figure><p>openopt：18 合格 / 24 尝试；osqp：22 合格 / 24 尝试；clarabel：24 合格 / 24 尝试。</p><p>Openopt 的不可行/无界模型仍返回迭代上限，没有生成可验证方向。独立方向检查器已实现，但不能替代方向生成。OSQP 两项原证书失败已定位为单独的证书容差，收紧后的诊断对照通过；不追改原结果。奇异、冗余、病态等仅覆盖合成族。</p><h2>资源与瓶颈</h2><div class='table'><table><tr><th>模式/变量</th><th>GPU均值/峰值%</th><th>峰值MiB</th><th>CPU核数均值</th><th>kernel ms / profile端到端ms / 占比%</th></tr><tr><td>batch/64</td><td>37.6/57</td><td>426</td><td>1.08</td><td>19.614/48.838/40.2</td></tr><tr><td>batch/128</td><td>38.6/67</td><td>432</td><td>1.11</td><td>30.955/50.078/61.8</td></tr><tr><td>batch/256</td><td>51.5/71</td><td>506</td><td>1.17</td><td>35.919/39.637/90.6</td></tr><tr><td>adaptive/1024</td><td>53.4/92</td><td>570</td><td>3.36</td><td>25.829/30.238/85.4</td></tr><tr><td>operators/128</td><td>16.1/25</td><td>424</td><td>1.14</td><td>17.957/305.966/5.9</td></tr></table></div><p>资源来自 Pod 生命周期内采样，包含初始化及剖析阶段，不能当持续饱和吞吐。profile 是独立求解，含剖析开销，不能替代无剖析延迟。批量主要仍花在三角求解；稀疏主要受小 kernel 与同步开销影响。硬件理论下界、持续饱和吞吐、真实多 GPU 算法缩放仍未验证。</p><p>现场保留 2 个历史失败任务，当前 cordon 0，API readiness 已通过；失败未删除、未冒充新实验成功。</p><p>批量阶梯实际计算并发峰值 1 个 Pod，从首个启动至末个结束 65.0 秒；任务一起提交不代表三卡同时计算，不宣称调度或多 GPU 缩放收益。</p><h2>验证与交付边界</h2><p>完整 CPU 回归：1515通过、30跳过；随后定向门 92 项通过。独立 CUDA 专项 165 项、零跳过。隔离 wheel：53 模块、许可证 0BSD，现场快照 2026-10-10T08:15:11.287857+00:00：4节点 Ready、0占用任务。</p><p>本轮新增：可选 rho 自适应、逐项批量、稀疏/矩阵自由 CG、独立数值证据检查、合成压力题、公平对照和封存验收。修复目标/残差溢出误报。仍缺：成熟 presolve/缩放/预条件/精度修复、可靠方向生成与目标 gap 停止、广泛公开/工业题库、SOCP及更多锥、MILP/MIQP完整求解、许可商用同题对照、最佳 CPU/GPU 基线与部署级长期可靠性。项目0BSD不替依赖重新许可。</p><p>本页仅仓内交付，未线上发布；不修改 infra 发布入口。早期缺状态/题目快照的 GPU 件及所有失败均保留，但被独立门拒绝。历史 v2 对应旧源，不用当前核心冒充其原测量。</p><h2>证据入口</h2><p>本页输入 <code>/3fs/research3fs/data/tmp/openopt-campaign/report-inputs-vh_vo_ou/bundle.json</code>；SHA256 <code>97cf09d4f11b8cc4f8adc8ec0420b233bb5dc3627a17cb38ab3b66fc909cde26</code>。</p><details><summary>封存与核验来源</summary><ul><li><code>/3fs/research3fs/data/tmp/openopt-campaign/latest-batch-check/check-2zu2_f8c/acceptance.json</code><br>bundle pin <code>f51e739b7ff0b938684ad7a06f1ed84a0b0986f07eebe92e5e2d6088e5ff3d30</code></li><li><code>/3fs/research3fs/data/tmp/openopt-campaign/latest-main-check/check-sjk5dkcq/acceptance.json</code><br>bundle pin <code>61022d8ca2c0fbcaf362966aaee55af1ce94c54e89f7eed6c672f91d7e80e4da</code></li><li><code>/3fs/research3fs/data/tmp/openopt-campaign/latest-cpu-check/check-p3dled5x/acceptance.json</code><br>bundle pin <code>eab880c8825f297a195febced6729cda672aa57cb57c09bf6362c585ad6f3191</code></li><li><code>/3fs/research3fs/data/tmp/openopt-campaign/latest-cpu64-check/check-hkahm7wp/acceptance.json</code><br>bundle pin <code>412738e4fae65f021440cc4edd57d3f68e874f06229fb40540f02333a0bc8836</code></li></ul></details><p><a href='research/commercial-gap.md'>商用能力调研及官方来源</a> / <a href='qp-design.md'>算法边界</a> / <a href='research/acceptance.md'>独立验收合同</a></p>
+<footer>Last modified: 2026-10-10 16:21:26 +08:00<br>Generated by scripts/render_qp_campaign.py from external evidence.
+<a href="design-v3.html">Design</a> / <a href="benchmark-report-v3.html">Measurements</a> /
 <a href="BACKLOG.md">Remaining work</a></footer></main></body></html>

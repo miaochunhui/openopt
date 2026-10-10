@@ -38,10 +38,24 @@ The product target and release gates are in `strategy.html`.
    reproducible commercial/GPU qualification. No license server or SDK is
    bundled; commercial benchmark execution requires authorized installations.
 
+## Current Research Extensions
+
+Optional residual-balanced rho, per-item dense batching, sparse/matrix-free CG,
+independent candidate/direction evidence checks and a reproducible synthetic
+stress corpus are implemented. Independent sealed evidence replay checks
+statuses, all host solutions, parameters, source membership and negative
+controls. These extensions do not close commercial qualification.
+
+Current evidence is linked by the generated v3 report. The earlier v2 experiment
+is historical, byte-frozen evidence; its original source is not replaced.
+The actual native subagent limit was six; all eight scoped seats were executed
+with completion/refill, never claimed as eight simultaneous agents.
+
 ## Explicit Non-Claims
 
-- No universal `minimize`, sparse/conic/MIP backend or infeasibility/unboundedness
-  certificate is implemented; the dense QP API is experimental.
+- No universal `minimize`, conic/MIP backend or solver-generated
+  infeasibility/unboundedness certificate is implemented. Sparse operators and
+  supplied numerical direction checking are experimental, not exact proof.
 - No universal GPU speedup or production qualification is asserted.
 - No commercial solver parity or world-leading ranking is asserted.
 - The user authorized this experiment's K8s Jobs with at most three 4500 cards.
@@ -50,9 +64,10 @@ The product target and release gates are in `strategy.html`.
 
 ## Current Experiment
 
-The 4500 experiment and failures are recorded externally under
-`/hf3fs-jd/data/tmp/openopt-4500/`. `scripts/render_qp_report.py` generates current
-design and benchmark pages from accepted result/verification artifacts.
+The earlier 4500 experiment and failures are recorded externally under
+`/hf3fs-jd/data/tmp/openopt-4500/`. `scripts/render_qp_campaign.py` generates the
+current v3 design and benchmark pages; `scripts/render_qp_report.py` preserves
+the historical reports from their frozen evidence.
 Model-cold and prepared timings are separate. Comparisons to the project's CPU
 prototype do not establish performance against OSQP/Clarabel/commercial solvers.
 Three independent one-card Jobs do not establish a multi-GPU solver.

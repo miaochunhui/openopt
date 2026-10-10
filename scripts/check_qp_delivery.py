@@ -42,10 +42,16 @@ class Links(HTMLParser):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bundle", type=Path, required=True)
+    parser.add_argument("--campaign", action="store_true", help="accept generated v3 campaign pages")
     parser.add_argument("--source", type=Path, nargs="+", required=True)
     args = parser.parse_args()
-    pages = generate(args.bundle)
-    if pages != generate(args.bundle):
+    if args.campaign:
+        from render_qp_campaign import generate as campaign_generate
+        generator = campaign_generate
+    else:
+        generator = generate
+    pages = generator(args.bundle)
+    if pages != generator(args.bundle):
         raise ValueError("report generation is not deterministic")
     for path, expected in pages.items():
         if not path.is_file() or path.read_text() != expected:
@@ -73,9 +79,17 @@ def main():
     negatives = 0
     with tempfile.TemporaryDirectory(prefix="report-negatives-", dir=root) as tmp:
         tmp = Path(tmp)
-        for name in ("failed_regression", "missing_pairs", "mismatched_reference"):
+        names = ("changed_input", "wrong_pin", "missing_acceptance") if args.campaign else (
+            "failed_regression", "missing_pairs", "mismatched_reference")
+        for name in names:
             bundle = json.loads(json.dumps(original))
             fixture = tmp / f"{name}.json"
+            if name == "changed_input":
+                bundle["verification"]["sha256"] = "0" * 64
+            if name == "wrong_pin":
+                bundle["acceptances"][0]["pin"] = "0" * 64
+            if name == "missing_acceptance":
+                bundle["acceptances"] = []
             if name == "failed_regression":
                 bad = tmp / "failed-verification.json"
                 bad.write_text(json.dumps({"verdict": "FAIL"}))
@@ -90,7 +104,7 @@ def main():
                 bundle["reference_results"][0] = str(bad)
             fixture.write_text(json.dumps(bundle))
             try:
-                generate(fixture)
+                generator(fixture)
             except ValueError:
                 negatives += 1
             else:

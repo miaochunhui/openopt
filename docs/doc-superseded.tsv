@@ -1,3 +1,5 @@
 # historical	current	reason
 design-v1.html	design-v2.html	Experimental dense QP implementation and live evidence
 benchmark-report-v1.html	benchmark-report-v2.html	4500 paired measurement replaces foundation-only status
+design-v2.html	design-v3.html	Optional QP paths and independent evidence replay
+benchmark-report-v2.html	benchmark-report-v3.html	New source campaign; old measurements remain historical

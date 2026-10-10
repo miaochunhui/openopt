@@ -79,7 +79,12 @@ from openopt import QPProblem, QPConfig, solve_qp, prepare_qp
 result = solve_qp(QPProblem(P, q, A, l, u), QPConfig(device="cuda:0"))
 ```
 
-There is no universal `openopt.minimize`, sparse/conic/MIP backend, or
+Optional research APIs now include same-shape batched QPs, sparse/matrix-free
+operators with checked CG, residual-balanced rho and independent numerical
+evidence checks. They are opt-in and remain experimental.
+See [the v3 measured report](docs/benchmark-report-v3.html) for scoped batch
+benefit, negative results, independent acceptance and remaining commercial gaps.
+There is no universal `openopt.minimize`, conic/MIP backend, or solver-generated
 infeasible/unbounded certificate. See [the exact boundary](docs/qp-design.md).
 GPU acceleration is not automatically preferable: small problems measured
 slower on GPU. Explicit requests never silently fall back.
