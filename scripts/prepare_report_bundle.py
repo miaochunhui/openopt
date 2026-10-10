@@ -4,8 +4,25 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 from pathlib import Path
+
+
+def freeze_evidence(source: Path, root: Path) -> Path:
+    """Content-address an evidence read so later live refreshes cannot change it."""
+    payload = source.read_bytes()
+    digest = hashlib.sha256(payload).hexdigest()
+    directory = root / "report-inputs"
+    directory.mkdir(parents=True, exist_ok=True)
+    destination = directory / f"{digest}.json"
+    if destination.exists():
+        if destination.read_bytes() != payload:
+            raise ValueError("content-addressed evidence mismatch")
+    else:
+        with destination.open("xb") as handle:
+            handle.write(payload)
+    return destination
 
 
 def main():
@@ -29,7 +46,7 @@ def main():
         "verification": str(args.verification), "wheel": str(args.wheel),
         "cuda_regression": str(args.cuda_regression),
         "final_smoke": str(args.final_smoke) if args.final_smoke else None,
-        "final_snapshot": str(args.final_snapshot),
+        "final_snapshot": str(freeze_evidence(args.final_snapshot, args.root)),
         "environment_probe": str(args.environment_probe),
         "failures": [],
         "run_records": [],

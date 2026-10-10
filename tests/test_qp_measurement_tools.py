@@ -8,6 +8,7 @@ import torch
 
 from scripts.benchmark_general_qp import generate, quality, latency
 from scripts.summarize_qp_benchmark import summary, nsight_summary
+from scripts.prepare_report_bundle import freeze_evidence
 
 
 def test_known_kkt_witness_and_three_quality_mutations():
@@ -60,3 +61,25 @@ def test_nsight_ruler_uses_nonempty_event_counts(tmp_path):
     assert result["kernel_total_s"] == 0.001
     assert result["kernel_instances"] == 2
     assert result["top_api"][0]["calls"] == 3
+
+
+def test_live_snapshot_refresh_cannot_change_report_evidence(tmp_path):
+    live = tmp_path / "live.json"
+    original = b'{"verdict":"PASS","read_at":"first"}\n'
+    live.write_bytes(original)
+    frozen = freeze_evidence(live, tmp_path)
+    assert frozen.read_bytes() == original
+    live.write_bytes(b'{"verdict":"PASS","read_at":"second"}\n')
+    assert frozen.read_bytes() == original
+    refreshed = freeze_evidence(live, tmp_path)
+    assert refreshed != frozen
+    assert refreshed.read_bytes() == live.read_bytes()
+
+
+def test_corrupted_content_addressed_evidence_is_rejected(tmp_path):
+    live = tmp_path / "live.json"
+    live.write_text('{"verdict":"PASS"}')
+    frozen = freeze_evidence(live, tmp_path)
+    frozen.write_text("intentionally corrupted")
+    with pytest.raises(ValueError, match="evidence mismatch"):
+        freeze_evidence(live, tmp_path)

@@ -8,6 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -80,9 +81,18 @@ def main():
         "failed_jobs": [job["metadata"]["name"] for job in jobs["items"] if job.get("status", {}).get("failed", 0)],
         "failures": "retained original startup/profiling failures; see diagnosis and ledger",
     }
-    (args.bundle.parent / "final-snapshot.json").write_text(json.dumps(report, indent=2) + "\n")
+    # Live readouts must not mutate evidence consumed by an already-built page.
+    directory = args.bundle.parent / "live-snapshots"
+    directory.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w", prefix="snapshot-", suffix=".json", dir=directory, delete=False,
+    ) as handle:
+        json.dump(report, handle, indent=2)
+        handle.write("\n")
+        path = Path(handle.name)
     print(f"QP_FINAL verdict=PASS read_at={report['read_at']} ready_nodes={len(ready)} "
-          f"active_cards=0 measured_source_match=true retained_failed_jobs={len(report['failed_jobs'])}")
+          f"active_cards=0 measured_source_match=true retained_failed_jobs={len(report['failed_jobs'])} "
+          f"snapshot={path}")
 
 
 if __name__ == "__main__":

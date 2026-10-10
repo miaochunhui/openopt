@@ -51,3 +51,17 @@ Further one-card A/B smoke passed before the three-card independent ladders.
 All subsequent ladder, paired-confirmation and explicit-CUDA regression Jobs
 completed. The two failed Jobs are retained, not deleted; collection records
 preserve their original terminal states and logs.
+
+Post-commit acceptance found a report-input race: rendering and a live cluster
+refresh ran concurrently against `final-snapshot.json`. The renderer correctly
+rejected unequal same-source outputs. This is a reporting bug, not a numerical
+or GPU execution failure. Fix: freeze the selected snapshot by content hash when
+building a report bundle; each subsequent live inspection writes a new unique
+artifact instead of replacing report input. Tests simulate live refresh and
+reject corrupted content-addressed evidence. Re-render and live refresh must
+both pass before this issue is closed.
+
+Repair acceptance at 2026-10-10T07:30:24 UTC: concurrent report `--check`
+and live cluster read both passed; the report bundle hash was unchanged.
+The snapshot refresh/corruption tests passed with nine measurement-tool tests.
+The numerical core remains byte-identical to the paired cluster measurement.
