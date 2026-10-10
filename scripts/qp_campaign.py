@@ -107,6 +107,16 @@ def failure_attribution(pod: dict, recoveries: list[dict]) -> tuple[str, str]:
     return "UNKNOWN", "unattributed failure"
 
 
+def pod_identity(pod: dict, job: str) -> dict:
+    owners = [entry for entry in pod["metadata"].get("ownerReferences", [])
+              if entry.get("controller") is True]
+    if (len(owners) != 1 or owners[0].get("name") != job or not owners[0].get("uid")
+            or not pod["metadata"].get("uid") or not pod["metadata"].get("name")):
+        raise ValueError("live Pod requires exact actual Job controller and Pod identity")
+    return {"pod": pod["metadata"]["name"], "pod_uid": pod["metadata"]["uid"],
+            "job_uid": owners[0]["uid"]}
+
+
 def live(namespace: str, artifact_root: Path, result_paths: list[Path],
          recovery_pins: list[tuple[Path, str]] | None = None) -> None:
     if __package__:
@@ -143,8 +153,10 @@ def live(namespace: str, artifact_root: Path, result_paths: list[Path],
         owner, cause = failure_attribution(pod, recoveries)
         retained_failures.append({
             "job": job, "owner": owner, "cause": cause,
+            **pod_identity(pod, job),
             "containers": [{"termination": state["state"].get("terminated"),
-                            "restart_count": state["restartCount"]} for state in states],
+                            "restart_count": state["restartCount"],
+                            "image_id": state.get("imageID")} for state in states],
         })
     evidence = []
     for result_path in result_paths:
@@ -159,6 +171,7 @@ def live(namespace: str, artifact_root: Path, result_paths: list[Path],
                 raise RuntimeError(f"measured source mismatch: {relative}")
         evidence.append({
             "result": str(result_path), "job": item["job"], "node": pod["spec"]["nodeName"],
+            **pod_identity(pod, item["job"]),
             "started_at": terminal["startedAt"], "finished_at": terminal["finishedAt"],
             "created_at": pod["metadata"]["creationTimestamp"],
             "image_id": pod["status"]["containerStatuses"][0]["imageID"],
