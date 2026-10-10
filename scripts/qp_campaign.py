@@ -81,7 +81,40 @@ def audit(manifest: Path) -> None:
     print(f"QP_CAMPAIGN_AUDIT verdict=PASS seats={len(results)} evidence={output}")
 
 
-def live(namespace: str, artifact_root: Path, result_paths: list[Path]) -> None:
+def failure_attribution(pod: dict, recoveries: list[dict]) -> tuple[str, str]:
+    job = pod["metadata"]["labels"].get("job-name")
+    historical = {
+        "openopt-probe-wy6qvauf-0": "Historical preflight: selected CUDA image had no Python; changed-image probe passed.",
+        "openopt-smoke-cebpgx8a-0": "Historical Nsight FUSE scratch failure; local shared-memory scratch smoke passed.",
+    }
+    if job in historical:
+        return "openopt earlier 4500 experiment", historical[job]
+    for recovery in recoveries:
+        failed = recovery["failed"]
+        states = pod["status"].get("containerStatuses", [])
+        if (
+            pod["metadata"].get("uid") == failed["pod_uid"]
+            and pod["metadata"]["name"] == failed["pod"]
+            and job == failed["job"]
+            and pod["metadata"]["labels"].get("owner") == recovery["owner"]
+            and any(owner.get("controller") is True
+                    and owner.get("uid") == failed["job_uid"]
+                    for owner in pod["metadata"].get("ownerReferences", []))
+            and len(states) == 1 and states[0]["restartCount"] == 0
+            and states[0]["state"].get("terminated", {}).get("exitCode") == failed["exit_code"]
+        ):
+            return recovery["owner"], recovery["cause"]
+    return "UNKNOWN", "unattributed failure"
+
+
+def live(namespace: str, artifact_root: Path, result_paths: list[Path],
+         recovery_pins: list[tuple[Path, str]] | None = None) -> None:
+    if __package__:
+        from .verify_cluster_recovery import verify as verify_recovery
+    else:
+        from verify_cluster_recovery import verify as verify_recovery
+
+    recoveries = [verify_recovery(path, pin) for path, pin in (recovery_pins or [])]
     def read_resource(*args: str) -> dict:
         completed = subprocess.run(
             ["kubectl", *args, "-o", "json"], capture_output=True, text=True,
@@ -102,18 +135,14 @@ def live(namespace: str, artifact_root: Path, result_paths: list[Path]) -> None:
                 if node["spec"].get("unschedulable", False)]
     active = [p["metadata"]["name"] for p in pods["items"] if p["status"]["phase"] in ("Pending", "Running")]
     retained_failures = []
-    historical = {
-        "openopt-probe-wy6qvauf-0": "Historical preflight: selected CUDA image had no Python; changed-image probe passed.",
-        "openopt-smoke-cebpgx8a-0": "Historical Nsight FUSE scratch failure; local shared-memory scratch smoke passed.",
-    }
     for pod in pods["items"]:
         if pod["status"]["phase"] != "Failed":
             continue
         job = pod["metadata"]["labels"].get("job-name")
         states = pod["status"].get("containerStatuses", [])
+        owner, cause = failure_attribution(pod, recoveries)
         retained_failures.append({
-            "job": job, "owner": "openopt earlier 4500 experiment" if job in historical else "UNKNOWN",
-            "cause": historical.get(job, "unattributed failure"),
+            "job": job, "owner": owner, "cause": cause,
             "containers": [{"termination": state["state"].get("terminated"),
                             "restart_count": state["restartCount"]} for state in states],
         })
@@ -144,6 +173,8 @@ def live(namespace: str, artifact_root: Path, result_paths: list[Path]) -> None:
         "read_at": datetime.now(timezone.utc).isoformat(), "ready": ready, "active": active,
         "measurements": evidence, "cordoned": cordoned, "apiserver_ready": True,
         "retained_failures": retained_failures,
+        "recovery_reports": [{"path": str(path), "sha256": pin}
+                             for path, pin in (recovery_pins or [])],
     }
     path = artifact_root / f"live-{datetime.now(timezone.utc).strftime('%H%M%S%f')}.json"
     path.write_text(json.dumps(report, indent=2) + "\n")
@@ -165,11 +196,14 @@ def main() -> None:
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--namespace", default="devtest")
     parser.add_argument("--result", type=Path, action="append", default=[])
+    parser.add_argument("--recovery", nargs=2, action="append", default=[],
+                        metavar=("REPORT", "SHA256"))
     args = parser.parse_args()
     if args.action == "setup":
         setup(args.name, args.artifact_root)
     elif args.action == "live":
-        live(args.namespace, args.artifact_root, args.result)
+        live(args.namespace, args.artifact_root, args.result,
+             [(Path(path), pin) for path, pin in args.recovery])
     elif args.manifest is None:
         parser.error("audit requires --manifest")
     else:
