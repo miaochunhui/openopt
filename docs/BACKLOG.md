@@ -109,24 +109,32 @@ Current detailed handoff: `handoff/release4-20261010.md`. The v4 renderer is
 implemented and independently reviewed, but its current external report is
 an intermediate historical-source projection, not final release acceptance.
 
-- Main integrator: freeze current RSOC and reviewed guard sources, run clean
-  independent CPU checks, then fresh K8s CUDA replay and wheel acceptance.
-  Eleven extreme-coordinate RSOC counterexamples were retained and repaired;
-  the latest development three-file suite is 276 passed/19 CUDA skips.
-- Checker developer and independent mathematical reviewer: close the
-  reproducible v1 rounded-zero/nonconvex false acceptance. Repair v2 is locally
-  committed separately; original independent tests are unchanged, but the
-  main tree has not integrated it and independent signoff is still pending.
-  Its GPU admission remains stopped until that signoff and clean integration.
-- Regression coordinator: integrate fixture-aware sharding only after its
-  dependency/metadata proof and cost gate pass. Whole-file outer proof
-  remains above 300 seconds; the three independently validated groups are
-  bounded, not permission to split a shared fixture component arbitrarily.
-  Cluster v2 fixture audit transport is not yet implemented.
-- Public qualification owner: fixed-primal LP postsolve is committed only
-  in an independent worktree; fresh real-model behavior is unverified.
-  New refinement settings require a versioned complete worker contract.
-  Old Openopt/OSQP failures and instance redistribution restrictions remain.
+- Accepted baseline `c0565b0`: separate 76 real RTX PRO 4500 regressions and
+  independent original-coordinate replay; unchanged 28-node independent
+  suite passes after retained nine false accepts were repaired. Main smoke
+  is 80 pass/four local-CUDA skips. Fixed thirteen has actual execution but
+  still needs Nash's dedicated independent numerical auditor.
+- Accepted distribution: clean producer and independent 22-node review
+  pass, with genuine standard installed CLI and original LP/QP checks.
+  Main rebuilt clean wheel passes source membership/bytes/0BSD and numerical
+  probes. This is CPU distribution acceptance, not all-model/GPU/commercial
+  qualification. Original failed wheel and reviewer oracle failure remain.
+- Regression coordinator: cluster fixture-v2 transport is implemented but
+  archived execution had four independently reproduced false accepts on
+  `ba675eb` and `9c46c8e`. Mendel repaired production at clean `8beb931`;
+  Helmholtz is replaying Nash's unchanged negatives. Until independent green,
+  do not admit related cluster full regression. Shared-component cost and
+  current-source whole-regression remain separate unfinished gates.
+- Public qualification owner Darwin: prior `a668d72` v3 preview has zero
+  solves. Actual executable v3 settings/runtime/thread/source contract and
+  bounded synthetic real solves are now in development, with Herschel's
+  separate independent review. Real public robustness and redistribution
+  restrictions are not closed by synthetic contract tests.
+- Native bounded MIQP owner Bacon: new independent three-file implementation
+  from `acc1993`, small finite boxes and exact PSD sufficient subset,
+  disclosed host verification and strict device semantics. It remains
+  unimplemented/unaccepted until code, original bounds, mixed-leaf coverage,
+  negative controls and independent replay exist. No full general MIP claim.
 - Commercial owner: zero real licensed commercial solves are recorded.
   Authorized actual SDK/license runtime and matched problem results are
   required; fixtures and open-source baselines cannot close this gate.
