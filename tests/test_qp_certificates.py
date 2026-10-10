@@ -4,7 +4,11 @@ from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
+import time
 
 import numpy as np
 import osqp
@@ -14,7 +18,8 @@ import torch
 
 from openopt.qp import QPConfig, QPProblem, solve_qp
 from openopt.certificates import (
-    check_primal_infeasibility, check_qp_candidate, check_unbounded_direction,
+    REPRODUCIBLE_ARITHMETIC, check_primal_infeasibility, check_qp_candidate,
+    check_unbounded_direction, reproducible_checker_contract,
 )
 
 
@@ -432,3 +437,247 @@ def test_machine_readable_acceptance_with_named_mutation_controls(tmp_path, requ
     artifact.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     assert json.loads(artifact.read_text()) == report
     request.node.user_properties.append(("numerical_acceptance_path", str(artifact)))
+
+
+def reproducible_cases():
+    """Tiny fixed same-model witnesses, no solve or random BLAS model generation."""
+    return [
+        (bounded_lp(), [1., 0.], [1., -2.], True),
+        (qp([[2.1, .3], [.3, 1.7]], [-2.1, -.3],
+            [[.7, 1.2]], [.7], [.7]), [1., 0.], [0.], True),
+        (qp([[1., 1.], [1., 1.]], [-2., -2.], np.empty((0, 2)), [], []),
+         [3., -1.], [], True),
+        (qp(np.diag([1., 1e-16]), [0., 0.], np.empty((0, 2)), [], []),
+         [0., 0.], [], False),
+        (qp([[2.]], [-4.], [[1.]], [-np.inf], [np.inf]), [2.], [1e-300], False),
+        (bounded_lp(), [2., 0.], [1., -2.], False),
+        (bounded_lp(), [1., 0.], [-1., 2.], False),
+        (qp([[2.]], [-3.], np.empty((0, 1)), [], []), [2.], [], False),
+    ]
+
+
+def test_reproducible_complete_original_gates_and_independence(monkeypatch, tmp_path):
+    import openopt.certificates as module
+    import openopt.qp as solver
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("reproducible checker cannot call BLAS/LAPACK/solver")
+
+    for name in ("eigh", "eigvalsh", "solve", "inv", "pinv", "lstsq", "cholesky"):
+        monkeypatch.setattr(np.linalg, name, forbidden)
+    monkeypatch.setattr(np, "dot", forbidden)
+    monkeypatch.setattr(np, "sum", forbidden)
+    monkeypatch.setattr(solver, "solve_qp", forbidden)
+    monkeypatch.setattr(solver, "prepare_qp", forbidden)
+    monkeypatch.setattr(module.math, "sqrt", forbidden)
+    rows = []
+    for p, x, y, expected in reproducible_cases():
+        copies = [value.clone() for value in (p.P, p.q, p.A, p.l, p.u)]
+        evidence = check_qp_candidate(p, x, y, arithmetic=REPRODUCIBLE_ARITHMETIC)
+        assert evidence.passed == expected
+        assert set(evidence.checks) == {
+            "primal_feasibility", "stationarity", "bound_sign", "complementarity",
+            "dual_objective_available", "duality_gap",
+        }
+        assert all(torch.equal(a, b) for a, b in zip(copies, (p.P, p.q, p.A, p.l, p.u)))
+        rows.append(evidence.to_dict())
+    (tmp_path / "tiny-original-gates.json").write_text(json.dumps({
+        "verdict": "PASS", "contract": reproducible_checker_contract(), "cases": rows,
+        "qualification": "CPU only, no CUDA or final seal",
+    }, allow_nan=False))
+
+
+@pytest.mark.parametrize("mutation", ["component", "sign", "gap", "range"])
+def test_reproducible_negative_components_sign_gap_and_range(mutation):
+    p, x, y = bounded_lp(), [1., 0.], [1., -2.]
+    if mutation == "component":
+        p = qp(np.eye(2), [0., 0.], np.eye(2), [0., -1e20], [1., 1e20])
+        x, y = [2., 0.], [-2., 0.]
+    elif mutation == "sign":
+        p, x, y = qp([[2.]], [-4.], [[1.]], [-np.inf], [np.inf]), [2.], [1e-300]
+    elif mutation == "gap":
+        p, x, y = qp([[1.]], [-1.], [[1.]], [0.], [2.]), [0.], [1.]
+    else:
+        p, x, y = qp(np.diag([2., 0.]), [-4., 1.], np.empty((0, 2)), [], []), [2., 0.], []
+    evidence = check_qp_candidate(p, x, y, arithmetic=REPRODUCIBLE_ARITHMETIC)
+    assert not evidence.passed
+    if mutation == "component":
+        assert not evidence.checks["primal_feasibility"]
+    elif mutation == "sign":
+        assert not evidence.checks["bound_sign"] and evidence.metrics["bound_sign"] > 0
+    elif mutation == "gap":
+        assert evidence.checks["stationarity"] and not evidence.checks["duality_gap"]
+    else:
+        assert evidence.metrics["range_residual"] == 1 and evidence.metrics["dual_objective"] is None
+
+
+@pytest.mark.parametrize("mutation", ["n", "m", "subnormal", "nonfinite", "rounding", "spectrum"])
+def test_reproducible_unsupported_is_fail_loud_never_default(monkeypatch, mutation):
+    import openopt.certificates as module
+
+    p, x, y = bounded_lp(), [1., 0.], [1., -2.]
+    if mutation == "n":
+        p, x, y = qp(np.eye(9), np.zeros(9), np.empty((0, 9)), [], []), np.zeros(9), []
+    elif mutation == "m":
+        p, x, y = qp([[1.]], [0.], np.zeros((65, 1)), np.zeros(65), np.zeros(65)), [0.], np.zeros(65)
+    elif mutation == "subnormal":
+        p.P[0, 0] = float.fromhex("0x0.0000000000001p-1022")
+    elif mutation == "nonfinite":
+        x[0] = float("nan")
+    elif mutation == "rounding":
+        def unsupported():
+            raise ValueError("unsupported reproducible rounding")
+        monkeypatch.setattr(module, "_binary64_runtime", unsupported)
+    else:
+        def unresolved(*args):
+            raise ValueError("unresolved reproducible Jacobi spectrum")
+        monkeypatch.setattr(module, "_jacobi", unresolved)
+    with pytest.raises(ValueError, match="unsupported|finite|unresolved"):
+        check_qp_candidate(p, x, y, arithmetic=REPRODUCIBLE_ARITHMETIC)
+
+
+def test_reproducible_spectral_verification_detects_broken_dot(monkeypatch):
+    import openopt.certificates as module
+
+    original = module._bdot
+    monkeypatch.setattr(module, "_bdot", lambda a, b: original(a, b) + .01)
+    with pytest.raises(ValueError, match="residual/orthogonality"):
+        module._jacobi([[2., .3], [.3, 1.7]])
+
+
+def test_reproducible_computed_zero_cannot_hide_original_positive_curvature(monkeypatch):
+    import openopt.certificates as module
+
+    monkeypatch.setattr(module, "_jacobi", lambda matrix: ([0., 1.], [[0., 1.], [1., 0.]]))
+    p = qp(np.diag([1., 1e-16]), [0., 0.], np.empty((0, 2)), [], [])
+    result = check_qp_candidate(p, [0., 0.], [], arithmetic=REPRODUCIBLE_ARITHMETIC)
+    assert not result.passed and not result.checks["dual_objective_available"]
+
+
+def test_reproducible_actual_rounding_mode_rejected_and_restored():
+    import ctypes
+    import ctypes.util
+    import openopt.certificates as module
+
+    if sys.platform != "linux":
+        pytest.skip("reproducible checker runtime contract requires Linux")
+    library = ctypes.CDLL(ctypes.util.find_library("m"))
+    getround, setround = library.fegetround, library.fesetround
+    getround.argtypes, getround.restype = (), ctypes.c_int
+    setround.argtypes, setround.restype = (ctypes.c_int,), ctypes.c_int
+    original = getround()
+    try:
+        if setround(0x400) != 0:
+            pytest.skip("runtime does not expose this reversible rounding control")
+        assert getround() != 0
+        with pytest.raises(ValueError, match="rounding mode"):
+            module._binary64_runtime()
+    finally:
+        assert setround(original) == 0
+    assert getround() == original
+    module._binary64_runtime()
+
+
+def test_reproducible_binary64_sqrt_exact_rounding():
+    import math
+    import openopt.certificates as module
+    from decimal import Decimal, localcontext
+
+    with localcontext() as context:
+        context.prec = 800
+        for value in (0., 1., 2., 3., .1, 1e-300, 1e300, sys.float_info.min,
+                      sys.float_info.max, float.fromhex("0x1.fffffffffffffp+1")):
+            assert module._broot(value).hex() == float(Decimal(value).sqrt()).hex()
+        rng = np.random.default_rng(819)
+        for value in rng.uniform(.01, 100., 60):
+            assert module._broot(float(value)).hex() == math.sqrt(float(value)).hex()
+
+
+def test_default_checker_evidence_unchanged_after_opt_in():
+    for p, x, y, _ in reproducible_cases():
+        before = check_qp_candidate(p, x, y).to_dict()
+        explicit = check_qp_candidate(p, x, y, arithmetic="numpy").to_dict()
+        check_qp_candidate(p, x, y, arithmetic=REPRODUCIBLE_ARITHMETIC)
+        assert check_qp_candidate(p, x, y).to_dict() == before == explicit
+    with pytest.raises(ValueError, match="unsupported original checker arithmetic"):
+        check_qp_candidate(bounded_lp(), [1., 0.], [1., -2.], arithmetic="fma_if_matches")
+
+
+def test_reproducible_n8_cost_and_spectral_residual(tmp_path):
+    import openopt.certificates as module
+
+    matrix = [[float(5 + i) if i == j else .125 for j in range(8)] for i in range(8)]
+    eigenvalues, vectors = module._jacobi(matrix)
+    assert np.max(np.abs(np.asarray(matrix) @ np.asarray(vectors)
+                         - np.asarray(vectors) * eigenvalues)) < 1e-12
+    p = qp(matrix, np.zeros(8), np.zeros((64, 8)), np.zeros(64), np.zeros(64))
+    started = time.perf_counter()
+    evidence = check_qp_candidate(p, np.zeros(8), np.zeros(64), arithmetic=REPRODUCIBLE_ARITHMETIC)
+    elapsed = time.perf_counter() - started
+    assert evidence.passed
+    (tmp_path / "n8-cost.json").write_text(json.dumps({
+        "verdict": "PASS", "n": 8, "m": 64, "wall_seconds": elapsed,
+        "qualification": "one CPU checker call, not optimizer performance",
+    }))
+
+
+def test_reproducible_cross_process_different_blas_environments_exact(tmp_path):
+    arms = [
+        {"OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
+         "OPENBLAS_CORETYPE": "Haswell", "NPY_DISABLE_CPU_FEATURES": "AVX2,FMA3"},
+        {"OPENBLAS_NUM_THREADS": "2", "OMP_NUM_THREADS": "2", "MKL_NUM_THREADS": "2",
+         "OPENBLAS_CORETYPE": "Sandybridge", "NPY_DISABLE_CPU_FEATURES": ""},
+    ]
+    reports = []
+    for index, arm in enumerate(arms):
+        output = tmp_path / f"arm-{index}.json"
+        environment = {**os.environ, **arm, "CUDA_VISIBLE_DEVICES": "-1",
+                       "PYTHONDONTWRITEBYTECODE": "1"}
+        result = subprocess.run([sys.executable, "-B", str(Path(__file__).resolve()),
+                                 "--reproducible-worker-output", str(output)],
+                                env=environment, capture_output=True, check=False)
+        (tmp_path / f"arm-{index}.log").write_bytes(result.stdout + result.stderr)
+        assert result.returncode == 0, result.stderr.decode()
+        report = json.loads(output.read_text())
+        assert report["verdict"] == "PASS"
+        assert all(report["runtime"]["environment"][name] == value for name, value in arm.items())
+        reports.append(report)
+    assert reports[0]["runtime"]["pid"] != reports[1]["runtime"]["pid"]
+    assert reports[0]["runtime"]["numpy"] == reports[1]["runtime"]["numpy"]
+    assert reports[0]["evidence"] == reports[1]["evidence"]
+    assert reports[0]["evidence_sha256"] == reports[1]["evidence_sha256"]
+    (tmp_path / "cross-process-receipt.json").write_text(json.dumps({
+        "verdict": "PASS", "arms": reports,
+        "qualification": "two CPU processes, same installed NumPy, distinct BLAS environments; no GPU",
+    }, allow_nan=False))
+
+
+def reproducible_worker_main():
+    """External-output subprocess probe; no inline code or solver invocation."""
+    import argparse
+    from tests.test_qp_refinement import checker_runtime
+
+    parser = argparse.ArgumentParser(description=reproducible_worker_main.__doc__)
+    parser.add_argument("--reproducible-worker-output", type=Path, required=True)
+    parser.add_argument("--refinement-sidecar", type=Path, action="append", default=[])
+    args = parser.parse_args()
+    evidence = [check_qp_candidate(p, x, y, arithmetic=REPRODUCIBLE_ARITHMETIC).to_dict()
+                for p, x, y, _ in reproducible_cases()]
+    if args.refinement_sidecar:
+        from tests.test_qp_refinement import check_sidecar
+        root = Path(__file__).resolve().parents[1]
+        for path in args.refinement_sidecar:
+            raw = path.read_bytes()
+            evidence.append(check_sidecar(path, hashlib.sha256(raw).hexdigest(), root))
+    raw = json.dumps(evidence, sort_keys=True, allow_nan=False).encode()
+    report = {"verdict": "PASS", "contract": reproducible_checker_contract(),
+              "runtime": {**checker_runtime(), "pid": os.getpid()},
+              "evidence": evidence, "evidence_sha256": hashlib.sha256(raw).hexdigest()}
+    with args.reproducible_worker_output.open("x", encoding="utf-8") as handle:
+        json.dump(report, handle, allow_nan=False)
+    print("REPRODUCIBLE_CPU_WORKER verdict=PASS evidence_sha256=" + report["evidence_sha256"])
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(reproducible_worker_main())

@@ -6,6 +6,7 @@ The command-line tests use real clean Git repositories and external outputs.
 
 import copy
 import json
+import os
 from pathlib import Path
 import subprocess
 from xml.etree import ElementTree as ET
@@ -203,7 +204,7 @@ def evidence(tmp_path, monkeypatch, request):
         pins = {name: execution.sha((source / name).read_bytes()) for name in audit.SOURCES[suite]}
         dtype = definition["parameters"].get("dtype", {"dtype": "torch.float64"})["dtype"]
         saved = (native_saved(pins, dtype) if suite == "native_conic"
-                 else refinement_saved(pins, definition))
+                 else versioned_refinement_fixture(definition, hashes=pins))
         dump(sidecar, saved)
         if "mutation" in definition["parameters"]:
             wrong = copy.deepcopy(saved)
@@ -487,8 +488,25 @@ REAL_REFINEMENT_CHECK = REAL_REFINEMENT_RUN / "case-0/cuda-check-3rvbwpaq"
 
 @pytest.fixture
 def real_refinement_artifacts():
+    if os.environ.get("OPENOPT_RUN_EXTENSION_EVIDENCE_TESTS") != "1":
+        pytest.skip("set OPENOPT_RUN_EXTENSION_EVIDENCE_TESTS=1 for historical diagnostics; no qualification")
     if not (REAL_REFINEMENT_CHECK / "pytest.xml").is_file():
         pytest.skip("historical external CUDA sidecars absent; no replay qualification")
+
+
+@pytest.mark.parametrize("value", [None, "", "0", "true"])
+def test_historical_evidence_requires_exact_optin_before_any_filesystem_read(monkeypatch, value):
+    if value is None:
+        monkeypatch.delenv("OPENOPT_RUN_EXTENSION_EVIDENCE_TESTS", raising=False)
+    else:
+        monkeypatch.setenv("OPENOPT_RUN_EXTENSION_EVIDENCE_TESTS", value)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("default regression cannot inspect historical external evidence")
+
+    monkeypatch.setattr(Path, "is_file", forbidden)
+    with pytest.raises(pytest.skip.Exception, match="OPENOPT_RUN_EXTENSION_EVIDENCE_TESTS=1"):
+        real_refinement_artifacts.__wrapped__()
 
 
 def evidence_differences(saved, replayed, pointer=""):
@@ -606,7 +624,9 @@ def test_real_seven_sidecar_exact_first_cause_diagnosis(tmp_path, real_refinemen
         assert operation["matmul"] != operation["saved"]
 
 
-@pytest.mark.parametrize("mutation", ["one_ulp", "bool", "missing", "false_status"])
+@pytest.mark.parametrize("mutation", [
+    "one_ulp", "bool", "missing", "false_status", "signed_zero", "integer_float",
+])
 def test_exact_evidence_never_uses_approximate_dictionary_or_bool_coercion(mutation):
     saved = {"passed": True, "metrics": {"primal_objective": 1.}, "checks": {"gap": True}}
     replayed = copy.deepcopy(saved)
@@ -616,6 +636,11 @@ def test_exact_evidence_never_uses_approximate_dictionary_or_bool_coercion(mutat
         replayed["passed"] = 1
     elif mutation == "missing":
         replayed.pop("checks")
+    elif mutation == "signed_zero":
+        saved["metrics"]["primal_objective"] = 0.
+        replayed["metrics"]["primal_objective"] = -0.
+    elif mutation == "integer_float":
+        replayed["metrics"]["primal_objective"] = 1
     else:
         replayed["checks"]["gap"] = False
     with pytest.raises(execution.AuditError, match="replay mismatch at"):
@@ -682,3 +707,99 @@ def test_diagnostic_rejects_valid_hash_but_unbound_caller_junit(evidence):
                "junit_sha256": execution.sha(unrelated.read_bytes())}
     with pytest.raises(execution.AuditError, match="diagnostic caller pins"):
         audit.diagnose_refinement(current_root=current, **changed)
+
+
+def versioned_refinement_fixture(definition, *, hashes=None):
+    from types import SimpleNamespace
+    from openopt.certificates import REPRODUCIBLE_ARITHMETIC, reproducible_checker_contract
+    from tests.test_qp_refinement import checker_runtime
+
+    if hashes is None:
+        hashes = {name: execution.sha((ROOT / name).read_bytes()) for name in audit.SOURCES["refinement"]}
+    saved = refinement_saved(hashes, definition)
+    saved["schema_version"] = 2
+    saved["config"]["check_arithmetic"] = REPRODUCIBLE_ARITHMETIC
+    saved["checker_contract"] = reproducible_checker_contract()
+    saved["checker_runtime"] = checker_runtime()
+    saved["refined"]["diagnostics"]["check_arithmetic"] = REPRODUCIBLE_ARITHMETIC
+    values = {name: audit.numeric(value, name, bounds=name in ("l", "u"))
+              for name, value in saved["problem"].items()}
+    p = SimpleNamespace(**values)
+    tolerance = dict(atol=saved["config"]["check_atol"], rtol=saved["config"]["check_rtol"],
+                     arithmetic=REPRODUCIBLE_ARITHMETIC)
+    for leg in ("baseline", "refined"):
+        saved[leg]["evidence"] = check_qp_candidate(
+            p, saved[leg]["x"], saved[leg]["y"], **tolerance).to_dict()
+    xx, yy = np.asarray(saved["refined"]["x"]), np.asarray(saved["refined"]["y"])
+    saved["negative_controls"] = {
+        "wrong_x": check_qp_candidate(p, xx + 1, yy, **tolerance).to_dict(),
+        "wrong_y": check_qp_candidate(p, xx, -yy, **tolerance).to_dict(),
+        "wrong_model": check_qp_candidate(SimpleNamespace(**{**values, "q": values["q"] + 1}),
+                                         xx, yy, **tolerance).to_dict(),
+    }
+    return saved
+
+
+def test_versioned_refinement_all_seven_synthetic_exact_gates(tmp_path):
+    definitions = audit.expected_cases(ROOT, "refinement")
+    rows = []
+    for identity, definition in definitions.items():
+        saved = versioned_refinement_fixture(definition)
+        result = audit.refinement_replay(saved, definition["parameters"], definition["function"])
+        assert result["verdict"] == "PASS"
+        rows.append({"case": identity, **result})
+    assert len(rows) == 7 and sum(row["candidate_accepted"] for row in rows) == 4
+    overwrite(tmp_path / "versioned-seven-synthetic.json", {
+        "verdict": "PASS", "cases": rows, "qualification": "synthetic CPU replay, not CUDA seal",
+    })
+
+
+@pytest.mark.parametrize("mutation", ["algorithm", "contract", "runtime", "schema", "one_ulp", "threshold"])
+def test_versioned_refinement_never_relaxes_evidence_or_falls_back(mutation):
+    definitions = audit.expected_cases(ROOT, "refinement")
+    definition = next(v for v in definitions.values() if "frozen_model" in v["function"])
+    saved = versioned_refinement_fixture(definition)
+    if mutation == "algorithm":
+        saved["config"]["check_arithmetic"] = "numpy"
+    elif mutation == "contract":
+        saved["checker_contract"]["max_n"] = 9
+    elif mutation == "runtime":
+        saved["checker_runtime"].pop("numpy_origin")
+    elif mutation == "schema":
+        saved["schema_version"] = 1
+    elif mutation == "one_ulp":
+        saved["refined"]["evidence"]["metrics"]["primal_objective"] = float(
+            np.nextafter(saved["refined"]["evidence"]["metrics"]["primal_objective"], np.inf))
+    else:
+        saved["config"]["check_atol"] = 1e-7
+    with pytest.raises(execution.AuditError):
+        audit.refinement_replay(saved, definition["parameters"], definition["function"])
+
+
+def test_rejected_refinement_retains_baseline_signed_zero_bytes():
+    definitions = audit.expected_cases(ROOT, "refinement")
+    definition = next(value for value in definitions.values()
+                      if value["parameters"].get("kind") == "singular_kkt")
+    saved = versioned_refinement_fixture(definition)
+    assert saved["baseline"]["x"] == saved["refined"]["x"] == [0.]
+    saved["refined"]["x"][0] = -0.
+    with pytest.raises(execution.AuditError, match="retain baseline"):
+        audit.refinement_replay(saved, definition["parameters"], definition["function"])
+
+
+def test_fresh_final_refinement_rejects_legacy_schema_even_with_resealed_pins(evidence):
+    suite, bundle, current, run, arguments = evidence
+    if suite != "refinement":
+        return
+    definitions = audit.expected_cases(bundle["execution"]["source_snapshot"], suite)
+    identity = next(key for key in definitions if "frozen_model" in key)
+    props = next(case["properties"] for case in execution.junit(
+        execution.bound(bundle["execution"]["files"]["pytest.xml"]),
+        execution.parse(execution.bound(bundle["execution"]["result"]), "result"),
+        bundle["execution"]["sources"],
+    )[1] if case["id"] == identity)
+    saved = execution.parse(execution.read(Path(props["refinement_acceptance_path"])), "sidecar")
+    legacy = refinement_saved(saved["source_sha256"], definitions[identity])
+    reseal_proof(bundle, identity, legacy, arguments)
+    with pytest.raises(execution.AuditError, match="requires versioned checker schema 2"):
+        audit.validate(bundle, pins=audit.caller_pins(**arguments), current_root=current)

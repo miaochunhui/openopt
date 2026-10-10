@@ -236,9 +236,11 @@ def evidence_differences(saved, replayed, pointer=""):
                 result.extend(evidence_differences(saved[key], replayed[key], child))
         return result
     numeric_types = (int, float)
-    same_type = type(saved) is type(replayed) or (
-        type(saved) in numeric_types and type(replayed) in numeric_types)
-    if same_type and saved == replayed:
+    same_type = type(saved) is type(replayed)
+    same_value = saved == replayed
+    if type(saved) is float and type(replayed) is float:
+        same_value = math.isfinite(saved) and math.isfinite(replayed) and saved.hex() == replayed.hex()
+    if same_type and same_value:
         return []
     return [{"pointer": pointer, "saved": saved, "replayed": replayed,
              "saved_hex": float(saved).hex() if type(saved) in numeric_types else None,
@@ -318,15 +320,44 @@ def native_replay(saved, parameters, *, negative=None):
 
 def refinement_replay(saved, parameters, function, *, diagnostic=False):
     import numpy as np
-    from openopt.certificates import check_qp_candidate
+    from openopt.certificates import (
+        REPRODUCIBLE_ARITHMETIC, check_qp_candidate, reproducible_checker_contract,
+    )
 
     check_loaded(check_qp_candidate, "src/openopt/certificates.py", saved["source_sha256"])
-    require(saved.get("schema_version") == 1
+    require(type(saved.get("schema_version")) is int and saved["schema_version"] in (1, 2)
             and saved.get("kind") == "qp_refinement_original_coordinate_ab"
             and saved.get("verdict") == "PASS", "refinement sidecar", "unknown schema/verdict")
     cfg = saved["config"]
-    require(set(cfg) == {"device", "dtype", "factor_dtype", "max_refinement_steps",
-                         "active_atol", "active_rtol", "check_atol", "check_rtol"},
+    config_keys = {"device", "dtype", "factor_dtype", "max_refinement_steps",
+                   "active_atol", "active_rtol", "check_atol", "check_rtol"}
+    versioned = saved["schema_version"] == 2
+    if versioned:
+        config_keys.add("check_arithmetic")
+        exact_evidence(saved.get("checker_contract"), reproducible_checker_contract(), "checker contract")
+        require(cfg.get("check_arithmetic") == REPRODUCIBLE_ARITHMETIC,
+                "checker algorithm", "versioned arithmetic required; no runtime fallback")
+        runtime = saved.get("checker_runtime")
+        require(isinstance(runtime, dict) and set(runtime) == {
+            "python", "implementation", "executable", "machine", "numpy", "numpy_origin",
+            "numpy_config", "torch", "rounding", "environment",
+        } and runtime["implementation"] == "cpython"
+                and runtime["rounding"] == "nearest ties-even verified by checker"
+                and isinstance(runtime["numpy_config"], dict)
+                and isinstance(runtime["environment"], dict)
+                and set(runtime["environment"]) == {
+                    "OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
+                    "OPENBLAS_CORETYPE", "NPY_DISABLE_CPU_FEATURES", "CUDA_VISIBLE_DEVICES",
+                }, "checker runtime", "complete versioned producer provenance required")
+        require(all(isinstance(runtime[name], str) and runtime[name] for name in (
+            "python", "executable", "machine", "numpy", "numpy_origin", "torch",
+        )), "checker runtime", "missing producer runtime provenance")
+        require(all(value is None or isinstance(value, str) for value in runtime["environment"].values()),
+                "checker runtime", "environment provenance must be string/null")
+    else:
+        require("checker_contract" not in saved and "checker_runtime" not in saved,
+                "legacy schema", "legacy evidence cannot select new arithmetic")
+    require(set(cfg) == config_keys,
             "refinement config", "complete frozen config required")
     require(cfg["device"] == saved["device"] == "cuda:0"
             and cfg["dtype"] == saved["dtype"] in ("torch.float32", "torch.float64")
@@ -336,6 +367,8 @@ def refinement_replay(saved, parameters, function, *, diagnostic=False):
         if name in parameters:
             require(cfg[name] == parameters[name]["dtype"], name, "JUnit/config substitution")
     tol = tolerance(cfg["check_atol"], cfg["check_rtol"])
+    if versioned:
+        tol["arithmetic"] = REPRODUCIBLE_ARITHMETIC
     correction = function == "test_cuda_refinement_actual_residual_correction"
     require(cfg["max_refinement_steps"] == 3 and type(cfg["max_refinement_steps"]) is int
             and cfg["active_atol"] == 1e-5 and type(cfg["active_atol"]) in (int, float)
@@ -363,6 +396,9 @@ def refinement_replay(saved, parameters, function, *, diagnostic=False):
     require(type(saved["candidate_accepted"]) is bool and saved["candidate_accepted"] == accepted,
             "refinement status", "candidate acceptance contradiction")
     diagnostics = refined["diagnostics"]
+    if versioned:
+        require(diagnostics.get("check_arithmetic") == REPRODUCIBLE_ARITHMETIC,
+                "refinement checker", "in-process/sidecar checker algorithm mismatch")
     require(diagnostics.get("solver_fallback") is False, "refinement diagnostics",
             "explicit no-solver-fallback diagnostic required")
     require(isinstance(refined["reason"], str) and refined["reason"],
@@ -377,7 +413,8 @@ def refinement_replay(saved, parameters, function, *, diagnostic=False):
                     name, "accepted refinement worsened original metric")
     else:
         require(refined["status"] in ("rejected", "unknown")
-                and np.array_equal(bx, xx) and np.array_equal(by, yy),
+                and bx.shape == xx.shape and by.shape == yy.shape
+                and bx.tobytes() == xx.tobytes() and by.tobytes() == yy.tobytes(),
                 "refinement rejection", "explicit rejection must retain baseline")
     if function == "test_cuda_refinement_negative_controls":
         kind = parameters["kind"]
@@ -498,6 +535,9 @@ def validate(bundle, *, pins, current_root, development_replay=False):
                 and item["sha256"] == execution.digest(case["properties"][prop + "_sha256"]),
                 identity, "JUnit property/sidecar descriptor pin mismatch")
         saved = execution.parse(execution.bound(item, tree), str(path))
+        if suite == "refinement" and not development_replay:
+            require(saved.get("schema_version") == 2, identity,
+                    "fresh final-source refinement requires versioned checker schema 2")
         source_audit(saved, suite, snapshot, current_root, frozen["sources"], bundle["extra_sources"])
         require(saved.get("device") == "cuda:0" and saved.get("gpu_name") == observed["hardware"]["gpu"],
                 identity, "saved CUDA device/GPU differs from actual run")

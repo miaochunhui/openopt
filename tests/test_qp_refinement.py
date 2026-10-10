@@ -4,6 +4,8 @@ from dataclasses import asdict, replace
 from datetime import datetime, timezone
 import hashlib
 import json
+import os
+import platform
 from pathlib import Path
 import sys
 
@@ -11,7 +13,9 @@ import numpy as np
 import pytest
 import torch
 
-from openopt.certificates import check_qp_candidate
+from openopt.certificates import (
+    REPRODUCIBLE_ARITHMETIC, check_qp_candidate, reproducible_checker_contract,
+)
 from openopt.qp import QPConfig, QPProblem, solve_qp
 from openopt.refinement import RefinementConfig, refine_qp_candidate
 
@@ -73,29 +77,36 @@ def write_sidecar(p, x, y, config, result, tmp_path, request, name, require_muta
     baseline = check_qp_candidate(
         frozen, x.cpu().double(), y.cpu().double(),
         atol=config.check_atol, rtol=config.check_rtol,
+        arithmetic=config.check_arithmetic,
     )
     final = check_qp_candidate(
         frozen, result.x.cpu().double(), result.y.cpu().double(),
         atol=config.check_atol, rtol=config.check_rtol,
+        arithmetic=config.check_arithmetic,
     )
     assert baseline.to_dict() == result.baseline_evidence.to_dict()
     assert final.to_dict() == result.evidence.to_dict()
     wrong_x = check_qp_candidate(
         frozen, result.x.cpu().double() + 1., result.y.cpu().double(),
         atol=config.check_atol, rtol=config.check_rtol,
+        arithmetic=config.check_arithmetic,
     )
     wrong_y = check_qp_candidate(
         frozen, result.x.cpu().double(), -result.y.cpu().double(),
         atol=config.check_atol, rtol=config.check_rtol,
+        arithmetic=config.check_arithmetic,
     )
     wrong_model = check_qp_candidate(
         replace(frozen, q=frozen.q + 1.), result.x.cpu().double(), result.y.cpu().double(),
         atol=config.check_atol, rtol=config.check_rtol,
+        arithmetic=config.check_arithmetic,
     )
     if require_mutations:
         assert not wrong_x.passed and not wrong_y.passed and not wrong_model.passed
     cfg = asdict(config)
     cfg["dtype"], cfg["factor_dtype"] = str(config.dtype), str(config.factor_dtype)
+    if config.check_arithmetic == "numpy":
+        cfg.pop("check_arithmetic")
     paths = [
         "src/openopt/refinement.py", "src/openopt/qp.py", "src/openopt/certificates.py",
         "tests/test_qp_refinement.py", "docs/research/refinement.md",
@@ -119,6 +130,10 @@ def write_sidecar(p, x, y, config, result, tmp_path, request, name, require_muta
                           for path in paths},
         "qualification": "same-model numerical accuracy A/B; no exact proof or speed claim",
     }
+    if config.check_arithmetic == REPRODUCIBLE_ARITHMETIC:
+        report["schema_version"] = 2
+        report["checker_contract"] = reproducible_checker_contract()
+        report["checker_runtime"] = checker_runtime()
     artifact = tmp_path / "refinement-acceptance.json"
     artifact.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     assert json.loads(artifact.read_text()) == report
@@ -128,13 +143,28 @@ def write_sidecar(p, x, y, config, result, tmp_path, request, name, require_muta
     ])
 
 
+def checker_runtime():
+    """Actual producer/worker runtime provenance, not a kernel-dispatch claim."""
+    return {
+        "python": platform.python_version(), "implementation": sys.implementation.name,
+        "executable": sys.executable, "machine": platform.machine(),
+        "numpy": np.__version__, "numpy_origin": np.__file__,
+        "numpy_config": np.show_config(mode="dicts"),
+        "torch": torch.__version__, "rounding": "nearest ties-even verified by checker",
+        "environment": {name: os.environ.get(name) for name in (
+            "OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
+            "OPENBLAS_CORETYPE", "NPY_DISABLE_CPU_FEATURES", "CUDA_VISIBLE_DEVICES",
+        )},
+    }
+
+
 def check_sidecar(path, sha256, source_root):
     """Independent disk replay, requiring caller-pinned bytes and current sources."""
     raw = path.read_bytes()
     if hashlib.sha256(raw).hexdigest() != sha256:
         raise ValueError("sidecar pin mismatch")
     data = json.loads(raw)
-    if data["schema_version"] != 1 or data["kind"] != "qp_refinement_original_coordinate_ab":
+    if data["schema_version"] not in (1, 2) or data["kind"] != "qp_refinement_original_coordinate_ab":
         raise ValueError("unsupported refinement sidecar")
     expected_sources = {
         "src/openopt/refinement.py", "src/openopt/qp.py", "src/openopt/certificates.py",
@@ -151,10 +181,23 @@ def check_sidecar(path, sha256, source_root):
     p = thaw_problem(data["problem"])
     cfg = data["config"]
     tolerances = {"atol": cfg["check_atol"], "rtol": cfg["check_rtol"]}
+    if data["schema_version"] == 2:
+        if (cfg.get("check_arithmetic") != REPRODUCIBLE_ARITHMETIC
+                or data.get("checker_contract") != reproducible_checker_contract()
+                or not isinstance(data.get("checker_runtime"), dict)
+                or data["refined"]["diagnostics"].get("check_arithmetic") != REPRODUCIBLE_ARITHMETIC):
+            raise ValueError("versioned checker contract mismatch")
+        tolerances["arithmetic"] = REPRODUCIBLE_ARITHMETIC
+    elif "check_arithmetic" in cfg or "checker_contract" in data:
+        raise ValueError("legacy checker schema cannot select new arithmetic")
     baseline, refined = data["baseline"], data["refined"]
     before = check_qp_candidate(p, baseline["x"], baseline["y"], **tolerances)
     after = check_qp_candidate(p, refined["x"], refined["y"], **tolerances)
-    if before.to_dict() != baseline["evidence"] or after.to_dict() != refined["evidence"]:
+    def exact(left, right):
+        return json.dumps(left, sort_keys=True, allow_nan=False) == json.dumps(
+            right, sort_keys=True, allow_nan=False)
+
+    if not exact(before.to_dict(), baseline["evidence"]) or not exact(after.to_dict(), refined["evidence"]):
         raise ValueError("original checker replay mismatch")
     accepted = refined["status"] == "accepted"
     if data["candidate_accepted"] is not accepted:
@@ -168,7 +211,7 @@ def check_sidecar(path, sha256, source_root):
                 raise ValueError(f"accepted candidate worsened {name}")
     elif refined["status"] not in ("rejected", "unknown"):
         raise ValueError("unrecognized status")
-    elif refined["x"] != baseline["x"] or refined["y"] != baseline["y"]:
+    elif not exact(refined["x"], baseline["x"]) or not exact(refined["y"], baseline["y"]):
         raise ValueError("rejection did not retain baseline")
     xx, yy = np.asarray(refined["x"]), np.asarray(refined["y"])
     negative = {
@@ -176,7 +219,7 @@ def check_sidecar(path, sha256, source_root):
         "wrong_y": check_qp_candidate(p, xx, -yy, **tolerances),
         "wrong_model": check_qp_candidate(replace(p, q=p.q + 1.), xx, yy, **tolerances),
     }
-    if {name: value.to_dict() for name, value in negative.items()} != data["negative_controls"]:
+    if not exact({name: value.to_dict() for name, value in negative.items()}, data["negative_controls"]):
         raise ValueError("negative checker replay mismatch")
     if accepted and any(value.passed for value in negative.values()):
         raise ValueError("negative control unexpectedly passed")
@@ -204,7 +247,10 @@ def test_original_coordinate_accuracy_ab_and_three_negative_controls(tmp_path, r
     write_sidecar(p, x, y, config, result, tmp_path, request, "mixed_perturbed")
 
 
-@pytest.mark.parametrize("mutation", ["none", "pin", "x", "y", "model", "threshold", "source", "membership"])
+@pytest.mark.parametrize("mutation", [
+    "none", "pin", "x", "y", "model", "threshold", "source", "membership",
+    "signed_zero", "integer_float",
+])
 def test_independent_disk_replay_sees_tampering(mutation, tmp_path, request):
     p, x, y = perturbed()
     config = RefinementConfig()
@@ -224,6 +270,11 @@ def test_independent_disk_replay_sees_tampering(mutation, tmp_path, request):
         data["source_sha256"]["src/openopt/refinement.py"] = "0" * 64
     elif mutation == "membership":
         data["source_sha256"].pop("src/openopt/qp.py")
+    elif mutation == "signed_zero":
+        assert data["refined"]["evidence"]["metrics"]["bound_sign"] == 0.
+        data["refined"]["evidence"]["metrics"]["bound_sign"] = -0.
+    elif mutation == "integer_float":
+        data["refined"]["evidence"]["metrics"]["bound_sign"] = 0
     mutated = tmp_path / "replay-control.json"
     mutated.write_text(json.dumps(data, allow_nan=False), encoding="utf-8")
     pin = "0" * 64 if mutation == "pin" else hashlib.sha256(mutated.read_bytes()).hexdigest()
@@ -487,7 +538,8 @@ def test_cuda_refinement_frozen_model_accuracy_ab(dtype, factor_dtype, tmp_path,
     x, y = x.to(dtype), y.to(dtype)
     gpu_p = QPProblem(*[getattr(p, name).to("cuda:0") for name in ("P", "q", "A", "l", "u")])
     copies = [t.clone() for t in (gpu_p.P, gpu_p.q, gpu_p.A, gpu_p.l, gpu_p.u, x, y)]
-    config = RefinementConfig(device="cuda:0", dtype=dtype, factor_dtype=factor_dtype)
+    config = RefinementConfig(device="cuda:0", dtype=dtype, factor_dtype=factor_dtype,
+                              check_arithmetic=REPRODUCIBLE_ARITHMETIC)
     result = refine_qp_candidate(gpu_p, x, y, config)
     torch.cuda.synchronize("cuda:0")
     assert result.accepted and result.evidence.passed
@@ -506,6 +558,7 @@ def test_cuda_refinement_actual_residual_correction(tmp_path, request):
     baseline = solve_qp(p, QPConfig(device="cuda:0", eps_abs=1e-5, eps_rel=1e-5, check_interval=1))
     config = RefinementConfig(
         device="cuda:0", factor_dtype=torch.float32, check_atol=1e-10, check_rtol=1e-10,
+        check_arithmetic=REPRODUCIBLE_ARITHMETIC,
     )
     result = refine_qp_candidate(p, baseline.x, baseline.y, config)
     torch.cuda.synchronize("cuda:0")
@@ -532,12 +585,162 @@ def test_cuda_refinement_negative_controls(kind, tmp_path, request):
         p = qp([[1.]], [-0.5], [[1.]], [-np.inf], [1.])
         x, y = torch.ones(1), torch.zeros(1)
     x, y = x.cuda().double(), y.cuda().double()
-    config = RefinementConfig(device="cuda:0")
+    config = RefinementConfig(device="cuda:0", check_arithmetic=REPRODUCIBLE_ARITHMETIC)
     result = refine_qp_candidate(p, x, y, config)
     assert not result.accepted and result.status in ("rejected", "unknown")
     assert torch.equal(result.x, x) and torch.equal(result.y, y)
     assert result.x.is_cuda and result.y.is_cuda
     write_sidecar(p, x, y, config, result, tmp_path, request, kind, require_mutations=False)
+
+
+@pytest.mark.parametrize("kind", ["mixed", "correction", "wrong_active_set", "singular_kkt", "wrong_sign"])
+def test_reproducible_refinement_producer_cpu_exact_sidecar(kind, tmp_path, request):
+    if kind == "mixed":
+        p, x, y = perturbed()
+        config = RefinementConfig(check_arithmetic=REPRODUCIBLE_ARITHMETIC)
+    elif kind == "correction":
+        p = qp([[2.1, .3], [.3, 1.7]], [-.6, .8], [[.7, 1.2]], [.35], [.35])
+        baseline = solve_qp(p, QPConfig(eps_abs=1e-5, eps_rel=1e-5, check_interval=1))
+        x, y = baseline.x, baseline.y
+        config = RefinementConfig(factor_dtype=torch.float32, check_atol=1e-10,
+                                  check_rtol=1e-10, check_arithmetic=REPRODUCIBLE_ARITHMETIC)
+    else:
+        if kind == "wrong_active_set":
+            p, x, y = qp([[1.]], [-2.], [[1.]], [-np.inf], [1.]), torch.tensor([.5]), torch.tensor([.5])
+        elif kind == "singular_kkt":
+            p, x, y = qp([[1.]], [0.], [[1.], [1.]], [0., 0.], [0., 0.]), torch.zeros(1), torch.zeros(2)
+        else:
+            p, x, y = qp([[1.]], [-.5], [[1.]], [-np.inf], [1.]), torch.ones(1), torch.zeros(1)
+        x, y = x.double(), y.double()
+        config = RefinementConfig(check_arithmetic=REPRODUCIBLE_ARITHMETIC)
+    copies = [v.clone() for v in (p.P, p.q, p.A, p.l, p.u, x, y)]
+    result = refine_qp_candidate(p, x, y, config)
+    positive = kind in ("mixed", "correction")
+    assert result.accepted == positive and result.diagnostics["solver_fallback"] is False
+    if positive:
+        assert result.evidence.passed
+        assert not any(result.diagnostics["iterations"][result.diagnostics["accepted_step"]]["worsened_metrics"])
+    else:
+        assert torch.equal(result.x, x) and torch.equal(result.y, y)
+    assert all(torch.equal(a, b) for a, b in zip(copies, (p.P, p.q, p.A, p.l, p.u, x, y)))
+    write_sidecar(p, x, y, config, result, tmp_path, request, kind, require_mutations=positive)
+    path = tmp_path / "refinement-acceptance.json"
+    saved = json.loads(path.read_text())
+    assert saved["schema_version"] == 2 and saved["checker_runtime"]["numpy"] == np.__version__
+    replay = check_sidecar(path, hashlib.sha256(path.read_bytes()).hexdigest(),
+                           Path(__file__).resolve().parents[1])
+    assert replay["candidate_accepted"] == positive
+    assert replay["refined_evidence"] == result.evidence.to_dict()
+
+
+def test_reproducible_refinement_default_unchanged_and_device_strict(monkeypatch):
+    p, x, y = perturbed()
+    before = refine_qp_candidate(p, x, y)
+    refine_qp_candidate(p, x, y, RefinementConfig(check_arithmetic=REPRODUCIBLE_ARITHMETIC))
+    after = refine_qp_candidate(p, x, y)
+    assert torch.equal(before.x, after.x) and torch.equal(before.y, after.y)
+    assert before.evidence.to_dict() == after.evidence.to_dict()
+    assert before.diagnostics == after.diagnostics
+    assert "check_arithmetic" not in before.diagnostics
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    with pytest.raises(RuntimeError, match="explicit CUDA"):
+        refine_qp_candidate(p, x, y, RefinementConfig(device="cuda:0",
+                                                     check_arithmetic=REPRODUCIBLE_ARITHMETIC))
+    with pytest.raises(ValueError, match="supports CPU or CUDA"):
+        refine_qp_candidate(p, x, y, RefinementConfig(device="meta",
+                                                     check_arithmetic=REPRODUCIBLE_ARITHMETIC))
+    with pytest.raises(ValueError, match="arithmetic"):
+        refine_qp_candidate(p, x, y, RefinementConfig(check_arithmetic="fallback"))
+
+
+def test_reproducible_passed_but_worsened_candidate_retains_original():
+    p = qp([[1.]], [-1.00000003], np.empty((0, 1)), [], [])
+    x, y = torch.tensor([1.00000003], dtype=torch.float64), torch.empty(0, dtype=torch.float64)
+    config = RefinementConfig(dtype=torch.float32, factor_dtype=torch.float32, check_atol=1e-6,
+                              check_arithmetic=REPRODUCIBLE_ARITHMETIC)
+    result = refine_qp_candidate(p, x, y, config)
+    assert result.baseline_evidence.passed and result.attempted_evidence.passed
+    assert not result.accepted and result.reason == "accuracy_worsened"
+    assert torch.equal(result.x, x) and torch.equal(result.y, y)
+    assert result.diagnostics["iterations"][0]["worsened_metrics"]
+
+
+def test_reproducible_seven_cpu_producer_sidecars_cross_process_exact(tmp_path, request):
+    import subprocess
+    from scripts.accept_extension_cuda import expected_cases
+
+    root = Path(__file__).resolve().parents[1]
+    definitions = expected_cases(root, "refinement")
+    paths = []
+    for index, (identity, definition) in enumerate(definitions.items()):
+        parameters = definition["parameters"]
+        if "frozen_model" in definition["function"]:
+            p, x, y = perturbed()
+            dtype = getattr(torch, parameters["dtype"]["dtype"].split(".")[-1])
+            factor = getattr(torch, parameters["factor_dtype"]["dtype"].split(".")[-1])
+            x, y = x.to(dtype), y.to(dtype)
+            config = RefinementConfig(dtype=dtype, factor_dtype=factor,
+                                      check_arithmetic=REPRODUCIBLE_ARITHMETIC)
+            positive = True
+        elif "residual_correction" in definition["function"]:
+            p = qp([[2.1, .3], [.3, 1.7]], [-.6, .8], [[.7, 1.2]], [.35], [.35])
+            baseline = solve_qp(p, QPConfig(eps_abs=1e-5, eps_rel=1e-5, check_interval=1))
+            x, y = baseline.x, baseline.y
+            config = RefinementConfig(factor_dtype=torch.float32, check_atol=1e-10,
+                                      check_rtol=1e-10, check_arithmetic=REPRODUCIBLE_ARITHMETIC)
+            positive = True
+        else:
+            kind = parameters["kind"]
+            if kind == "wrong_active_set":
+                p, x, y = qp([[1.]], [-2.], [[1.]], [-np.inf], [1.]), torch.tensor([.5]), torch.tensor([.5])
+            elif kind == "singular_kkt":
+                p, x, y = qp([[1.]], [0.], [[1.], [1.]], [0., 0.], [0., 0.]), torch.zeros(1), torch.zeros(2)
+            else:
+                p, x, y = qp([[1.]], [-.5], [[1.]], [-np.inf], [1.]), torch.ones(1), torch.zeros(1)
+            x, y = x.double(), y.double()
+            config = RefinementConfig(check_arithmetic=REPRODUCIBLE_ARITHMETIC)
+            positive = False
+        result = refine_qp_candidate(p, x, y, config)
+        assert result.accepted == positive
+        directory = tmp_path / f"case-{index}"
+        directory.mkdir()
+        write_sidecar(p, x, y, config, result, directory, request,
+                      parameters.get("kind", identity), require_mutations=positive)
+        paths.append(directory / "refinement-acceptance.json")
+    assert len(paths) == 7
+    commands = []
+    for path in paths:
+        commands.extend(["--refinement-sidecar", str(path)])
+    reports = []
+    for index, arm in enumerate((
+        {"OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
+         "OPENBLAS_CORETYPE": "Haswell", "NPY_DISABLE_CPU_FEATURES": "AVX2,FMA3"},
+        {"OPENBLAS_NUM_THREADS": "2", "OMP_NUM_THREADS": "2", "MKL_NUM_THREADS": "2",
+         "OPENBLAS_CORETYPE": "Sandybridge", "NPY_DISABLE_CPU_FEATURES": ""},
+    )):
+        output = tmp_path / f"replay-{index}.json"
+        completed = subprocess.run(
+            [sys.executable, "-B", str(root / "tests/test_qp_certificates.py"),
+             "--reproducible-worker-output", str(output), *commands],
+            env={**os.environ, **arm, "CUDA_VISIBLE_DEVICES": "-1", "PYTHONDONTWRITEBYTECODE": "1"},
+            capture_output=True, check=False,
+        )
+        (tmp_path / f"replay-{index}.log").write_bytes(completed.stdout + completed.stderr)
+        assert completed.returncode == 0, completed.stderr.decode()
+        report = json.loads(output.read_text())
+        assert len(report["evidence"]) == 15
+        assert sum(item["candidate_accepted"] for item in report["evidence"][8:]) == 4
+        assert all(report["runtime"]["environment"][key] == value for key, value in arm.items())
+        reports.append(report)
+    assert reports[0]["runtime"]["pid"] != reports[1]["runtime"]["pid"]
+    assert reports[0]["evidence"] == reports[1]["evidence"]
+    assert reports[0]["evidence_sha256"] == reports[1]["evidence_sha256"]
+    receipt = {
+        "verdict": "PASS", "testcases": list(definitions), "arms": reports,
+        "sidecars": {str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in paths},
+        "qualification": "seven CPU producer candidates, no GPU execution/final seal",
+    }
+    (tmp_path / "seven-sidecar-cross-process.json").write_text(json.dumps(receipt, allow_nan=False))
 
 
 def replay_main():

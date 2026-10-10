@@ -13,7 +13,7 @@ import math
 
 import torch
 
-from .certificates import NumericalEvidence, check_qp_candidate
+from .certificates import NumericalEvidence, REPRODUCIBLE_ARITHMETIC, check_qp_candidate
 from .qp import QPProblem
 
 __all__ = ["RefinementConfig", "RefinedQPCandidate", "refine_qp_candidate"]
@@ -29,8 +29,11 @@ class RefinementConfig:
     active_rtol: float = 1e-7
     check_atol: float = 1e-8
     check_rtol: float = 1e-8
+    check_arithmetic: str = "numpy"
 
     def validate(self) -> torch.device:
+        if self.check_arithmetic not in ("numpy", REPRODUCIBLE_ARITHMETIC):
+            raise ValueError("unsupported refinement original checker arithmetic")
         if self.dtype not in (torch.float32, torch.float64):
             raise ValueError("refinement supports float32/float64 only")
         if self.factor_dtype not in (torch.float32, torch.float64):
@@ -157,6 +160,7 @@ def refine_qp_candidate(
     baseline = check_qp_candidate(
         original, baseline_x.cpu().double(), baseline_y.cpu().double(),
         atol=config.check_atol, rtol=config.check_rtol,
+        arithmetic=config.check_arithmetic,
     )
     p = QPProblem(*[
         _copy(value, device, config.dtype, name) for name, value in zip(names, tensors)
@@ -171,6 +175,8 @@ def refine_qp_candidate(
         "arbitrary_precision": False, "active_rows": [], "active_sides": [],
         "iterations": [], "accepted_step": None,
     }
+    if config.check_arithmetic != "numpy":
+        diagnostics["check_arithmetic"] = config.check_arithmetic
     attempted_x = attempted_y = attempted_evidence = None
 
     def result(status: str, reason: str, best=None) -> RefinedQPCandidate:
@@ -256,6 +262,7 @@ def refine_qp_candidate(
         attempted_evidence = check_qp_candidate(
             original, attempted_x.cpu().double(), attempted_y.cpu().double(),
             atol=config.check_atol, rtol=config.check_rtol,
+            arithmetic=config.check_arithmetic,
         )
         worsened = _nonworsening(baseline, attempted_evidence)
         accepted = attempted_evidence.passed and not worsened
