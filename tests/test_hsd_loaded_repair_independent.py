@@ -8,6 +8,7 @@ the numerical oracle, assertions nor production aliases/guards are relaxed.
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from fractions import Fraction
+import atexit
 import argparse
 import ast
 import hashlib
@@ -26,13 +27,12 @@ import numpy as np
 import pytest
 import torch
 
-import openopt.conic as conic
-import openopt.hsd_lp as hsd
-import openopt.native_conic as native
-
-
-ROOT = Path(__file__).resolve().parents[1]
+REVIEW_ROOT = Path(__file__).resolve().parents[1]
+ROOT = REVIEW_ROOT
 OWNER = "6cefdcf0b1f2a05c76c26dceafbf10430bc67169"
+REVIEW_BASE = "b99ae01152701968c0e1c25a772ff02c061d22de"
+MAP_ENV = "OPENOPT_HSD_REVIEW_OWNER_MAP"
+PROBE_ENV = "OPENOPT_HSD_REVIEW_ENTRY_PROBE"
 HISTORICAL_REVIEW = "9c6b69bda8e86ad8cd3b198ebb72afa155186bff"
 HISTORICAL_TEST = "tests/test_hsd_lp_independent.py"
 HISTORICAL_TEST_SHA = "74a7996bcb60d96b19cc6935736b18aaa62341f1d3f48c53384b2ddf5726aedd"
@@ -46,6 +46,10 @@ OWNER_PINS = {
     "docs/research/hsd-lp.md": "d7ddfe9f88f4923a26290cbb3568d63eb86000c33bc656357506f232a2ba1c36",
 }
 EXTERNAL = Path("/hf3fs-jd/data/tmp/openopt-release-20261010").resolve()
+FROZEN_RECEIPT = EXTERNAL / (
+    "hsd-loaded-repair-independent/clean-full-v1/review-lw72l8p1/receipt.json"
+)
+FROZEN_RECEIPT_SHA = "ed79cd4f852624bd10882a732050ebf6d0a1770e09e2017d1e329119ffb9323a"
 HISTORY = {
     "original_false_accept": (
         EXTERNAL / "hsd-independent/clean-full-v1/review-j3id7xaj/receipt.json",
@@ -67,8 +71,68 @@ def sha(path):
 
 
 def git_bytes(*args):
-    return subprocess.run(["git", *args], cwd=ROOT, capture_output=True,
+    return subprocess.run(["git", *args], cwd=REVIEW_ROOT, capture_output=True,
                           check=True, timeout=15).stdout
+
+
+def owner_git(root, *args):
+    return subprocess.run(["git", *args], cwd=root, capture_output=True,
+                          check=True, timeout=15).stdout
+
+
+sys.path.insert(0, str(REVIEW_ROOT))
+from scripts.verify import source_snapshot as complete_snapshot
+
+
+def mapped_owner(root, commit):
+    assert isinstance(root, str) and Path(root).is_absolute(), "absolute owner root required"
+    assert type(commit) is str and len(commit) == 40 and all(
+        c in "0123456789abcdef" for c in commit
+    ), "full lowercase owner commit required"
+    root = Path(root).resolve(strict=True)
+    assert root.is_dir(), "owner root must be a directory"
+    top = Path(owner_git(root, "rev-parse", "--show-toplevel").decode().strip()).resolve()
+    assert top == root, "owner root must be the Git top-level"
+    current = complete_snapshot(root)
+    assert current["commit"] == commit, "owner HEAD differs from caller commit"
+    assert current["clean"], "clean owner source required"
+    pins = {}
+    for name in OWNER_PINS:
+        assert name in current["sha256"], "owner source missing: " + name
+        pins[name] = digest(owner_git(root, "show", commit + ":" + name))
+        assert current["sha256"][name] == pins[name], "owner Git/disk mismatch: " + name
+    return {
+        "schema": "hsd-independent-owner-map-v1", "root": str(root), "commit": commit,
+        "sha256": pins, "source": current,
+    }
+
+
+def choose_owner():
+    if __name__ == "__main__":
+        parser = argparse.ArgumentParser(add_help=False)
+        parser.add_argument("--owner-root")
+        parser.add_argument("--owner-commit")
+        args, _ = parser.parse_known_args()
+        assert MAP_ENV not in os.environ, "direct CLI requires caller args, not inherited owner map"
+        assert bool(args.owner_root) == bool(args.owner_commit), "owner parameters must be paired"
+        return mapped_owner(args.owner_root, args.owner_commit) if args.owner_root else None
+    raw = os.environ.get(MAP_ENV)
+    if raw is None:
+        return None
+    expected = json.loads(raw)
+    assert type(expected) is dict and expected.get("schema") == "hsd-independent-owner-map-v1"
+    actual = mapped_owner(expected["root"], expected["commit"])
+    assert actual == expected, "owner transport/source mismatch"
+    return actual
+
+
+OWNER_MAP = choose_owner()
+if OWNER_MAP is not None:
+    ROOT, OWNER, OWNER_PINS = Path(OWNER_MAP["root"]), OWNER_MAP["commit"], OWNER_MAP["sha256"]
+sys.path.insert(0, str(ROOT / "src"))
+import openopt.conic as conic
+import openopt.hsd_lp as hsd
+import openopt.native_conic as native
 
 
 def json_write(path, value):
@@ -83,12 +147,95 @@ def owner_binding():
     assert hsd.__file__ == str(ROOT / "src/openopt/hsd_lp.py"), "loaded HSD root"
     for name, wanted in OWNER_PINS.items():
         assert sha(ROOT / name) == wanted, "caller source pin: " + name
-        assert digest(git_bytes("show", OWNER + ":" + name)) == wanted, "owner Git pin"
+        assert digest(owner_git(ROOT, "show", OWNER + ":" + name)) == wanted, "owner Git pin"
     assert conic.__file__ == str(ROOT / "src/openopt/conic.py")
     assert native.__file__ == str(ROOT / "src/openopt/native_conic.py")
+    for module in (hsd, conic, native):
+        assert module.__spec__.origin == module.__file__, "loaded module origin mismatch"
+        assert sys.modules[module.__name__] is module, "loaded module cache mismatch"
+    if OWNER_MAP is not None:
+        assert owner_git(ROOT, "rev-parse", "HEAD").decode().strip() == OWNER, "owner HEAD drift"
     return dict(OWNER_PINS)
 
 
+def control_pins():
+    """Keep every test, counting fixture and hostile-control helper byte-identical."""
+    def fragments(data):
+        lines, pins = data.splitlines(keepends=True), {}
+        for node in ast.parse(data).body:
+            if isinstance(node, ast.FunctionDef) and (
+                node.name.startswith("test_") or node.name in (
+                    "actual_receipt", "record", "hostile_check", "disabled_binding",
+                    "replacement", "mutation_context",
+                )
+            ):
+                start = min([node.lineno] + [d.lineno for d in node.decorator_list])
+                pins[node.name] = digest(b"".join(lines[start - 1:node.end_lineno]))
+            elif isinstance(node, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id == "MUTATIONS" for target in node.targets
+            ):
+                pins["MUTATIONS"] = digest(b"".join(lines[node.lineno - 1:node.end_lineno]))
+        return pins
+    expected = fragments(git_bytes("show", REVIEW_BASE + ":" + TEST))
+    assert expected == fragments(Path(__file__).read_bytes()), "frozen96 control bytes changed"
+    return expected
+
+
+def frozen_failure():
+    assert sha(FROZEN_RECEIPT) == FROZEN_RECEIPT_SHA, "frozen96 FAIL receipt drift"
+    value = json.loads(FROZEN_RECEIPT.read_text())
+    assert value["verdict"] == "FAIL" and value["tests"] == {
+        "tests": 96, "passed": 91, "failures": 5, "errors": 0, "skipped": 0,
+    }
+    assert value["original45"]["passed"] == 45
+    return value
+
+
+def entry_probe():
+    """A read-only profile proves collect-only never invokes a solver or checker."""
+    raw = os.environ.get(PROBE_ENV)
+    if raw is None:
+        return
+    path = Path(raw).resolve()
+    assert path.is_relative_to(EXTERNAL) and not path.is_relative_to(ROOT)
+    assert not path.is_relative_to(REVIEW_ROOT), "external entry probe required"
+    previous = sys.getprofile()
+    assert previous is None, "entry probe profile collision"
+    calls = []
+    codes = {
+        hsd.prepare_hsd_lp.__code__, hsd.solve_hsd_lp.__code__,
+        hsd.PreparedHSDLP.solve.__wrapped__.__code__,
+        hsd.check_hsd_candidate.__code__, hsd.check_hsd_primal_ray.__code__,
+        hsd.check_hsd_recession_ray.__code__,
+    }
+    linear = (torch.linalg.lu_factor_ex, torch.linalg.lu_solve)
+
+    def observe(frame, event, arg):
+        if (event == "call" and frame.f_code in codes) or (
+            event == "c_call" and any(arg is function for function in linear)
+        ):
+            calls.append(frame.f_code.co_name)
+            raise AssertionError("no-solve entry invoked numerical execution")
+
+    def finish():
+        sys.setprofile(previous)
+        before = OWNER_MAP["source"] if OWNER_MAP else complete_snapshot(ROOT)
+        after = complete_snapshot(ROOT)
+        json_write(path, {
+            "schema": "hsd-independent-entry-probe-v1",
+            "verdict": "PASS" if not calls and before == after else "FAIL",
+            "numerical_calls": calls, "solver_calls": len(calls),
+            "owner_map": OWNER_MAP, "source_before": before, "source_after": after,
+            "loaded": {m.__name__: {"file": m.__file__, "origin": m.__spec__.origin}
+                       for m in (hsd, conic, native)},
+            "controls": control_pins(),
+        })
+
+    sys.setprofile(observe)
+    atexit.register(finish)
+
+
+entry_probe()
 ORIGINAL_BYTES = git_bytes("show", HISTORICAL_REVIEW + ":" + HISTORICAL_TEST)
 assert digest(ORIGINAL_BYTES) == HISTORICAL_TEST_SHA, "historical test byte pin"
 legacy = ModuleType("tests._hsd_original45_pinned")
@@ -454,8 +601,13 @@ def test_post_iteration_closure_rejects(mutation, request, tmp_path):
 
 
 def source_snapshot():
-    from scripts.verify import source_snapshot as snapshot
-    return snapshot(ROOT)
+    reviewer = complete_snapshot(REVIEW_ROOT)
+    if OWNER_MAP is None:
+        return reviewer
+    return {
+        **reviewer, "owner_root": str(ROOT), "owner_commit": OWNER,
+        "owner_source": complete_snapshot(ROOT),
+    }
 
 
 def run_logged(command, path, env, timeout):
@@ -464,7 +616,7 @@ def run_logged(command, path, env, timeout):
         log.write(f"command={command!r}\n")
         log.flush()
         try:
-            result = subprocess.run(command, cwd=ROOT, env=env, stdout=log,
+            result = subprocess.run(command, cwd=REVIEW_ROOT, env=env, stdout=log,
                                     stderr=subprocess.STDOUT, timeout=timeout, check=False)
             rc = result.returncode
         except subprocess.TimeoutExpired:
@@ -477,6 +629,7 @@ def run_logged(command, path, env, timeout):
 def review_cli(root, development=False):
     root = root.resolve()
     assert root.is_relative_to(EXTERNAL) and not root.is_relative_to(ROOT), "external artifacts"
+    assert not root.is_relative_to(REVIEW_ROOT), "external reviewer artifacts"
     root.mkdir(parents=True, exist_ok=True)
     directory = Path(tempfile.mkdtemp(prefix="review-", dir=root))
     started = datetime.now(timezone.utc).isoformat()
@@ -488,11 +641,16 @@ def review_cli(root, development=False):
     env.update(CUDA_VISIBLE_DEVICES="-1", PYTHONDONTWRITEBYTECODE="1",
                OPENBLAS_NUM_THREADS="1", OMP_NUM_THREADS="1", MKL_NUM_THREADS="1",
                PYTEST_DISABLE_PLUGIN_AUTOLOAD="1", TMPDIR=str(directory),
-               PYTHONPATH=os.pathsep.join([str(ROOT / "src"), str(ROOT)]))
+               PYTHONPATH=os.pathsep.join([str(ROOT / "src"), str(REVIEW_ROOT)]))
+    if OWNER_MAP is not None:
+        env[MAP_ENV] = json.dumps(OWNER_MAP, sort_keys=True, allow_nan=False)
     rc, collect_rc = 2, None
     timings = {}
     try:
         assert development or before["clean"], "clean reviewer source required"
+        control_pins()
+        if OWNER_MAP is not None:
+            assert before["owner_source"] == OWNER_MAP["source"], "owner source drift before run"
         owner_binding()
         base = [sys.executable, "-B", "-m", "pytest", "-q", "-ra",
                 "-o", f"cache_dir={directory / 'cache'}"]
@@ -578,7 +736,8 @@ def review_cli(root, development=False):
     original_nodes = [n for n in membership if n.split("::", 1)[1].split("[", 1)[0]
                       in ORIGINAL_FUNCTION_PINS]
     receipt = {
-        "schema": "hsd-loaded-repair-independent-v1", "verdict": "PASS" if accepted else "FAIL",
+        "schema": ("hsd-loaded-repair-independent-v2" if OWNER_MAP else
+                   "hsd-loaded-repair-independent-v1"), "verdict": "PASS" if accepted else "FAIL",
         "accept_hsd_loaded_repair": accepted, "returncode": rc, "collection_returncode": collect_rc,
         "started_at": started, "finished_at": datetime.now(timezone.utc).isoformat(),
         "source_before": before, "source_after": after, "source_consistency": consistent,
@@ -604,6 +763,14 @@ def review_cli(root, development=False):
         "gpu_jobs_submitted": 0, "cuda_verdict": "UNVERIFIED",
         "commercial_verdict": "UNVERIFIED", "remote_execution_verdict": "UNVERIFIED",
     }
+    if OWNER_MAP is not None:
+        receipt["owner_map"] = OWNER_MAP
+        receipt["control_sha256"] = control_pins()
+        frozen_failure()
+        receipt["previous_loaded_review"] = {
+            "path": str(FROZEN_RECEIPT), "sha256": FROZEN_RECEIPT_SHA, "verdict": "FAIL",
+            "not_upgraded": True,
+        }
     path = directory / "receipt.json"
     json_write(path, receipt)
     print(f"HSD_LOADED_REPAIR_INDEPENDENT verdict={receipt['verdict']} tests={counts} "
@@ -616,7 +783,16 @@ def check_receipt(path):
     path = path.resolve(strict=True)
     assert path.is_relative_to(EXTERNAL), "external receipt required"
     value = json.loads(path.read_text())
-    assert value["schema"] == "hsd-loaded-repair-independent-v1"
+    assert value["schema"] == ("hsd-loaded-repair-independent-v2" if OWNER_MAP else
+                               "hsd-loaded-repair-independent-v1")
+    if OWNER_MAP is not None:
+        assert value["owner_map"] == OWNER_MAP, "caller owner map differs from receipt"
+        assert value["control_sha256"] == control_pins()
+        frozen_failure()
+        assert value["previous_loaded_review"] == {
+            "path": str(FROZEN_RECEIPT), "sha256": FROZEN_RECEIPT_SHA, "verdict": "FAIL",
+            "not_upgraded": True,
+        }
     assert value["owner"] == OWNER and value["owner_sha256"] == owner_binding()
     current = source_snapshot()
     assert current["clean"] and value["source_before"] == value["source_after"] == current
@@ -677,6 +853,143 @@ def check_receipt(path):
     return 0 if expected_pass else 1
 
 
+def owner_entry_cli(artifact_root, development=False):
+    """Collect the exact frozen96 with an execution trap; not owner acceptance."""
+    assert OWNER_MAP is not None, "check-owner requires explicit caller owner"
+    root = artifact_root.resolve()
+    assert root.is_relative_to(EXTERNAL)
+    assert not root.is_relative_to(ROOT) and not root.is_relative_to(REVIEW_ROOT)
+    root.mkdir(parents=True, exist_ok=True)
+    directory = Path(tempfile.mkdtemp(prefix="entry-", dir=root))
+    started = datetime.now(timezone.utc).isoformat()
+    before = source_snapshot()
+    selection, first, rc, probe = [], None, 2, None
+    env = os.environ.copy()
+    env.update(CUDA_VISIBLE_DEVICES="-1", PYTHONDONTWRITEBYTECODE="1",
+               OPENBLAS_NUM_THREADS="1", OMP_NUM_THREADS="1", MKL_NUM_THREADS="1",
+               PYTEST_DISABLE_PLUGIN_AUTOLOAD="1", TMPDIR=str(directory),
+               PYTHONPATH=os.pathsep.join([str(ROOT / "src"), str(REVIEW_ROOT)]))
+    env[MAP_ENV] = json.dumps(OWNER_MAP, sort_keys=True, allow_nan=False)
+    env[PROBE_ENV] = str(directory / "probe.json")
+    try:
+        assert development or before["clean"], "clean reviewer required"
+        assert before["owner_source"] == OWNER_MAP["source"], "owner source changed"
+        owner_binding()
+        pins = control_pins()
+        rc, _ = run_logged(
+            [sys.executable, "-B", "-m", "pytest", "-q", "--collect-only",
+             "-o", f"cache_dir={directory / 'cache'}", TEST],
+            directory / "collection.log", env, 25,
+        )
+        assert rc == 0, "owner collection failed"
+        selection = [line for line in (directory / "collection.log").read_text().splitlines()
+                     if line.startswith(TEST + "::")]
+        old = frozen_failure()
+        assert len(selection) == len(set(selection)) == 96
+        assert set(selection) == set(old["selection"]), "frozen96 membership changed"
+        probe = json.loads((directory / "probe.json").read_text())
+        assert probe["verdict"] == "PASS" and probe["solver_calls"] == 0
+        assert probe["owner_map"] == OWNER_MAP and probe["controls"] == pins
+        assert probe["source_before"] == probe["source_after"] == before["owner_source"]
+    except (AssertionError, OSError, ValueError, subprocess.CalledProcessError) as error:
+        first = {"stage": "owner-entry", "reason": str(error)}
+    after = source_snapshot()
+    if before != after:
+        first = first or {"stage": "source", "reason": "reviewer/owner drift"}
+    good = rc == 0 and first is None and before == after
+    path = directory / "receipt.json"
+    json_write(path, {
+        "schema": "hsd-independent-owner-entry-v1", "verdict": "PASS" if good else "FAIL",
+        "accept_hsd_loaded_repair": False, "qualification": "mapping/collection only; no solves",
+        "started_at": started, "finished_at": datetime.now(timezone.utc).isoformat(),
+        "returncode": rc, "first_failure": first, "selection": selection,
+        "owner_map": OWNER_MAP, "source_before": before, "source_after": after,
+        "source_consistency": before == after, "probe": probe,
+        "artifacts": {p.name: sha(p) for p in directory.iterdir() if p.is_file()},
+    })
+    print(f"HSD_OWNER_ENTRY verdict={'PASS' if good else 'FAIL'} nodes={len(selection)} "
+          f"acceptance=UNVERIFIED receipt={path} sha256={sha(path)}", flush=True)
+    return 0 if good else 1
+
+
+def entry_selftest(artifact_root):
+    """Real CLI negatives and collect-only positives, without numerical execution."""
+    root = artifact_root.resolve()
+    assert root.is_relative_to(EXTERNAL) and not root.is_relative_to(REVIEW_ROOT)
+    root.mkdir(parents=True, exist_ok=True)
+    directory = Path(tempfile.mkdtemp(prefix="entry-selftest-", dir=root))
+    before = source_snapshot()
+    old_root = "/data/dev/openopt-wt-release4-20261010-hsd-loaded-repair-independent"
+    baseline = mapped_owner(old_root, REVIEW_BASE)
+    pins = control_pins()
+    env = os.environ.copy()
+    env.pop(MAP_ENV, None)
+    env.pop(PROBE_ENV, None)
+    env.update(CUDA_VISIBLE_DEVICES="-1", PYTHONDONTWRITEBYTECODE="1",
+               OPENBLAS_NUM_THREADS="1", OMP_NUM_THREADS="1", MKL_NUM_THREADS="1",
+               PYTEST_DISABLE_PLUGIN_AUTOLOAD="1", TMPDIR=str(directory),
+               PYTHONPATH=os.pathsep.join([str(REVIEW_ROOT / "src"), str(REVIEW_ROOT)]))
+    command = [sys.executable, "-B", str(REVIEW_ROOT / TEST)]
+    negatives = {
+        "unpaired_root": (["--owner-root", old_root], "owner parameters must be paired"),
+        "unpaired_commit": (["--owner-commit", REVIEW_BASE], "owner parameters must be paired"),
+        "short_commit": (["--owner-root", old_root, "--owner-commit", REVIEW_BASE[:7]],
+                         "full lowercase owner commit required"),
+        "wrong_commit": (["--owner-root", old_root, "--owner-commit",
+                          "6cefdcf0b1f2a05c76c26dceafbf10430bc67169"],
+                         "owner HEAD differs from caller commit"),
+        "nested_root": (["--owner-root", old_root + "/src", "--owner-commit", REVIEW_BASE],
+                        "owner root must be the Git top-level"),
+        "relative_root": (["--owner-root", ".", "--owner-commit", REVIEW_BASE],
+                          "absolute owner root required"),
+    }
+    results = []
+    for name, (args, reason) in negatives.items():
+        rc, seconds = run_logged(command + args + ["--check-owner", "--artifact-dir",
+                                  str(directory / name)], directory / (name + ".log"), env, 15)
+        text = (directory / (name + ".log")).read_text()
+        assert rc != 0 and rc != 124 and reason in text, name + " negative failed"
+        results.append({"case": name, "returncode": rc, "rejected": True, "seconds": seconds})
+    rc, seconds = run_logged(command + ["--owner-root", old_root, "--owner-commit", REVIEW_BASE,
+                             "--check-owner", "--development", "--artifact-dir",
+                             str(directory / "positive")],
+                             directory / "positive.log", env, 25)
+    assert rc == 0, "actual owner-entry positive"
+    positive = list((directory / "positive").rglob("receipt.json"))
+    assert len(positive) == 1
+    value = json.loads(positive[0].read_text())
+    assert value["verdict"] == "PASS" and len(value["selection"]) == 96
+    assert value["probe"]["solver_calls"] == 0 and value["owner_map"] == baseline
+    results.append({"case": "positive", "returncode": rc, "seconds": seconds,
+                    "receipt": str(positive[0]), "sha256": sha(positive[0])})
+    bad = json.loads(json.dumps(baseline))
+    bad["sha256"]["src/openopt/hsd_lp.py"] = "0" * 64
+    env[MAP_ENV] = json.dumps(bad)
+    rc, seconds = run_logged(
+        [sys.executable, "-B", "-m", "pytest", "-q", "--collect-only",
+         "-o", f"cache_dir={directory / 'bad-cache'}", TEST],
+        directory / "transport.log", env, 15,
+    )
+    assert rc != 0 and rc != 124 and "owner transport/source mismatch" in (
+        directory / "transport.log").read_text()
+    results.append({"case": "transport_rehash", "returncode": rc, "rejected": True,
+                    "seconds": seconds})
+    after = source_snapshot()
+    assert before == after and complete_snapshot(Path(old_root)) == baseline["source"]
+    path = directory / "receipt.json"
+    json_write(path, {
+        "schema": "hsd-independent-entry-selftest-v1", "verdict": "PASS",
+        "accept_hsd_loaded_repair": False, "tests": len(results),
+        "solver_calls": 0, "results": results, "control_sha256": pins,
+        "source_before": before, "source_after": after, "source_consistency": True,
+        "artifacts": {str(p.relative_to(directory)): sha(p) for p in directory.rglob("*")
+                      if p.is_file()},
+    })
+    print(f"HSD_ENTRY_SELFTEST verdict=PASS controls={len(results)} solver_calls=0 "
+          f"receipt={path} sha256={sha(path)}", flush=True)
+    return 0
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--artifact-dir", type=Path)
@@ -684,11 +997,21 @@ if __name__ == "__main__":
     parser.add_argument("--scan-tool", type=Path)
     parser.add_argument("--needle-file", type=Path)
     parser.add_argument("--check-receipt", type=Path)
+    parser.add_argument("--owner-root", type=Path)
+    parser.add_argument("--owner-commit")
+    parser.add_argument("--check-owner", action="store_true")
+    parser.add_argument("--entry-selftest", action="store_true")
     args = parser.parse_args()
     if args.check_receipt:
         raise SystemExit(check_receipt(args.check_receipt))
     assert args.artifact_dir
+    if args.entry_selftest:
+        assert OWNER_MAP is None, "selftest must not select moving owner"
+        raise SystemExit(entry_selftest(args.artifact_dir))
+    if args.check_owner:
+        raise SystemExit(owner_entry_cli(args.artifact_dir, args.development))
     if args.scan_tool:
+        assert OWNER_MAP is None, "scan reviewer only"
         assert args.needle_file
         raise SystemExit(legacy.scan_cli(args.artifact_dir, args.scan_tool, args.needle_file))
     raise SystemExit(review_cli(args.artifact_dir, args.development))
