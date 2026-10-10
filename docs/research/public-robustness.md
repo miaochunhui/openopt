@@ -1,5 +1,165 @@
 # Explicit Public CPU Robustness Experiment
 
+## V3 Executable Worker Binding
+
+This new scope implements `public-qp-worker-v3` in
+`scripts/qualify_public_qp.py`, based strictly on
+`acc199306936922b6d75330884310a58cde84a9b`. It does not cherry-pick preview
+`a668d72987c128c84083228bb30b0e419076deab` or other unreviewed algorithms.
+The preview remains CONTRACT_ONLY_NOT_EXECUTION. The original qualifier v1
+and robustness v2 entry points/contracts are unchanged; neither accepts v3
+results. V2 still rejects the new refinement field rather than widening its
+old field set. V3 is a separate executable/versioned path, not backfilled v1/v2.
+
+Only bounded synthetic frozen models are authorized here: one to four cases,
+1 <= n <= 8 and m <= 64 after original variable bounds become solver rows.
+Public origin is explicitly rejected even with source acceptance. No public
+real model was solved, downloaded or redistributed. No GPU, installation,
+production interface change, numerical tolerance relaxation or license claim
+is included. A completed execution is not qualification:
+`EXECUTION_COMPLETE_NOT_QUALIFICATION`, public/industrial counts zero.
+Numerical failure remains UNQUALIFIED and cannot become success via refinement.
+
+The complete producer-owned contract specifies all 19 QPConfig, seven
+ScalingConfig and nine RefinementConfig fields, including
+`check_arithmetic=reproducible_binary64_v2`. Refinement and final independent
+candidate replay use that bounded arithmetic explicitly; the unchanged QP
+internal termination and scaling validation still use their original numpy
+checker. There is no arithmetic fallback or claim that all internals use v2.
+Six original-model gates remain atol=rtol=1e-7 with exact wrong-infinite-side
+support/sign rejection, range/dual/gap availability and component thresholds.
+Solve targets are 1e-10; Openopt/OSQP max iterations 2000, Clarabel 200.
+The bounded reproducible arithmetic rejects unsupported dimensions,
+nonrepresentable/subnormal arithmetic and unresolved spectra. It is not an
+exact proof, a complete LP/QP interface or evidence of general robustness.
+
+OSQP's full requested/effective field sets and Clarabel's complete 45-field
+settings derive from the explicitly pinned, unchanged v2 contract source,
+not saved result metadata. All fields/types/values must match independently
+at requested, effective, before-solve and after-solve stages. Arbitrary
+resealing of plan, rows, worker receipts and byte inventory cannot redefine
+the local producer contract. Clarabel presolve=false/max_threads=1 and OSQP
+builtin/direct/warm_starting=0 are mandatory. Missing/new fields fail loudly.
+No caller setting/source/device overrides are accepted on v3.
+
+Each case/backend gets one worker with exactly two labelled attempts:
+cold creates inputs/equilibration/workspace and solves; hot reuses that same
+workspace but starts a new zero/default-initialized solve. Openopt initializes
+x=y=0 and z=projection(0), resetting rho/factor on each call; OSQP disables
+warm starts; Clarabel uses DefaultSolver's default initialization, not a warm
+start API. No previous candidate is passed to hot or to another backend.
+Both modes include host output and Openopt's original-coordinate refinement.
+Hot excludes setup/equilibration/initial factorization. This is not a timing
+race, general cold/hot equivalence guarantee or speed claim.
+
+Actual solver entry counts use an observer of the unwrapped Python bound
+workspace method and temporary wrappers around the true pybind bound method,
+always calling the original method and restoring it immediately. Every mode
+requires workspace_solve=1, other_solver=warm_start=0; OSQP also observes
+one native solve under its wrapper. Each Openopt mode records one refinement
+proposal, not an extra solver attempt. A missing solve must fail rather than
+incrementing a loop counter and claiming execution. Test replay traps Python
+and native solve/refinement entries, including newly loaded frozen modules.
+
+Source identity checks immutable base bytes via Git, all seven selected source
+pins and copied bytes, and actual core module __file__/__spec__.origin before
+and after the worker. The producer itself must match the local trusted
+runner.py, not only a rehashed saved runner. Runtime is explicitly Python
+3.10.20, numpy 2.2.6, scipy 1.15.3, torch 2.8.0+cu128 (CPU execution), osqp
+1.0.4, clarabel 0.11.1 and highspy 1.15.1. Entry/native-module bytes, package
+versions and selected loaded OpenBLAS/OpenMP library bytes are pinned.
+Actual OpenBLAS/OpenMP thread queries and torch intra/inter-op must be one;
+OMP/OPENBLAS/MKL=1, CUDA_VISIBLE_DEVICES=-1 and no-bytecode settings must match.
+Missing native-thread observation fails; no new dependency is installed.
+This selected loaded-byte closure is not every shared library/package,
+attestation against malicious trusted code, or proof of hardware execution.
+
+Result/plan/corpus pins, complete case x backend x cold/hot membership,
+original-array hashes before/after, exact inventory, mode-specific sidecars,
+raw vectors, transformations, status and all independent numerical gates
+are replayed without solve/refinement. Ruiz factors are recomputed without
+solving, restored x/y and signed Clarabel cone mappings are verified.
+Rejected refinement retains baseline values; accepted proposals require all
+original gates and nonworsening metrics. Exhausted status cannot be upgraded.
+Failures stop new affected workers immediately, preserve firstcause/log/exit,
+and retain the full predeclared denominator. Failed runs are not replay-qualified.
+Outputs are exclusive-create and outside the worktree; old evidence is immutable.
+
+### V3 Verification Entry
+
+Default tests do not require the exact producer runtime or mounted public
+evidence. Actual local-native execution, coordinated v3 artifact tampering and
+runtime probes require `OPENOPT_RUN_PUBLIC_V3_WORKER_TESTS=1`. Enabled missing
+or incompatible dependencies/runtime fail loudly, not skip. All actual
+models are synthetic MPS generated in external pytest tmp. No fabricated
+metadata is treated as worker execution.
+
+```bash
+sudo -n -u infra env CUDA_VISIBLE_DEVICES=-1 PYTHONDONTWRITEBYTECODE=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 /hf3fs-jd/data/tmp/openopt-validation-env/bin/python -B scripts/verify.py tests --target tests/test_qualify_public_qp.py --artifact-dir /hf3fs-jd/data/tmp/openopt-release-20261010/public-v3-worker-binding/default-new
+sudo -n -u infra env OPENOPT_RUN_PUBLIC_V3_WORKER_TESTS=1 CUDA_VISIBLE_DEVICES=-1 PYTHONDONTWRITEBYTECODE=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 /hf3fs-jd/data/tmp/openopt-validation-env/bin/python -B scripts/verify.py tests --target tests/test_qualify_public_qp.py --artifact-dir /hf3fs-jd/data/tmp/openopt-release-20261010/public-v3-worker-binding/optin-new
+sudo -n -u infra env CUDA_VISIBLE_DEVICES=-1 PYTHONDONTWRITEBYTECODE=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 /hf3fs-jd/data/tmp/openopt-validation-env/bin/python -B scripts/qualify_public_qp.py replay --version public-qp-worker-v3 --result EXTERNAL_RESULT --result-sha256 CALLER_PIN
+```
+
+Standalone `run --version public-qp-worker-v3 --corpus FROZEN_SYNTHETIC_DIR
+--manifest-sha256 CALLER_CORPUS_PIN --artifact-dir NEW_3FS_DIR` executes
+the frozen contract. `worker --version public-qp-worker-v3` additionally
+requires the caller plan SHA and worker index; it is not an unpinned entry.
+The numerical gate never maps completion exit 0 to public qualification PASS.
+Main owns any later real public-model authorization and independent review.
+
+### Retained V3 Development Reds
+
+Evidence root:
+`/hf3fs-jd/data/tmp/openopt-release-20261010/public-v3-worker-binding/`.
+Pre-smoke `pre-smoke/smoke-5kw08h1_` is 80 passed/four CUDA skips/8.18s,
+source consistency PASS. Cheap initial controls
+`cheap-controls-v1/tests-_du1xcrp` passed 14/4.17s.
+`actual-v1/tests-n_7eitre` retains one test failure/42.66s: all 12 real
+synthetic solves finished, but replay's parent torch inter-op was not one.
+V3 replay now explicitly initializes and observes the required threads.
+`call-observed-v3/tests-8oyjsrn8` retains one setup error/11.30s: no_grad
+decorator hid the original solve's self from the profiler. The observer now
+unwraps the actual method. `call-observed-v4/tests-qm080024` retains one
+setup error/17.91s: OSQP pybind does not emit profiler c_call events.
+Actual native entry wrappers fixed observation without loosening counts.
+`call-observed-v5/tests-97q1lfdn` passed actual 12-solve/replay test/46.03s.
+These are development receipts, not clean-source final acceptance.
+Final frozen receipt coordinates follow separately; no historical red is
+overwritten or counted as a passing execution.
+
+Final development full-file receipts (same final producer/test bytes, before
+this documentation-only receipt addition):
+
+- Default `default-final-v1/tests-0skr5_mk/verification.json`, SHA256
+  `7b5a8cf2c35fa9b508dfe3644a69aa484475248abee69b929deafa6fd899f612`:
+  50 passed, 23 explicit exact-runtime execution skips, 43.91s.
+- Opt-in `optin-final-v1/tests-8u27gbzf/verification.json`, SHA256
+  `17bb580d3dd99b6434d9945f95fafc240a786259d4a86598957372bda00efc84`:
+  73 passed, zero failures/errors/skips, 130.73s. Source consistency PASS,
+  294 files, finished 2026-10-10T12:43:45.966997+00:00.
+- Actual synthetic execution is
+  `optin-final-v1/tests-8u27gbzf/pytest-tmp/v3-actual0/execution/result.json`,
+  SHA256 `dc46e4d8ae9a76326bc7d813f0cb69aba18e924c4fd046c32fcabddc7484e3dd`;
+  plan SHA256 `c0295136c0d744b383cf2b4d53ba72f88e38705e7e7aaee5bdc162eaff46045f`.
+  Actual counts: 12 workspace solves, four nested OSQP native calls, four
+  Openopt refinement proposals, zero other-solver/warm-start calls.
+  Twelve of twelve original candidates pass the unchanged six gates;
+  numerical PASS is synthetic only, public/industrial counts zero.
+- External `optin-final-v1/tests-8u27gbzf/pytest-tmp/v3-actual0/replay.json`
+  round-trips JSON, replaying 12/12 with solve_calls=0. It was checked at
+  2026-10-10T12:42:53.431856+00:00, not asserted as permanent acceptance.
+
+Opt-in negatives include six fully coordinated settings reseals (OSQP
+max_iter/warm_starting, Clarabel max_iter/max_threads/presolve_enable,
+Openopt check_arithmetic), eleven identity/denominator/summary variants,
+all four settings stages' field/type controls, five installed-version
+differences, invalid worker plan pin, observed missing-solve failure,
+actual worker firstcause/stop-without-retry and accepted-refinement with
+max_iterations remaining UNQUALIFIED. The original v1 CPU format/function
+regressions also run; tests/receipts are not distinct industrial cases.
+Clean frozen post-smoke/verification receipts are handed off externally,
+without editing these immutable development artifacts or historical results.
+
 This is a three-file, opt-in experiment, not a solver/checker/runner/importer
 repair or a qualification report. Baseline is the caller-pinned negative
 two-LP run; its six attempts are copied byte-for-byte and replayed, not rerun.

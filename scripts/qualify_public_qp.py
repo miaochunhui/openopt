@@ -8,16 +8,21 @@ Exit 0=PASS, 1=UNQUALIFIED, 2=FAIL; a synthetic run can never be public PASS.
 from __future__ import annotations
 
 import argparse
+import ctypes
 from dataclasses import asdict
 from datetime import datetime, timezone
 import hashlib
 import importlib.metadata
 import importlib.util
+import inspect
 import json
 import math
+import os
 from pathlib import Path
 import re
 import sys
+import subprocess
+import time
 import traceback
 from types import ModuleType, SimpleNamespace
 from urllib.parse import urlsplit
@@ -31,6 +36,21 @@ import numpy as np
 from scripts import public_qp_corpus as corpus
 
 VERSION = "public-qp-qualification-v1"
+V3 = "public-qp-worker-v3"
+V3_BASE = "acc199306936922b6d75330884310a58cde84a9b"
+V3_ARITHMETIC = "reproducible_binary64_v2"
+V3_MODES = ("cold", "hot")
+V3_GATES = {"eps_abs": 1e-7, "eps_rel": 1e-7,
+            "direction_atol": 1e-8, "direction_rtol": 1e-8}
+V3_ENV = {"CUDA_VISIBLE_DEVICES": "-1", "PYTHONDONTWRITEBYTECODE": "1",
+          "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}
+V3_SOURCES = {
+    "runner.py": "scripts/qualify_public_qp.py",
+    "importer.py": "scripts/public_qp_corpus.py",
+    "contracts.py": "scripts/experiment_public_robustness.py",
+    "qp.py": "src/openopt/qp.py", "certificates.py": "src/openopt/certificates.py",
+    "scaling.py": "src/openopt/scaling.py", "refinement.py": "src/openopt/refinement.py",
+}
 SHARED_TMP = Path("/hf3fs-jd/data/tmp").resolve()
 SOLVERS = ("openopt", "osqp", "clarabel")
 VECTOR_NAMES = ("x", "y", "primal_direction", "dual_direction", "feasible_base",
@@ -635,10 +655,744 @@ def replay(result_path: Path, result_pin: str) -> dict:
             "attempted_count": report["attempted_count"], "numerically_replayed": checked}
 
 
+def v3_exact(actual, expected, context: str) -> None:
+    """Types, complete field sets and exact values are part of the contract."""
+    if type(actual) is not type(expected):
+        raise ValueError(f"{context}: type mismatch")
+    if isinstance(expected, dict):
+        if actual.keys() != expected.keys():
+            raise ValueError(f"{context}: field membership mismatch")
+        for key in expected:
+            v3_exact(actual[key], expected[key], f"{context}.{key}")
+    elif isinstance(expected, list):
+        if len(actual) != len(expected):
+            raise ValueError(f"{context}: length mismatch")
+        for index, value in enumerate(expected):
+            v3_exact(actual[index], value, f"{context}[{index}]")
+    elif actual != expected:
+        raise ValueError(f"{context}: value mismatch")
+
+
+def v3_sources() -> dict:
+    """The trusted local producer and immutable base, not rehashed sidecar code."""
+    pins = {}
+    for name, relative in V3_SOURCES.items():
+        path = ROOT / relative
+        raw = path.read_bytes()
+        if name != "runner.py":
+            found = subprocess.run(["git", "show", f"{V3_BASE}:{relative}"], cwd=ROOT,
+                                   capture_output=True, check=False)
+            if found.returncode or raw != found.stdout:
+                raise ValueError(f"v3 dependency differs from reviewed base: {relative}")
+        pins[name] = hashlib.sha256(raw).hexdigest()
+    return pins
+
+
+def v3_core(directory: Path):
+    core = load_core(directory)
+    package = core.qp.__package__
+    core.scaling = load_module(directory / "scaling.py", package + ".scaling")
+    core.refinement = load_module(directory / "refinement.py", package + ".refinement")
+    return core
+
+
+def v3_contracts_module():
+    from scripts import experiment_public_robustness
+
+    return experiment_public_robustness
+
+
+def v3_settings() -> dict:
+    """No defaults derived from saved metadata, or from an unreviewed new API."""
+    contracts = v3_contracts_module()
+    return {
+        "openopt": {
+            "solver": {
+                "device": "cpu", "dtype": "torch.float64", "rho": 1.0, "sigma": 1e-6,
+                "relaxation": 1.6, "max_iterations": 2000, "check_interval": 25,
+                "eps_abs": 1e-10, "eps_rel": 1e-10, "linear_solver": "cholesky",
+                "adaptive_rho": True, "adaptive_rho_interval": 100,
+                "adaptive_rho_tolerance": 5.0, "rho_min": 1e-6, "rho_max": 1e6,
+                "dual_gap_termination": True, "direction_termination": True,
+                "direction_atol": 1e-8, "direction_rtol": 1e-8,
+            },
+            "scaling": {"method": "ruiz", "iterations": 10, "scale_min": 1e-6,
+                        "scale_max": 1e6, "objective_scaling": True,
+                        "check_atol": 1e-7, "check_rtol": 1e-7},
+            "refinement": {"device": "cpu", "dtype": "torch.float64",
+                           "factor_dtype": "torch.float64", "max_refinement_steps": 3,
+                           "active_atol": 1e-5, "active_rtol": 1e-7, "check_atol": 1e-7,
+                           "check_rtol": 1e-7, "check_arithmetic": V3_ARITHMETIC},
+        },
+        "osqp": {"requested": {**contracts.OSQP_REQUESTED, "max_iter": 2000},
+                 "effective": {**contracts.OSQP_EFFECTIVE, "max_iter": 2000}},
+        "clarabel": {"requested": dict(contracts.CLARABEL_EFFECTIVE),
+                     "effective": dict(contracts.CLARABEL_EFFECTIVE)},
+    }
+
+
+def v3_configs(core):
+    import torch
+
+    configs = []
+    for name, cls in (("solver", core.qp.QPConfig), ("scaling", core.scaling.ScalingConfig),
+                      ("refinement", core.refinement.RefinementConfig)):
+        values = dict(v3_settings()["openopt"][name])
+        for key in ("dtype", "factor_dtype"):
+            if key in values:
+                values[key] = torch.float64
+        config = cls(**values)
+        observed = {key: str(value) if key in ("dtype", "factor_dtype") else value
+                    for key, value in asdict(config).items()}
+        v3_exact(observed, v3_settings()["openopt"][name], f"v3 {name} API/settings")
+        configs.append(config)
+    return tuple(configs)
+
+
+def v3_execution_contract() -> dict:
+    return {
+        "schema_version": 3, "version": V3, "base_commit": V3_BASE,
+        "scope": "bounded synthetic CPU worker execution only; not public qualification",
+        "gates": dict(V3_GATES), "settings": v3_settings(), "modes": list(V3_MODES),
+        "checker_arithmetic": V3_ARITHMETIC,
+        "cold_hot": {
+            "attempts_per_mode": 1, "solves_per_worker": 2, "warm_start": False,
+            "cold": "fresh setup + solve + original-coordinate refinement/host output",
+            "hot": "same workspace; new zero-initialized solve; no previous x/y input",
+            "openopt_initialization": "x=y=0; z=projection(0); reset rho and factor",
+            "osqp_initialization": "warm_starting=0; no warm_start call",
+            "clarabel_initialization": "DefaultSolver.solve default initialization; no warm-start API",
+            "hot_excludes": "module/runtime/input setup, equilibration and initial factorization",
+            "timing_claim": False,
+        },
+        "environment": dict(V3_ENV), "torch_intraop": 1, "torch_interop": 1,
+        "dimension_limit": {"max_n": 8, "max_m": 64, "max_cases": 4},
+        "public_execution_authorized": False, "license_verified": False,
+        "public_redistribution": False, "automatic_retry": False, "tiny_dual_clipping": False,
+    }
+
+
+def v3_runtime() -> dict:
+    """Observe selected loaded entry/native bytes and query actual native threads."""
+    import importlib
+    import torch
+
+    contracts = v3_contracts_module()
+    modules = {}
+    for name in ("numpy", "numpy._core._multiarray_umath", "scipy", "scipy.linalg._flapack",
+                 "scipy.sparse", "torch", "torch._C", "osqp", "osqp.interface",
+                 "osqp.ext_builtin", "clarabel", "clarabel.clarabel", "highspy",
+                 "highspy._core"):
+        module = importlib.import_module(name)
+        path = Path(module.__file__).resolve(strict=True)
+        modules[name] = {"file": path.name, "sha256": digest(path)}
+    versions = {name: importlib.metadata.version(name)
+                for name in (*contracts.PACKAGE_VERSIONS, "highspy")}
+    v3_exact({name: versions[name] for name in contracts.PACKAGE_VERSIONS},
+             contracts.PACKAGE_VERSIONS, "v3 runtime packages")
+    v3_exact(sys.version.split()[0], "3.10.20", "v3 runtime Python")
+    v3_exact(versions["highspy"], "1.15.1", "v3 runtime highspy")
+    for name in contracts.PACKAGE_VERSIONS:
+        v3_exact(str(importlib.import_module(name).__version__), versions[name],
+                 f"v3 loaded version {name}")
+    environment = {key: os.environ.get(key) for key in V3_ENV}
+    v3_exact(environment, V3_ENV, "v3 thread environment")
+    v3_exact(torch.get_num_threads(), 1, "v3 torch intraop threads")
+    v3_exact(torch.get_num_interop_threads(), 1, "v3 torch interop threads")
+    libraries = {}
+    paths = set()
+    for line in Path("/proc/self/maps").read_text().splitlines():
+        fields = line.split()
+        if len(fields) >= 6 and fields[-1].startswith("/"):
+            path = Path(fields[-1])
+            if "site-packages" in str(path) and (
+                "openblas" in path.name.lower() or "libgomp" in path.name.lower()
+                or "libmkl" in path.name.lower()
+            ):
+                paths.add(path.resolve(strict=True))
+    for path in sorted(paths):
+        library = ctypes.CDLL(str(path))
+        queries = {}
+        for symbol in ("openblas_get_num_threads64_", "openblas_get_num_threads",
+                       "scipy_openblas_get_num_threads64_", "scipy_openblas_get_num_threads",
+                       "MKL_Get_Max_Threads", "omp_get_max_threads"):
+            query = getattr(library, symbol, None)
+            if query is not None:
+                query.argtypes, query.restype = (), ctypes.c_int
+                count = int(query())
+                v3_exact(count, 1, f"v3 native threads {path.name}.{symbol}")
+                queries[symbol] = count
+        if not queries:
+            raise ValueError(f"v3 loaded threading library unobservable: {path.name}")
+        libraries[path.name] = {"sha256": digest(path), "thread_queries": queries}
+    if not libraries:
+        raise ValueError("v3 native thread observation missing")
+    return {"python": sys.version, "executable": str(Path(sys.executable).resolve()),
+            "packages": versions, "modules": modules, "thread_libraries": libraries,
+            "environment": environment, "torch_intraop": 1, "torch_interop": 1,
+            "closure": "selected loaded modules/thread libraries; not full dependency/hardware closure"}
+
+
+def v3_initialize_threads() -> None:
+    import torch
+
+    torch.set_num_threads(1)
+    if torch.get_num_interop_threads() != 1:
+        torch.set_num_interop_threads(1)
+
+
+def v3_member(root: Path, relative: str) -> Path:
+    if (not isinstance(relative, str) or not relative or "\\" in relative
+            or relative != Path(relative).as_posix()
+            or Path(relative).is_absolute() or ".." in Path(relative).parts):
+        raise ValueError("v3 unsafe inventory path")
+    current = root
+    for part in Path(relative).parts:
+        current /= part
+        if current.is_symlink():
+            raise ValueError("v3 symlink member rejected")
+    if not current.resolve(strict=True).is_relative_to(root) or not current.is_file():
+        raise ValueError("v3 member escapes root")
+    return current
+
+
+def v3_validate_context(output: Path, plan: dict) -> SimpleNamespace:
+    v3_exact(plan["contract"], v3_execution_contract(), "v3 predeclared contract")
+    pins = v3_sources()
+    v3_exact(plan["sources"], pins, "v3 source pins")
+    for name, pin in pins.items():
+        v3_exact(digest(v3_member(output, "code/" + name)), pin, f"v3 saved source {name}")
+    v3_exact(plan["runtime"], v3_runtime(), "v3 observed runtime")
+    corpus.verify_frozen(output / "frozen", plan["corpus_sha256"], corpus.DEFAULT_MAX_DENSE_BYTES)
+    frozen = corpus.read_json(output / "frozen/corpus.json")
+    if not 1 <= len(frozen["cases"]) <= 4:
+        raise ValueError("v3 bounded case count rejected")
+    expected = []
+    for case in frozen["cases"]:
+        if case["origin"] != "synthetic":
+            raise ValueError("v3 public execution not authorized in this scope")
+        model = load_model(output / "frozen", case["case_id"])
+        view = corpus.solver_arrays(model)
+        if not 1 <= len(view["q"]) <= 8 or len(view["l"]) > 64:
+            raise ValueError("v3 bounded reproducible arithmetic dimensions rejected")
+        expected.extend({"case_id": case["case_id"], "model_sha256": case["model_sha256"],
+                         "solver": solver, "mode": mode, "attempt": 1, "denominator": 1}
+                        for solver in SOLVERS for mode in V3_MODES)
+    v3_exact(plan["rows"], expected, "v3 complete case/backend/mode plan")
+    core = v3_core(output / "code")
+    v3_configs(core)
+    v3_exact(core.checker.REPRODUCIBLE_ARITHMETIC, V3_ARITHMETIC, "v3 checker API")
+    return core
+
+
+def v3_loaded_sources(output: Path, core) -> dict:
+    pins = v3_sources()
+    modules = {"qp.py": core.qp, "certificates.py": core.checker,
+               "scaling.py": core.scaling, "refinement.py": core.refinement}
+    loaded = {}
+    for name, module in modules.items():
+        expected = v3_member(output, "code/" + name).resolve(strict=True)
+        origin = Path(module.__spec__.origin).resolve(strict=True)
+        if origin != expected or Path(module.__file__).resolve(strict=True) != expected:
+            raise ValueError(f"v3 loaded core module escaped frozen source: {name}")
+        v3_exact(digest(origin), pins[name], f"v3 loaded source bytes {name}")
+        loaded[name] = {"file": name, "sha256": pins[name]}
+    return loaded
+
+
+class _V3Checker:
+    def __init__(self, checker):
+        self.checker = checker
+
+    def check_qp_candidate(self, *args, **kwargs):
+        return self.checker.check_qp_candidate(*args, **kwargs, arithmetic=V3_ARITHMETIC)
+
+
+def v3_assess(model, solver, raw, core):
+    if STATUS[solver].get(raw["status"]) not in ("optimal", None):
+        raise ValueError("v3 bounded scope does not accept direction qualification")
+    return assess(model, solver, raw, V3_GATES, _V3Checker(core.checker))
+
+
+def v3_tensor(value):
+    if value.device.type != "cpu":
+        raise ValueError("v3 non-CPU result; no fallback")
+    return value.detach().numpy().copy()
+
+
+def v3_setup(model: dict, solver: str, core) -> SimpleNamespace:
+    import torch
+    from scipy import sparse
+
+    view = corpus.solver_arrays(model)
+    settings = v3_settings()
+    if solver == "openopt":
+        config, scaling, refinement = v3_configs(core)
+        p = core.qp.QPProblem(*[
+            torch.tensor(view[key], dtype=torch.float64, device="cpu")
+            for key in ("P", "q", "A", "l", "u")])
+        prepared = core.scaling.equilibrate_qp(p, config, scaling)
+        workspace = core.qp.prepare_qp(prepared.scaled_problem, config)
+        return SimpleNamespace(workspace=workspace, p=p, prepared=prepared,
+                               scaling=scaling, refinement=refinement, requested=settings["openopt"])
+    if solver == "osqp":
+        import osqp
+
+        requested = settings["osqp"]["requested"]
+        workspace = osqp.OSQP(algebra="builtin")
+        workspace.setup(P=sparse.csc_matrix(np.triu(view["P"])), q=view["q"].copy(),
+                        A=sparse.csc_matrix(view["A"]), l=view["l"].copy(), u=view["u"].copy(),
+                        **requested)
+        return SimpleNamespace(workspace=workspace, requested=requested)
+    import clarabel
+
+    A, b, cones, mapping = clarabel_form(view, clarabel)
+    requested = settings["clarabel"]["requested"]
+    effective = clarabel.DefaultSettings()
+    for key, value in requested.items():
+        setattr(effective, key, float("inf") if value == "Infinity" else value)
+    workspace = clarabel.DefaultSolver(sparse.csc_matrix(np.triu(view["P"])),
+                                      view["q"].copy(), sparse.csc_matrix(A), b, cones, effective)
+    return SimpleNamespace(workspace=workspace, requested=requested, mapping=mapping)
+
+
+def v3_observed_settings(state, solver: str) -> dict:
+    if solver == "openopt":
+        return {
+            "solver": {key: str(value) if key == "dtype" else value
+                       for key, value in asdict(state.workspace.config).items()},
+            "scaling": asdict(state.scaling),
+            "refinement": {key: str(value) if key in ("dtype", "factor_dtype") else value
+                           for key, value in asdict(state.refinement).items()},
+        }
+    settings = state.workspace.settings if solver == "osqp" else state.workspace.get_settings()
+    return v3_contracts_module().settings_snapshot(settings)
+
+
+def v3_check_settings(raw: dict, solver: str) -> None:
+    contract = v3_settings()[solver]
+    requested = contract if solver == "openopt" else contract["requested"]
+    effective = contract if solver == "openopt" else contract["effective"]
+    v3_exact(raw["requested"], requested, f"v3 {solver} requested")
+    for stage in ("settings", "settings_before_solve", "settings_after_solve"):
+        v3_exact(raw[stage], effective, f"v3 {solver} {stage}")
+
+
+def v3_observe_call(state, model, solver, core) -> tuple[dict, dict]:
+    """Count the real bound workspace entry, not an increment beside a call."""
+    counts = {"workspace_solve": 0, "backend_native_solve": 0, "other_solver": 0, "warm_start": 0,
+              "refinement_proposal": 0}
+    previous = sys.getprofile()
+    method = state.workspace.solve
+    code = getattr(inspect.unwrap(getattr(method, "__func__", method)), "__code__", None)
+    native = state.workspace._solver if solver == "osqp" else (
+        state.workspace if solver == "clarabel" else None)
+    native_class = type(native) if native is not None else None
+    original_native = native_class.solve if native_class is not None else None
+
+    def native_call(self, *args, **kwargs):
+        if self is not native:
+            counts["other_solver"] += 1
+        elif solver == "clarabel":
+            counts["workspace_solve"] += 1
+        else:
+            counts["backend_native_solve"] += 1
+        return original_native(self, *args, **kwargs)
+
+    def profile(frame, event, arg):
+        if event == "call":
+            name = frame.f_code.co_name
+            if code is not None and frame.f_code is code and frame.f_locals.get("self") is state.workspace:
+                counts["workspace_solve"] += 1
+            elif name in ("solve", "solve_qp"):
+                counts["other_solver"] += 1
+            elif name == "warm_start":
+                counts["warm_start"] += 1
+            elif name == "refine_qp_candidate":
+                counts["refinement_proposal"] += 1
+        if previous is not None:
+            previous(frame, event, arg)
+
+    if native_class is not None:
+        native_class.solve = native_call
+    sys.setprofile(profile)
+    try:
+        raw, extra = v3_solve(state, model, solver, core)
+    finally:
+        sys.setprofile(previous)
+        if native_class is not None:
+            native_class.solve = original_native
+    v3_exact(counts, {"workspace_solve": 1, "backend_native_solve": 1 if solver == "osqp" else 0,
+                     "other_solver": 0, "warm_start": 0,
+                     "refinement_proposal": 1 if solver == "openopt" else 0},
+             f"v3 observed actual solver calls {counts}")
+    raw["actual_calls"] = counts
+    return raw, extra
+
+
+def v3_solve(state, model, solver: str, core) -> tuple[dict, dict]:
+    before = v3_observed_settings(state, solver)
+    effective = v3_settings()[solver]
+    v3_exact(before, effective if solver == "openopt" else effective["effective"],
+             f"v3 {solver} before actual solve")
+    started = time.perf_counter()
+    solved = state.workspace.solve(raise_error=False) if solver == "osqp" else state.workspace.solve()
+    solve_seconds = time.perf_counter() - started
+    extra, detail = {}, {}
+    if solver == "openopt":
+        x, y = state.prepared.scaling.restore(solved.x, solved.y)
+        refined = core.refinement.refine_qp_candidate(state.p, x, y, state.refinement)
+        extra = {"scaled_x": v3_tensor(solved.x), "scaled_y": v3_tensor(solved.y),
+                 "restored_x": v3_tensor(x), "restored_y": v3_tensor(y),
+                 "variable_scale": v3_tensor(state.prepared.scaling.variable_scale),
+                 "constraint_scale": v3_tensor(state.prepared.scaling.constraint_scale),
+                 "objective_scale": np.asarray(state.prepared.scaling.objective_scale)}
+        if refined.attempted_x is not None:
+            extra.update(attempted_x=v3_tensor(refined.attempted_x),
+                         attempted_y=v3_tensor(refined.attempted_y))
+        vectors = {"x": v3_tensor(refined.x), "y": v3_tensor(refined.y)}
+        detail = {
+            "solver_residuals": {"coordinate": "scaled", "primal": solved.primal_residual,
+                                 "dual": solved.dual_residual, "normal": solved.normal_cone_residual},
+            "rho_updates": solved.rho_updates, "final_rho": solved.final_rho,
+            "refinement": {"status": refined.status, "reason": refined.reason,
+                           "diagnostics": refined.diagnostics,
+                           "baseline": refined.baseline_evidence.to_dict(),
+                           "returned": refined.evidence.to_dict(),
+                           "attempted": None if refined.attempted_evidence is None
+                           else refined.attempted_evidence.to_dict()},
+        }
+        objective = float(.5 * refined.x @ state.p.P @ refined.x + state.p.q @ refined.x)
+        status, iterations = solved.status, solved.iterations
+    elif solver == "osqp":
+        vectors = {"x": solved.x.copy(), "y": solved.y.copy()}
+        objective, status, iterations = solved.info.obj_val, solved.info.status, int(solved.info.iter)
+        detail["solver_residuals"] = {"coordinate": "OSQP reporting",
+                                     "primal": solved.info.prim_res, "dual": solved.info.dual_res}
+    else:
+        z = np.asarray(solved.z, dtype=np.float64)
+        if z.shape != (len(state.mapping),):
+            raise ValueError("v3 Clarabel original dual mapping shape")
+        y = np.zeros(len(corpus.solver_arrays(model)["l"]))
+        for value, (index, sign) in zip(z, state.mapping):
+            y[index] += sign * value
+        extra["cone_z"] = z
+        vectors = {"x": np.asarray(solved.x), "y": y}
+        objective, status, iterations = solved.obj_val, str(solved.status), int(solved.iterations)
+        detail["dual_mapping"] = [list(item) for item in state.mapping]
+        detail["solver_residuals"] = {"coordinate": "Clarabel reporting",
+                                     "primal": solved.r_prim, "dual": solved.r_dual}
+    vectors["reported_objective"] = np.asarray(objective)
+    after = v3_observed_settings(state, solver)
+    raw = {"status": status, "iterations": iterations, "observed_device": "cpu",
+           "requested": state.requested, "settings": after, "settings_before_solve": before,
+           "settings_after_solve": after, "solve_seconds": solve_seconds, **detail,
+           "vectors": vectors}
+    v3_check_settings(raw, solver)
+    return raw, extra
+
+
+def v3_worker(output: Path, plan_pin: str, index: int) -> int:
+    output = external(output)
+    plan_path = v3_member(output, "plan.json")
+    corpus._sha(plan_pin, "v3 caller worker plan SHA256")
+    if digest(plan_path) != plan_pin:
+        raise ValueError("v3 caller worker plan pin mismatch")
+    plan = corpus.read_json(plan_path)
+    folder = output / "workers" / f"{index:03d}"
+    folder.mkdir(parents=True, exist_ok=False)
+    receipt = {"schema_version": 3, "version": V3, "plan_sha256": plan_pin,
+               "worker_index": index, "rows": [], "verdict": "RUNNING",
+               "started_at": datetime.now(timezone.utc).isoformat(), "solve_calls": 0}
+    try:
+        v3_initialize_threads()
+        core = v3_validate_context(output, plan)
+        loaded_sources = v3_loaded_sources(output, core)
+        if type(index) is not int or not 0 <= index < len(plan["rows"]) // 2:
+            raise ValueError("v3 worker index outside complete plan")
+        initials = plan["rows"][2 * index:2 * index + 2]
+        model = load_model(output / "frozen", initials[0]["case_id"])
+        before = corpus.model_hash(model)
+        solver = initials[0]["solver"]
+        state = None
+        for initial in initials:
+            row = {**initial, "attempted": False, "verdict": "NOT_ATTEMPTED"}
+            receipt["rows"].append(row)
+            begin = time.perf_counter()
+            if initial["mode"] == "cold":
+                state = v3_setup(model, solver, core)
+            row["attempted"] = True
+            raw, extra = v3_observe_call(state, model, solver, core)
+            receipt["solve_calls"] += raw["actual_calls"]["workspace_solve"]
+            row["elapsed_seconds"] = time.perf_counter() - begin
+            v3_exact(v3_runtime(), plan["runtime"], "v3 worker post-solve runtime")
+            v3_exact(v3_loaded_sources(output, core), loaded_sources, "v3 worker loaded sources")
+            v3_exact(corpus.model_hash(model), before, "v3 immutable original arrays")
+            vectors = folder / f"{initial['mode']}.npz"
+            save_vectors(vectors, raw["vectors"])
+            transforms = folder / f"{initial['mode']}-transform.npz"
+            v3_contracts_module().save_extra(transforms, extra)
+            row.update(raw={key: value for key, value in raw.items() if key != "vectors"},
+                       vectors_path=str(vectors.relative_to(output)),
+                       transform_path=str(transforms.relative_to(output)),
+                       input_model_before=before, input_model_after=corpus.model_hash(model),
+                       runtime=plan["runtime"], plan_sha256=plan_pin,
+                       loaded_sources=loaded_sources,
+                       assessment=v3_assess(model, solver, raw, core))
+            row["verdict"] = row["assessment"]["verdict"]
+        receipt["verdict"] = "WORKER_COMPLETE_NOT_QUALIFICATION"
+    except Exception as error:
+        receipt.update(verdict="FAIL", error={"type": type(error).__name__, "message": str(error)})
+        if receipt["rows"]:
+            receipt["rows"][-1].update(verdict="FAIL", error=receipt["error"])
+        with (folder / "failure.log").open("x", encoding="utf-8") as stream:
+            stream.write(traceback.format_exc())
+        traceback.print_exc()
+    receipt["finished_at"] = datetime.now(timezone.utc).isoformat()
+    corpus.write_json(folder / "result.json", receipt)
+    return 2 if receipt["verdict"] == "FAIL" else 0
+
+
+def v3_run(args) -> tuple[Path, int]:
+    output = external(args.artifact_dir)
+    output.mkdir(parents=True, exist_ok=False)
+    report = {"schema_version": 3, "runner_version": V3, "verdict": "RUNNING",
+              "rows": [], "started_at": datetime.now(timezone.utc).isoformat(),
+              "public_qualified_count": 0, "industrial_qualified_count": 0,
+              "worker_execution_verified": False, "exit_code": 2}
+    try:
+        v3_exact(args.version, V3, "v3 explicit executable version")
+        if (args.device != "cpu" or args.source_root.resolve() != ROOT
+                or args.public_acceptance is not None or args.public_acceptance_sha256 is not None
+                or args.max_dense_bytes != corpus.DEFAULT_MAX_DENSE_BYTES):
+            raise ValueError("v3 no source/device/acceptance override or public execution")
+        default = parser().parse_args(["run", "--corpus", str(args.corpus),
+                                      "--manifest-sha256", args.manifest_sha256,
+                                      "--artifact-dir", str(args.artifact_dir)])
+        v3_exact(config_values(args), config_values(default), "v3 rejects v1 setting overrides")
+        v3_initialize_threads()
+        pins = v3_sources()
+        frozen_path = args.corpus.expanduser().resolve(strict=True)
+        corpus.verify_frozen(frozen_path, args.manifest_sha256, corpus.DEFAULT_MAX_DENSE_BYTES)
+        frozen = corpus.read_json(frozen_path / "corpus.json")
+        if any(row["origin"] != "synthetic" for row in frozen["cases"]):
+            raise ValueError("v3 public execution not authorized in this scope")
+        for filename in ("corpus.json", "input-manifest.json"):
+            copy_file(frozen_path / filename, output / "frozen" / filename)
+        for row in frozen["cases"]:
+            for filename in ("raw.mps", "arrays.npz", "metadata.json", "reader.log"):
+                copy_file(frozen_path / row["case_id"] / filename,
+                          output / "frozen" / row["case_id"] / filename)
+        for name, relative in V3_SOURCES.items():
+            copy_file(ROOT / relative, output / "code" / name)
+        plan = {"contract": v3_execution_contract(), "sources": pins,
+                "runtime": v3_runtime(), "corpus_sha256": args.manifest_sha256,
+                "rows": [{"case_id": case["case_id"], "model_sha256": case["model_sha256"],
+                          "solver": solver, "mode": mode, "attempt": 1, "denominator": 1}
+                         for case in frozen["cases"] for solver in SOLVERS for mode in V3_MODES]}
+        v3_validate_context(output, plan)
+        corpus.write_json(output / "plan.json", plan)
+        plan_pin = digest(output / "plan.json")
+        report.update(plan_sha256=plan_pin, contract=plan["contract"], sources=pins,
+                      runtime=plan["runtime"], corpus_sha256=args.manifest_sha256)
+        report["rows"] = [{**row, "attempted": False, "verdict": "NOT_ATTEMPTED"}
+                          for row in plan["rows"]]
+        for index in range(len(plan["rows"]) // 2):
+            log = output / f"worker-{index:03d}.log"
+            command = [sys.executable, "-B", str(Path(__file__).resolve()), "worker",
+                       "--version", V3, "--artifact-dir", str(output),
+                       "--plan-sha256", plan_pin, "--worker-index", str(index)]
+            with log.open("xb") as stream:
+                process = subprocess.run(command, cwd=ROOT, env={**os.environ, **V3_ENV},
+                                         stdout=stream, stderr=subprocess.STDOUT, check=False)
+            worker = corpus.read_json(output / "workers" / f"{index:03d}" / "result.json")
+            for offset, worker_row in enumerate(worker["rows"]):
+                report["rows"][index * 2 + offset] = worker_row
+            if process.returncode != 0 or worker["verdict"] != "WORKER_COMPLETE_NOT_QUALIFICATION":
+                raise RuntimeError(f"v3 worker failed index={index} rc={process.returncode}; {worker.get('error')}")
+            v3_exact(worker["solve_calls"], 2, "v3 worker solve count")
+            report["rows"][index * 2:index * 2 + 2] = worker["rows"]
+        report.update(verdict="EXECUTION_COMPLETE_NOT_QUALIFICATION", exit_code=0,
+                      worker_execution_verified=True,
+                      numeric_verdict="PASS" if all(row["verdict"] == "QUALIFIED"
+                                                   for row in report["rows"]) else "UNQUALIFIED")
+    except Exception as error:
+        report.update(verdict="FAIL", error={"type": type(error).__name__, "message": str(error)})
+        with (output / "failure.log").open("x", encoding="utf-8") as stream:
+            stream.write(traceback.format_exc())
+        traceback.print_exc()
+    report["planned_denominator"] = len(report["rows"])
+    report["attempted_count"] = sum(row["attempted"] for row in report["rows"])
+    report["finished_at"] = datetime.now(timezone.utc).isoformat()
+    report["files"] = inventory(output)
+    corpus.write_json(output / "result.json", report)
+    return output / "result.json", report["exit_code"]
+
+
+def v3_check_transform(model, row, vectors, extra, core):
+    import torch
+
+    solver = row["solver"]
+    if solver == "osqp":
+        v3_exact(extra, {}, "v3 OSQP transformation")
+        return
+    if solver == "clarabel":
+        import clarabel
+
+        v3_exact(sorted(extra), ["cone_z"], "v3 Clarabel transform fields")
+        _, _, _, mapping = clarabel_form(corpus.solver_arrays(model), clarabel)
+        v3_exact(row["raw"]["dual_mapping"], [list(item) for item in mapping], "v3 cone mapping")
+        y = np.zeros_like(vectors["y"])
+        if extra["cone_z"].shape != (len(mapping),):
+            raise ValueError("v3 cone dual dimension mismatch")
+        for z, (index, sign) in zip(extra["cone_z"], mapping):
+            y[index] += sign * z
+        if not np.array_equal(y, vectors["y"]):
+            raise ValueError("v3 original signed dual reconstruction mismatch")
+        return
+    required = {"scaled_x", "scaled_y", "restored_x", "restored_y", "variable_scale",
+                "constraint_scale", "objective_scale"}
+    if set(extra) not in (required, required | {"attempted_x", "attempted_y"}):
+        raise ValueError("v3 refinement transform membership")
+    config, scaling, _ = v3_configs(core)
+    view = corpus.solver_arrays(model)
+    p = core.qp.QPProblem(*[torch.tensor(view[key], dtype=torch.float64)
+                           for key in ("P", "q", "A", "l", "u")])
+    # Transform reconstruction is not a solve/refinement proposal.
+    transformed = core.scaling.equilibrate_qp(p, config, scaling)
+    for key, value in (("variable_scale", transformed.scaling.variable_scale),
+                       ("constraint_scale", transformed.scaling.constraint_scale)):
+        if not np.array_equal(v3_tensor(value), extra[key]):
+            raise ValueError("v3 deterministic scaling mismatch")
+    if float(extra["objective_scale"]) != transformed.scaling.objective_scale:
+        raise ValueError("v3 objective scaling mismatch")
+    x, y = transformed.scaling.restore(torch.tensor(extra["scaled_x"]),
+                                      torch.tensor(extra["scaled_y"]))
+    if not np.array_equal(v3_tensor(x), extra["restored_x"]) or not np.array_equal(
+        v3_tensor(y), extra["restored_y"]
+    ):
+        raise ValueError("v3 original-coordinate restoration mismatch")
+    detail = row["raw"]["refinement"]
+    for stage, x, y in (("baseline", extra["restored_x"], extra["restored_y"]),
+                        ("returned", vectors["x"], vectors["y"])):
+        measured = core.checker.check_qp_candidate(problem(view), x, y, atol=1e-7, rtol=1e-7,
+                                                  arithmetic=V3_ARITHMETIC).to_dict()
+        v3_exact(detail[stage], measured, f"v3 refinement {stage} evidence")
+    if "attempted_x" in extra:
+        measured = core.checker.check_qp_candidate(
+            problem(view), extra["attempted_x"], extra["attempted_y"],
+            atol=1e-7, rtol=1e-7, arithmetic=V3_ARITHMETIC).to_dict()
+        v3_exact(detail["attempted"], measured, "v3 attempted evidence")
+    elif detail["attempted"] is not None:
+        raise ValueError("v3 missing attempted refinement vectors")
+    if detail["status"] == "accepted":
+        if not detail["returned"]["passed"] or core.refinement._nonworsening(
+            SimpleNamespace(metrics=detail["baseline"]["metrics"]),
+            SimpleNamespace(metrics=detail["returned"]["metrics"])
+        ):
+            raise ValueError("v3 accepted refinement failed original nonworsening gates")
+    elif detail["status"] not in ("unknown", "rejected") or not (
+        np.array_equal(vectors["x"], extra["restored_x"])
+        and np.array_equal(vectors["y"], extra["restored_y"])
+    ):
+        raise ValueError("v3 rejected refinement changed original returned values")
+
+
+def v3_replay(path: Path, pin: str) -> dict:
+    v3_initialize_threads()
+    corpus._sha(pin, "v3 caller result pin")
+    if path.is_symlink():
+        raise ValueError("v3 symlink result rejected")
+    path = path.resolve(strict=True)
+    if digest(path) != pin:
+        raise ValueError("v3 caller result SHA256 mismatch")
+    report, output = corpus.read_json(path), path.parent
+    v3_exact(report["schema_version"], 3, "v3 result schema")
+    v3_exact(report["runner_version"], V3, "v3 result version; v1/v2 never promoted")
+    if report["verdict"] != "EXECUTION_COMPLETE_NOT_QUALIFICATION" or report.get("error"):
+        raise ValueError("v3 incomplete/failed run remains failed; not replay-qualified")
+    files = report["files"]
+    actual = {str(item.relative_to(output)) for item in output.rglob("*") if item.is_file()}
+    if not files or actual != set(files) | {"result.json"}:
+        raise ValueError("v3 exact inventory membership mismatch")
+    for relative, expected in files.items():
+        item = v3_member(output, relative)
+        v3_exact(expected, {"sha256": digest(item), "bytes": item.stat().st_size},
+                 "v3 inventory byte hash")
+    plan_path = v3_member(output, "plan.json")
+    v3_exact(digest(plan_path), report["plan_sha256"], "v3 result/plan pin")
+    plan = corpus.read_json(plan_path)
+    core = v3_validate_context(output, plan)
+    loaded_sources = v3_loaded_sources(output, core)
+    for key in ("contract", "sources", "runtime", "corpus_sha256"):
+        v3_exact(report[key], plan[key], f"v3 result/plan {key}")
+    if len(report["rows"]) != len(plan["rows"]):
+        raise ValueError("v3 complete denominator mismatch")
+    for index in range(len(plan["rows"]) // 2):
+        worker = corpus.read_json(v3_member(output, f"workers/{index:03d}/result.json"))
+        v3_exact(worker["schema_version"], 3, "v3 worker schema")
+        v3_exact(worker["version"], V3, "v3 worker version")
+        v3_exact(worker["worker_index"], index, "v3 worker index")
+        v3_exact(worker["plan_sha256"], report["plan_sha256"], "v3 worker plan pin")
+        v3_exact(worker["solve_calls"], 2, "v3 cold/hot actual solve counts")
+        v3_exact(worker["verdict"], "WORKER_COMPLETE_NOT_QUALIFICATION", "v3 worker terminal state")
+        v3_exact(worker["rows"], report["rows"][2 * index:2 * index + 2],
+                 "v3 worker/parent rows")
+        v3_member(output, f"worker-{index:03d}.log")
+    for initial, row in zip(plan["rows"], report["rows"]):
+        v3_exact({key: row[key] for key in initial}, initial, "v3 case/backend/mode membership")
+        v3_exact(row["attempted"], True, "v3 actual attempt")
+        v3_exact(row["plan_sha256"], report["plan_sha256"], "v3 row plan pin")
+        v3_exact(row["runtime"], plan["runtime"], "v3 row runtime")
+        v3_exact(row["loaded_sources"], loaded_sources, "v3 row loaded core identity")
+        worker_index = plan["rows"].index(initial) // 2
+        for key, suffix in (("vectors_path", ".npz"), ("transform_path", "-transform.npz")):
+            v3_exact(row[key], f"workers/{worker_index:03d}/{initial['mode']}{suffix}",
+                     "v3 mode-bound sidecar path")
+        raw = row["raw"]
+        v3_check_settings(raw, row["solver"])
+        v3_exact(raw["actual_calls"], {"workspace_solve": 1,
+                 "backend_native_solve": 1 if row["solver"] == "osqp" else 0,
+                 "other_solver": 0, "warm_start": 0,
+                 "refinement_proposal": 1 if row["solver"] == "openopt" else 0},
+                 "v3 observed callcount contract")
+        v3_exact(raw["observed_device"], "cpu", "v3 actual placement")
+        if type(raw["iterations"]) is not int or not 1 <= raw["iterations"] <= (
+            200 if row["solver"] == "clarabel" else 2000
+        ):
+            raise ValueError("v3 iteration count outside predeclared bound")
+        for value in (row["elapsed_seconds"], raw["solve_seconds"]):
+            if type(value) is not float or not math.isfinite(value) or value < 0:
+                raise ValueError("v3 invalid measured timing")
+        model = load_model(output / "frozen", row["case_id"])
+        for key in ("model_sha256", "input_model_before", "input_model_after"):
+            v3_exact(row[key], corpus.model_hash(model), "v3 original model identity")
+        vectors = read_vectors(v3_member(output, row["vectors_path"]))
+        measured = v3_assess(model, row["solver"], {**raw, "vectors": vectors}, core)
+        v3_exact(row["assessment"], measured, "v3 independent original six-gate replay")
+        v3_exact(row["verdict"], measured["verdict"], "v3 original failed verdict retained")
+        extra = v3_contracts_module().read_extra(v3_member(output, row["transform_path"]))
+        v3_check_transform(model, row, vectors, extra, core)
+    v3_exact(report["planned_denominator"], len(plan["rows"]), "v3 full denominator")
+    v3_exact(report["attempted_count"], len(plan["rows"]), "v3 actual attempted denominator")
+    v3_exact(report["numeric_verdict"], "PASS" if all(row["verdict"] == "QUALIFIED"
+             for row in report["rows"]) else "UNQUALIFIED", "v3 numerical summary")
+    for key in ("public_qualified_count", "industrial_qualified_count"):
+        v3_exact(report[key], 0, "v3 no qualification upgrade")
+    v3_exact(report["worker_execution_verified"], True, "v3 execution binding")
+    v3_exact(report["exit_code"], 0, "v3 completion exit code")
+    return {"verdict": "EXECUTION_REPLAYED_NOT_QUALIFICATION", "schema_version": 3,
+            "runner_version": V3, "result_sha256": pin, "plan_sha256": report["plan_sha256"],
+            "numerically_replayed": len(report["rows"]), "solve_calls": 0,
+            "numeric_verdict": report["numeric_verdict"], "public_qualified_count": 0,
+            "checked_at": datetime.now(timezone.utc).isoformat()}
+
+
 def parser() -> argparse.ArgumentParser:
     cli = argparse.ArgumentParser(description=__doc__)
     commands = cli.add_subparsers(dest="command", required=True)
     run = commands.add_parser("run")
+    run.add_argument("--version", choices=(VERSION, V3), default=VERSION)
     run.add_argument("--corpus", type=Path, required=True)
     run.add_argument("--manifest-sha256", required=True, help="externally pinned corpus.json SHA256")
     run.add_argument("--artifact-dir", type=Path, required=True)
@@ -657,6 +1411,12 @@ def parser() -> argparse.ArgumentParser:
     check = commands.add_parser("replay")
     check.add_argument("--result", type=Path, required=True)
     check.add_argument("--result-sha256", required=True)
+    check.add_argument("--version", choices=(VERSION, V3), default=VERSION)
+    worker = commands.add_parser("worker", help="explicit v3 bounded synthetic CPU worker")
+    worker.add_argument("--version", choices=(V3,), required=True)
+    worker.add_argument("--artifact-dir", type=Path, required=True)
+    worker.add_argument("--plan-sha256", required=True)
+    worker.add_argument("--worker-index", type=int, required=True)
     return cli
 
 
@@ -664,12 +1424,21 @@ def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
         if args.command == "run":
-            result, code = qualify(args)
+            if args.version == V3:
+                result, code = v3_run(args)
+            else:
+                result, code = qualify(args)
             print("PUBLIC_QP_RESULT " + json.dumps({
                 "result": str(result), "result_sha256": digest(result),
                 "verdict": corpus.read_json(result)["verdict"], "exit_code": code,
             }, sort_keys=True), flush=True)
             return code
+        if args.command == "worker":
+            return v3_worker(args.artifact_dir, args.plan_sha256, args.worker_index)
+        if args.version == V3:
+            result = v3_replay(args.result, args.result_sha256)
+            print("PUBLIC_QP_REPLAY " + json.dumps(result, sort_keys=True), flush=True)
+            return 0
         result = replay(args.result, args.result_sha256)
         print("PUBLIC_QP_REPLAY " + json.dumps(result, sort_keys=True), flush=True)
         # Integrity success does not turn UNQUALIFIED/FAIL into CLI success.
