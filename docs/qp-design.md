@@ -50,6 +50,14 @@ certify convexity. Opt-in Jacobi PCG checks the true residual and preserves
 COO/CSR sparsity; matrix-free preconditioning requires an explicit SPD inverse
 action. Fewer CG iterations alone are not an end-to-end speed claim.
 The historical small sparse case was slower. This is not a default replacement.
+Original vector bounds are checked before dtype conversion; finite-to-infinite
+and nonzero-to-zero conversion of vectors or tensor matrices is rejected.
+A working scalar nomination must also pass original-model componentwise
+feasibility, stationarity, normal, multiplier sign and complementarity checks.
+Tensor checks preserve sparse binary64 products on the requested device;
+matrix-free callbacks remain borrowed, not authenticated exact actions.
+See `research/operator-original-contract.md`; same-source CUDA, performance
+cost and generated current-source reports require separate evidence.
 
 `openopt.scaling` applies opt-in bounded reversible Ruiz/cost scaling. Solutions
 and multipliers are restored, then checked against the unscaled original model.

@@ -430,6 +430,9 @@ def kkt_comparison(kind, config, tmp_path):
         dual_tol = config.eps_abs + config.eps_rel * max(
             float(np.max(np.abs(d * x))), float(np.max(np.abs(q))), float(np.max(np.abs(ATy))),
         )
+        component_stationarity_limits = config.eps_abs + config.eps_rel * np.maximum.reduce([
+            np.abs(d * x), np.abs(q), np.abs(ATy),
+        ])
         arms[name] = dict(
             status=result.status, outer_iterations=result.iterations,
             cg_iterations=result.cg_iterations, stationarity=stationarity,
@@ -439,6 +442,9 @@ def kkt_comparison(kind, config, tmp_path):
             primal_tolerance=primal_tol, dual_tolerance=dual_tol,
             feasibility_excess=feasibility - primal_tol,
             normal_cone_excess=normal - primal_tol, stationarity_excess=stationarity - dual_tol,
+            component_stationarity_excess=float(np.max(
+                np.abs(d * x + q + ATy) - component_stationarity_limits,
+            )),
             solver_primal=result.primal_residual, solver_dual=result.dual_residual,
             objective_report_error=abs(objective - result.objective),
             x_error_coordinate=int(np.argmax(np.abs(x - x_star))),
@@ -495,8 +501,10 @@ def test_original_inner_accuracy_negative_is_preserved_not_promoted(kind, monkey
     report = kkt_comparison(kind, original_config, tmp_path)
     control = report["arms"]["control"]
     jacobi = report["arms"]["jacobi"]
-    assert control["status"] == "solved"
+    assert control["status"] == "max_iterations" and control["outer_iterations"] == 5000
     assert control["inner_residual"] <= control["inner_tolerance"]
+    assert control["stationarity_excess"] <= 0
+    assert control["component_stationarity_excess"] > 0
     assert jacobi["status"] == "max_iterations" and jacobi["outer_iterations"] == 5000
     assert jacobi["inner_residual"] <= jacobi["inner_tolerance"]
     assert jacobi["normal_cone_excess"] > 0

@@ -472,11 +472,80 @@ def _coerce(
         # Validate source before conversion: complex values must never be discarded.
         value = TensorOperator(value)
     if isinstance(value, TensorOperator):
-        value = TensorOperator(value.matrix.to(device=device, dtype=dtype))
+        converted = value.matrix.to(device=device, dtype=dtype)
+        original_values = (
+            value.matrix if value.matrix.layout == torch.strided else value.matrix.values()
+        )
+        converted_values = converted if converted.layout == torch.strided else converted.values()
+        _check_conversion(original_values, converted_values, label)
+        value = TensorOperator(converted)
     checked = _CheckedOperator(value, label)
     if checked.device != device or checked.dtype != dtype:
         raise ValueError(f"{label} matrix-free device/dtype must match config; no fallback/transfer")
     return checked
+
+
+def _check_conversion(original: torch.Tensor, converted: torch.Tensor, label: str) -> None:
+    source = original.detach().to(device=converted.device)
+    if bool((torch.isfinite(source) & ~torch.isfinite(converted)).any()):
+        raise ValueError(f"{label} finite input became nonfinite during conversion")
+    if bool(((source != 0) & (converted == 0)).any()):
+        raise ValueError(f"{label} nonzero input became zero during conversion")
+
+
+def _original_operator(
+    value: torch.Tensor | LinearOperator, device: torch.device,
+    working: _CheckedOperator, label: str,
+) -> _CheckedOperator:
+    if isinstance(value, (torch.Tensor, TensorOperator)):
+        return _coerce(value, device, torch.float64, label)
+    # Callback contracts already require the working dtype/device. Their
+    # mathematical action is borrowed, not copied or certified by these checks.
+    return working
+
+
+def _original_candidate(
+    P: _CheckedOperator, A: _CheckedOperator, q: torch.Tensor,
+    l: torch.Tensor, u: torch.Tensor, x: torch.Tensor, y: torch.Tensor,
+    config: OperatorQPConfig,
+) -> bool:
+    Px = P.matvec(x.to(dtype=P.dtype)).to(dtype=torch.float64)
+    Ax = A.matvec(x.to(dtype=A.dtype)).to(dtype=torch.float64)
+    ATy = A.rmatvec(y.to(dtype=A.dtype)).to(dtype=torch.float64)
+    y = y.to(dtype=torch.float64)
+    if not all(bool(torch.isfinite(v).all()) for v in (Px, Ax, ATy)):
+        raise RuntimeError("operator original-model products are nonfinite")
+    lower, upper = torch.isfinite(l), torch.isfinite(u)
+    lower_limit = config.eps_abs + config.eps_rel * torch.maximum(l[lower].abs(), Ax[lower].abs())
+    upper_limit = config.eps_abs + config.eps_rel * torch.maximum(u[upper].abs(), Ax[upper].abs())
+    stationary = Px + q + ATy
+    stationary_limit = config.eps_abs + config.eps_rel * torch.maximum(
+        torch.maximum(Px.abs(), q.abs()), ATy.abs(),
+    )
+    projected = torch.minimum(torch.maximum(Ax + y, l), u)
+    normal_limit = config.eps_abs + config.eps_rel * torch.maximum(Ax.abs(), projected.abs())
+    positive, negative = y > 0, y < 0
+    if bool((positive & ~upper).any() | (negative & ~lower).any()):
+        return False
+    # Mask before multiplication: zero multipliers on infinite bounds are legal.
+    support = torch.cat((y[positive] * u[positive], y[negative] * l[negative]))
+    products = torch.cat((y[positive] * Ax[positive], y[negative] * Ax[negative]))
+    complementarity_limit = config.eps_abs + config.eps_rel * torch.maximum(
+        support.abs(), products.abs(),
+    )
+    quantities = (
+        stationary, stationary_limit, projected, normal_limit,
+        lower_limit, upper_limit, support, products, complementarity_limit,
+    )
+    if not all(bool(torch.isfinite(v).all()) for v in quantities):
+        raise RuntimeError("operator original-model acceptance arithmetic is nonfinite")
+    return (
+        bool((l[lower] - Ax[lower] <= lower_limit).all())
+        and bool((Ax[upper] - u[upper] <= upper_limit).all())
+        and bool((stationary.abs() <= stationary_limit).all())
+        and bool(((Ax - projected).abs() <= normal_limit).all())
+        and bool(((support - products).abs() <= complementarity_limit).all())
+    )
 
 
 def _probe(operator: _CheckedOperator, *, quadratic: bool = False) -> None:
@@ -548,7 +617,25 @@ class PreparedOperatorQP:
             for t in vectors
         ):
             raise ValueError("q/l/u must be real dense float32/float64 vectors")
+        original_q, original_l, original_u = [
+            t.detach().to(device=device, dtype=torch.float64).clone() for t in vectors
+        ]
+        if original_q.ndim != 1 or not original_q.numel():
+            raise ValueError("q must be a nonempty vector")
+        if not bool(torch.isfinite(original_q).all()):
+            raise ValueError("q must be finite")
+        if original_l.shape != original_u.shape:
+            raise ValueError("bounds must have matching shapes")
+        if bool(torch.isnan(original_l).any() | torch.isnan(original_u).any()):
+            raise ValueError("bounds cannot contain NaN")
+        if bool(
+            torch.isposinf(original_l).any() | torch.isneginf(original_u).any()
+            | (original_l > original_u).any()
+        ):
+            raise ValueError("invalid/reversed original bounds")
         q, l, u = [t.detach().to(device=device, dtype=config.dtype).clone() for t in vectors]
+        for label, original, converted in zip(("q", "l", "u"), vectors, (q, l, u)):
+            _check_conversion(original, converted, label)
         if q.ndim != 1 or not q.numel():
             raise ValueError("q must be a nonempty vector")
         if not bool(torch.isfinite(q).all()):
@@ -580,6 +667,13 @@ class PreparedOperatorQP:
         _probe(A)
         self.config, self.P, self.A = config, P, A
         self.q, self.l, self.u = q, l, u
+        self.original_P = P if P.dtype == torch.float64 else _original_operator(
+            problem.P, device, P, "original P",
+        )
+        self.original_A = A if A.dtype == torch.float64 else _original_operator(
+            problem.A, device, A, "original A",
+        )
+        self.original_q, self.original_l, self.original_u = original_q, original_l, original_u
         self.system = MatrixFreeOperator(
             P.shape, device, config.dtype,
             self._system_matvec, self._system_matvec,
@@ -634,7 +728,13 @@ class PreparedOperatorQP:
                     raise RuntimeError(f"operator ADMM nonfinite KKT residual at iteration={iteration}")
                 primal_tol = c.eps_abs + c.eps_rel * max(_norm(Ax), _norm(z))
                 dual_tol = c.eps_abs + c.eps_rel * max(_norm(Px), _norm(q), _norm(ATy))
-                if primal <= primal_tol and dual <= dual_tol and normal <= primal_tol:
+                if (
+                    primal <= primal_tol and dual <= dual_tol and normal <= primal_tol
+                    and _original_candidate(
+                        self.original_P, self.original_A,
+                        self.original_q, self.original_l, self.original_u, x, y, c,
+                    )
+                ):
                     status = "solved"
                     break
         objective = float(0.5 * x @ P.matvec(x) + q @ x)
