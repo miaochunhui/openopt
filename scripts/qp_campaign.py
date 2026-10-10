@@ -117,6 +117,17 @@ def pod_identity(pod: dict, job: str) -> dict:
             "job_uid": owners[0]["uid"]}
 
 
+def result_job(record: dict, result_path: Path) -> dict:
+    result_path = result_path.resolve(strict=True)
+    if not result_path.is_file():
+        raise ValueError("live result must be an existing file")
+    matches = [item for item in record["jobs"]
+               if Path(item["output"]).resolve(strict=True) == result_path.parent]
+    if len(matches) != 1:
+        raise ValueError(f"live result requires exactly one submitted Job, found {len(matches)}")
+    return matches[0]
+
+
 def live(namespace: str, artifact_root: Path, result_paths: list[Path],
          recovery_pins: list[tuple[Path, str]] | None = None) -> None:
     if __package__:
@@ -160,9 +171,14 @@ def live(namespace: str, artifact_root: Path, result_paths: list[Path],
         })
     evidence = []
     for result_path in result_paths:
+        result_path = result_path.resolve(strict=True)
         record = json.loads((result_path.parent.parent / "run.json").read_text())
-        item = next(j for j in record["jobs"] if Path(j["output"]) == result_path.parent)
-        pod = next(p for p in pods["items"] if p["metadata"]["labels"].get("job-name") == item["job"])
+        item = result_job(record, result_path)
+        matching = [p for p in pods["items"]
+                    if p["metadata"]["labels"].get("job-name") == item["job"]]
+        if len(matching) != 1:
+            raise ValueError(f"live result requires exactly one Pod for {item['job']}")
+        pod = matching[0]
         terminal = pod["status"]["containerStatuses"][0]["state"].get("terminated")
         if pod["status"]["phase"] != "Succeeded" or not terminal or terminal["exitCode"] != 0:
             raise RuntimeError(f"campaign job not successful: {item['job']}")

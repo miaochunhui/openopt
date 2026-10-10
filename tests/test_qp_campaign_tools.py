@@ -153,3 +153,26 @@ def test_report_chart_escapes_labels_and_rejects_bad_values():
     for values in ([], [float("nan")], [1.0, 2.0]):
         with pytest.raises(ValueError, match="chart input"):
             render_qp_campaign.chart("bad", ["one"], values, "ms")
+
+
+def test_live_result_job_resolves_directory_alias(tmp_path):
+    output = tmp_path / "case-0"
+    output.mkdir()
+    result = output / "result.json"
+    result.write_text("{}")
+    alias = tmp_path / "alias"
+    alias.symlink_to(output, target_is_directory=True)
+    item = {"job": "original-job", "output": str(alias)}
+    assert qp_campaign.result_job({"jobs": [item]}, result) == item
+    assert qp_campaign.result_job({"jobs": [item]}, alias / "result.json") == item
+
+
+@pytest.mark.parametrize("copies", (0, 2))
+def test_live_result_job_rejects_missing_or_duplicate_match(tmp_path, copies):
+    output = tmp_path / "case-0"
+    output.mkdir()
+    result = output / "result.json"
+    result.write_text("{}")
+    item = {"job": "original-job", "output": str(output)}
+    with pytest.raises(ValueError, match="exactly one submitted Job"):
+        qp_campaign.result_job({"jobs": [item] * copies}, result)
