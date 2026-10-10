@@ -90,14 +90,23 @@ recession directions are opt-in; objective-gap termination is independently
 checked. Batch solves explicitly reject unsupported termination options.
 
 Conic zero/nonnegative/SOC contracts have an explicitly selected Clarabel CPU
-reference backend. MILP has an explicitly selected HiGHS CPU reference backend
-with independent incumbent checks. These are not native GPU conic/MIP engines;
+reference backend and a separate opt-in native dense PyTorch proximal ADMM
+prototype. `solve_native_conic` requires `NativeConicConfig(enabled=True)` and
+accepts candidates only after independent original-model cone/KKT/gap checks.
+`refine_qp_candidate` provides opt-in unregularized active-set polishing and
+finite-precision residual correction, requiring complete original-coordinate
+checks and nonworsening accuracy. Neither changes the default solver path.
+Their real GPU qualification is separate from CPU tests and API availability.
+MILP has an explicitly selected HiGHS CPU reference backend
+with independent incumbent checks, not a native GPU search engine.
 MIQP and other cone classes remain unsupported. Explicit CUDA requests never
 route to these CPU references. Commercial LP/QP adapters require an authorized
 installed solver and frozen-model replay; discovery alone is not qualification.
 There is no universal `openopt.minimize`. See
 [the exact boundary](docs/qp-design.md) and
 [release completion gates](docs/release-contract.md).
+See [native conic limits](docs/research/native-conic.md) and
+[refinement acceptance](docs/research/refinement.md).
 GPU acceleration is not automatically preferable: small problems measured
 slower on GPU. Explicit requests never silently fall back.
 

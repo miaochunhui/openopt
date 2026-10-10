@@ -129,6 +129,16 @@ def installed_probe(target):
     )
     if conic_result.status != "reference_solved" or not conic_result.evidence.passed:
         raise ValueError("isolated wheel conic CPU reference failed")
+    native = openopt.solve_native_conic(
+        conic, openopt.NativeConicConfig(enabled=True),
+    )
+    if native.status != "solved" or not native.evidence.passed or native.device != "cpu":
+        raise ValueError("isolated wheel native conic numerical solve failed")
+    polished = openopt.refine_qp_candidate(
+        general, solved.x, solved.y, openopt.RefinementConfig(),
+    )
+    if not polished.accepted or not polished.evidence.passed:
+        raise ValueError("isolated wheel original-coordinate QP refinement failed")
     integer = openopt.MILPProblem(
         q=[-1.0], A=[[1.0]], l=[0.0], u=[1.5],
         lower=[0.0], upper=[2.0], integrality=[1],
@@ -136,6 +146,10 @@ def installed_probe(target):
     integer_result = openopt.solve_milp(integer, openopt.MILPConfig(backend="highspy"))
     if integer_result.status != "optimal" or integer_result.incumbent != -1.0:
         raise ValueError("isolated wheel MILP CPU reference failed")
+    for name in ("native_conic", "refinement"):
+        module = sys.modules[f"openopt.{name}"]
+        if not Path(module.__file__).resolve().is_relative_to(target):
+            raise ValueError(f"extension loaded outside isolated wheel: {name}")
     print(f"WHEEL_IMPORT verdict=PASS api_objects={len(openpo.__all__)} version={openopt.__version__}")
 
 

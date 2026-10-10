@@ -32,7 +32,7 @@ infeasible from unbounded. Opt-in `dual_gap_termination=True` adds independent
 original-model dual-range/gap checks. Opt-in `direction_termination=True` derives
 directions from ADMM checkpoints and independently checks them; unbounded status
 also requires a saved feasible base. Unverified directions remain unknown.
-No full presolve, native GPU conic/MIP engine, MIQP, universal `minimize`, or
+No full presolve, native GPU MIP engine, MIQP, universal `minimize`, or
 automatic GPU routing is implemented by the dense default path.
 
 ## Optional Research Paths
@@ -66,6 +66,21 @@ cone/KKT/complementarity/gap checks and an explicitly selected Clarabel CPU
 reference. `openopt.integer` defines MILP bounds/integrality, an explicit HiGHS
 CPU reference and independent incumbent/gap checks. MIQP is rejected; neither
 module silently falls back from CUDA or constitutes a native GPU solver.
+
+`openopt.native_conic` is a separate opt-in dense PyTorch proximal ADMM
+prototype for zero/nonnegative/SOC products, with explicitly requested
+device/dtype and independent original cone/KKT/range/gap acceptance.
+It is not the Clarabel CPU reference and never invokes a third-party solver.
+Its scope excludes HSD, additional cones, sparse conic operators and generated
+conic directions; CPU regression does not qualify its CUDA path or performance.
+
+`openopt.refinement` optionally guesses active bounds, factors the original
+unregularized KKT matrix, and performs finite-precision residual corrections.
+Explicit float32 factor/float64 residual work is supported, not arbitrary
+precision. Every accepted candidate passes independent original-model checks
+and cannot worsen baseline feasibility/stationarity/sign/complementarity/gap.
+Singular systems remain unknown; wrong guesses are rejected and preserve
+baseline values. Neither prototype is a default-path optimization.
 
 The restricted MPS/QPS importer freezes original bytes, model arrays, objective
 sense/offset and bounds. Unsupported constructs are rejected rather than
@@ -104,6 +119,15 @@ Raw results, telemetry, frozen problems, source hashes and traces stay on 3FS.
 `scripts/render_qp_report.py` reads them to generate the design/report HTML.
 The shared runner refuses a launch exceeding three live cards and requires a
 passing numerical/Nsight prerequisite before a larger legacy launch.
+
+The `release-proof` dispatch submits one explicitly selected numerical case
+per one-card Job, at most three cards for this coordinator. Release GPU
+submissions require clean committed and byte-stable source. Collection records
+the immutable nested result and hash, rejecting missing, duplicate, CPU-only,
+failed or mismatched case artifacts. `gpu_release_proof.py` saves complete
+original/resident models, vectors, placement, scaling/CG/checkpoint traces and
+independent replay. Scoped synthetic proof is neither a performance claim nor
+remote attestation or commercial qualification.
 
 The v3 campaign adds independent pinned-byte acceptance: source membership,
 problem/witness arrays, every saved host solution, dtype/eps, strict solver

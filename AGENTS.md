@@ -8,6 +8,10 @@
   Scaling, preconditioned operators and numerical termination are opt-in.
   Conic and MILP reference backends are explicitly CPU-only; they do not
   establish native GPU capability, MIQP support or commercial qualification.
+  The separate opt-in native dense zero/nonnegative/SOC prototype and QP
+  polishing/refinement require original-model numerical checks. API presence
+  or CPU tests do not establish CUDA execution, complete cone/MIP scope,
+  arbitrary-precision guarantees or commercial qualification.
 - Product direction: a general-purpose GPU-accelerated optimizer targeting
   commercial-grade correctness, robustness and performance. Gurobi and CPLEX
   are LP/QP/MIP baselines; MOSEK is a convex/conic baseline. This is a target,

@@ -24,6 +24,17 @@ def test_no_general_purpose_api_is_falsely_advertised() -> None:
     assert not hasattr(openopt, "minimize")
 
 
+def test_opt_in_extensions_preserve_module_object_identity() -> None:
+    from openopt import native_conic, refinement
+
+    for module in (native_conic, refinement):
+        for name in module.__all__:
+            assert getattr(openopt, name) is getattr(module, name)
+            assert name in openopt.__all__
+    assert len(openopt.__all__) == len(set(openopt.__all__))
+    assert openopt.NativeConicConfig().enabled is False
+
+
 def test_version_matches_package_metadata_when_installed() -> None:
     try:
         version = importlib.metadata.version("openopt")

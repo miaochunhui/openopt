@@ -27,6 +27,11 @@ from .integer import (
     MILPProblem, MILPConfig, MILPResult, MILPValidation, check_milp_candidate,
     solve_milp, solve_miqp,
 )
+from .native_conic import (
+    NativeConicConfig, NativeConicResult, PreparedNativeConic,
+    project_cones, prepare_native_conic, solve_native_conic,
+)
+from .refinement import RefinementConfig, RefinedQPCandidate, refine_qp_candidate
 
 __all__ = list(_openpo_all) + [
     "PreparedQP", "QPConfig", "QPProblem", "QPResult", "prepare_qp", "solve_qp",
@@ -41,5 +46,8 @@ __all__ = list(_openpo_all) + [
     "ConicResult", "check_cone_feasibility", "check_conic_candidate", "solve_conic",
     "MILPProblem", "MILPConfig", "MILPResult", "MILPValidation", "check_milp_candidate",
     "solve_milp", "solve_miqp",
+    "NativeConicConfig", "NativeConicResult", "PreparedNativeConic",
+    "project_cones", "prepare_native_conic", "solve_native_conic",
+    "RefinementConfig", "RefinedQPCandidate", "refine_qp_candidate",
 ]
 __version__ = "0.1.0"

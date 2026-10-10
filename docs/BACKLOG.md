@@ -29,8 +29,9 @@ The product target and release gates are in `strategy.html`.
    success rate, objective gap, primal/dual residuals, throughput, memory and
    hardware/software versions on identical paired cases. Keep explicit GPU
    requests strict and choose automatic CPU/GPU routing from measurements.
-4. Convex conic scope: zero/nonnegative/SOC contracts and the explicit Clarabel
-   CPU reference are implemented. Native GPU algorithms, further cones and
+4. Convex conic scope: zero/nonnegative/SOC contracts, the explicit Clarabel
+   CPU reference and an opt-in dense native PyTorch proximal ADMM prototype
+   are implemented. Actual CUDA acceptance, HSD/directions, further cones and
    representative MOSEK/open-reference qualification remain required.
 5. MILP/MIQP scope: MILP bounds/integrality and the explicit HiGHS CPU reference
    are implemented with independent incumbent checks. Native GPU search,
@@ -53,6 +54,12 @@ and generated checkpoint directions are implemented. The restricted audited
 MPS/QPS importer and authorized commercial LP/QP replay adapters are implemented.
 Real public-model coverage, full GPU proof sidecars and legal commercial runs
 remain separate qualifications. The release contract is `release-contract.md`.
+Opt-in original-coordinate active-set polishing and finite-precision KKT
+residual correction are implemented; this is not arbitrary precision or a
+complete active-set algorithm. Complete original checks and nonworsening
+baseline accuracy are required. Frozen numerical proof producers and bounded
+one-case-per-Job dispatch are implemented; current-source GPU execution and
+independent cluster/source/sidecar binding remain separate acceptance gates.
 
 Historical evidence is linked by the generated v3 report. The earlier v2 experiment
 is historical, byte-frozen evidence; its original source is not replaced.
@@ -61,9 +68,10 @@ with completion/refill, never claimed as eight simultaneous agents.
 
 ## Explicit Non-Claims
 
-- No universal `minimize`, native GPU conic/MIP engine, MIQP or exact certificate
-  is implemented. Explicit CPU reference backends and numerical checkpoint
-  directions must not be described as those missing capabilities.
+- No universal `minimize`, complete native GPU conic/MIP engine, MIQP or exact
+  certificate is implemented. The limited native dense conic prototype,
+  explicit CPU references and numerical checkpoint directions must not be
+  described as those missing capabilities.
 - No universal GPU speedup or production qualification is asserted.
 - No commercial solver parity or world-leading ranking is asserted.
 - The user authorized this experiment's K8s Jobs with at most three 4500 cards.
