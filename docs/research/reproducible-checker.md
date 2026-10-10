@@ -1,4 +1,4 @@
-# Reproducible Original QP Checker V1
+# Reproducible Original QP Checker V2
 
 ## Contract Before Implementation
 
@@ -6,7 +6,8 @@ This document freezes the proposed opt-in arithmetic contract before code
 implementation. Its first commit is a design receipt, not implemented
 correctness, CUDA acceptance or commercial qualification.
 
-Algorithm ID: `reproducible_binary64_v1`. The existing
+Current algorithm ID: `reproducible_binary64_v2`; v1 was blocked by the
+independent rounded-zero-kernel counterexample described below. The existing
 `check_qp_candidate(..., arithmetic="numpy")` default retains its previous
 NumPy arithmetic and evidence. Refinement defaults retain that same checker.
 No ordinary QP solver, facade, cluster or dispatch file is changed.
@@ -73,9 +74,10 @@ A negative eigenvalue beyond it rejects a nonconvex model. A nonzero
 eigenvalue in the unresolved band prevents dual objective/gap availability;
 it is NOT snapped to zero, regularized or inverted. Only computed exact
 zero eigenvalues are treated as null directions only when the fixed-arithmetic
-original P times that eigenvector is exactly zero, as well as passing the
-independent spectral residual checks. This conservative extra check prevents
-computed zero from silently hiding original small positive curvature.
+original P times that eigenvector is zero AND every original row's nonzero
+products can be paired with an exactly opposite product, as well as passing
+the independent spectral residual checks. Rounded residual zero alone is not
+a mathematical zero-kernel proof.
 Singular/ill-conditioned evidence remains
 approximate, not certified. The original range residual is still recomputed
 using the original P, not the Jacobi working matrix.
@@ -91,9 +93,9 @@ Opt-in baseline and attempted candidates use the same versioned checker;
 device execution of factorization/correction stays strict PyTorch CPU/CUDA.
 No new solver fallback is introduced. Rejection retains original x/y.
 
-The frozen CUDA seven-test producer explicitly selects v1, freezes
+The frozen CUDA seven-test producer explicitly selects the current version, freezes
 algorithm metadata and producer Python/NumPy/build/environment provenance,
-and retain complete baseline/refined/three-negative-control evidence.
+and retains complete baseline/refined/three-negative-control evidence.
 Its new schema is distinct from historical schema 1. Existing CPU/default
 producer behavior and old schema-1 replay remain available without promotion.
 The new auditor selects arithmetic only from a strictly checked schema and
@@ -155,7 +157,7 @@ same substitutions. Rejected candidate x/y must retain baseline bytes.
 No relative/ULP allowance or alternate-arithmetic retry is present.
 
 All receipt paths in this section are relative to the external artifact root
-above. These are CPU development validations of explicitly hashed dirty
+above. These are historical v1 CPU validations of explicitly hashed dirty
 implementation bytes, not clean-final CUDA qualification:
 
 | Receipt | Result | Pytest wall |
@@ -233,6 +235,69 @@ selection remains exactly the three existing function targets
 `test_cuda_refinement_frozen_model_accuracy_ab`,
 `test_cuda_refinement_actual_residual_correction`,
 `test_cuda_refinement_negative_controls`: parametrization totals 3+1+3=7.
+
+## V2 Rounded-Zero Kernel Repair
+
+The independent Bacon review commit
+`4af748799c2eb7234c33938c6a5bfa5d95b090d8` disproved the v1 null-kernel
+acceptance rule. With e=2^-52, the original binary64 matrix
+`[[1+4e,1+5e],[1+5e,1+6e]]` has exact determinant -2^-104 and a strictly
+negative exact quadratic objective along a representable integer direction.
+Jacobi nevertheless returns a computed zero eigenvalue, and separately
+rounded original P/vector products sum to zero. V1 then incorrectly passes
+the zero candidate as approximate optimality evidence. This is a real
+false success, not a tolerance or serialization mismatch.
+
+The repair keeps the original fixed residual-zero condition and adds a
+conservative, sufficient algebraic cancellation rule. For each original row,
+every nonzero product is represented by sign, normalized integer significand
+and power-of-two exponent. Each operand has 53 significand bits; the product
+identity uses at most 106 bits, with an exponent bounded by binary64.
+Only equal-magnitude, opposite-sign product identities cancel, in input
+order. No product identities are added, rounded, used for an objective,
+range residual or eigenvalue, or converted into an exact dot accumulator.
+At most n<=8 unmatched identities are stored per row.
+
+A row with unmatched products is unproved even if its rounded dot is zero.
+The model then has unavailable dual objective/gap with the explicit reason
+`zero-kernel product cancellation unproved`; the candidate cannot pass.
+Non-pairwise exact cancellation is deliberately unsupported. The exact
+rank-one all-ones positive control and zero-coordinate nullspaces remain
+supported. This proof only certifies the particular row/product cancellation,
+not arbitrary PSD models, exact optimizer results or arbitrary precision.
+Jacobi convergence/residual gates, the spectral threshold and all original
+candidate tolerances remain unchanged.
+
+The algorithm ID is now `reproducible_binary64_v2`. Producer and auditor
+select the imported current constant; schema remains 2 but the exact
+versioned checker contract and implementation hash differ. Old v1 schema-2
+sidecars cannot be relabeled or accepted by the v2 checker. The old clean
+v1 receipt proves the old code executed, not the repaired mathematical gate.
+
+Repair scope is only `src/openopt/certificates.py` and this document.
+All test files remain Bacon-owned and unedited. Independent review tests
+are frozen at `460103b8ebd4b25a141de5c97c0d3f79853f0003`, whose committed-source
+guard permits a separately committed repair to be audited.
+Fresh repair validation is required before any integration or GPU expansion;
+no cluster task is submitted by this seat.
+
+The repair-time reproduction is
+`kernel-red-v1/tests-g2mofx4q/verification.json` under this document's external
+artifact root: one failed independent test in 2.91 s, reviewed checker SHA
+`b3f1018c31d908e2e52ff96a097cd76fbb552efc40481489489624c48cdfa583`.
+The false-success receipt is in its
+`pytest-tmp/test_rounded_zero_kernel_canno0/rounded-zero-kernel.json`.
+The failure remains preserved. Pre-edit CPU smoke at
+`kernel-preflight-v1/smoke-97we2khu/verification.json` passed 80 tests with
+four explicit CUDA skips; smoke did not detect the mathematical defect.
+
+V2 precommit regression at `kernel-v2-regression/tests-htxzruf0/verification.json`
+passed 176 tests with seven explicit CUDA skips in 29.52 s; it includes
+complete checker/refinement defaults, reproducible cross-process evidence
+and versioned synthetic acceptance. V2 smoke at
+`kernel-v2-smoke/smoke-n28l2ecg/verification.json` passed 80 tests with four
+CUDA skips in 6.18 s. Both have source-consistency PASS for their tested dirty
+bytes. Neither replaces the required clean independent Bacon audit.
 
 ## Mathematical References
 

@@ -21,7 +21,7 @@ __all__ = [
     "reproducible_checker_contract",
 ]
 
-REPRODUCIBLE_ARITHMETIC = "reproducible_binary64_v1"
+REPRODUCIBLE_ARITHMETIC = "reproducible_binary64_v2"
 
 
 def reproducible_checker_contract() -> dict[str, object]:
@@ -33,7 +33,7 @@ def reproducible_checker_contract() -> dict[str, object]:
         "sqrt": "binary64 exact midpoint rounding using bounded integer isqrt",
         "spectrum": "lexicographic cyclic Jacobi, at most 32 sweeps",
         "spectral_verification": "original symmetrized residual and orthogonality",
-        "zero_eigenvalue": "original fixed-arithmetic P times eigenvector must be exactly zero",
+        "zero_eigenvalue": "original P products prove exact zero by bounded signed-product pair cancellation",
         "subnormal": "rejected", "unsupported": "raise, no arithmetic fallback",
         "qualification": "bounded approximate numerical evidence; not an exact proof",
     }
@@ -134,6 +134,34 @@ def _bdot(left, right) -> float:
 
 def _bmv(matrix, vector):
     return [_bdot(row, vector) for row in matrix]
+
+
+def _paired_kernel_zero(matrix, vector):
+    """Prove only pairwise product cancellations, never sum rounded residuals.
+
+    Each product identity has at most 106 significand bits. There is no exact
+    dot accumulator; non-pairwise cancellations conservatively remain unknown.
+    """
+    for row in matrix:
+        remaining = []
+        for left, right in zip(row, vector):
+            if left == 0 or right == 0:
+                continue
+            lm, le = math.frexp(abs(left))
+            rm, re = math.frexp(abs(right))
+            significand = int(math.ldexp(lm, 53)) * int(math.ldexp(rm, 53))
+            trailing = (significand & -significand).bit_length() - 1
+            exponent = le + re - 106 + trailing
+            significand >>= trailing
+            sign = -1 if (left < 0) != (right < 0) else 1
+            opposite = (-sign, significand, exponent)
+            if opposite in remaining:
+                remaining.remove(opposite)
+            else:
+                remaining.append((sign, significand, exponent))
+        if remaining:
+            return False
+    return True
 
 
 def _bt(matrix, columns):
@@ -274,13 +302,19 @@ def _reproducible_candidate(problem, x, y, atol, rtol):
     unavailable = {}
     columns = _bt(vectors, n)
     resolved = all(
-        value > spectral or (value == 0 and _bn(_bmv(P, columns[i])) == 0)
+        value > spectral or (
+            value == 0 and _bn(_bmv(P, columns[i])) == 0
+            and _paired_kernel_zero(P, columns[i])
+        )
         for i, value in enumerate(eigenvalues)
     )
     if support is None:
         unavailable["dual_objective"] = "multiplier has an infinite box support"
     elif not resolved:
-        unavailable["dual_objective"] = "unresolved PSD spectrum; no regularized inverse used"
+        unavailable["dual_objective"] = (
+            "unresolved PSD spectrum or zero-kernel product cancellation unproved; "
+            "no regularized inverse used"
+        )
     else:
         coordinates = _bmv(_bt(vectors, n), b)
         inverse_coordinates = [_bd(v, ev) if ev > 0 else 0. for v, ev in zip(coordinates, eigenvalues)]
