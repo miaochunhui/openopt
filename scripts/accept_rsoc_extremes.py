@@ -14,6 +14,7 @@ from decimal import Decimal, localcontext
 from fractions import Fraction
 import math
 from pathlib import Path
+import re
 import struct
 import sys
 import tempfile
@@ -244,19 +245,76 @@ def environment(entries):
     return result
 
 
+def named_records(values, coordinate):
+    require(isinstance(values, list), coordinate, "explicit record list required")
+    result = {}
+    for value in values:
+        require(isinstance(value, dict) and isinstance(value.get("name"), str)
+                and value["name"] and value["name"] not in result,
+                coordinate, "missing/duplicate record name")
+        result[value["name"]] = value
+    return result
+
+
+def storage_gate(spec, container, expected_spec, expected_container, *, observed_pod):
+    """Only admit the standard read-only service-account projection as extra."""
+    expected_volumes = named_records(expected_spec.get("volumes"), "submitted volumes")
+    expected_mounts = named_records(expected_container.get("volumeMounts"), "submitted mounts")
+    volumes = named_records(spec.get("volumes"), "actual volumes")
+    mounts = named_records(container.get("volumeMounts"), "actual mounts")
+    require(all(volumes.get(name) == value for name, value in expected_volumes.items())
+            and all(mounts.get(name) == value for name, value in expected_mounts.items()),
+            "storage", "submitted source/scratch volume or mount drift")
+    extra_volumes, extra_mounts = set(volumes) - set(expected_volumes), set(mounts) - set(expected_mounts)
+    if not extra_volumes and not extra_mounts:
+        return
+    require(observed_pod and extra_volumes == extra_mounts and len(extra_volumes) == 1,
+            "storage", "undeclared execution volume/mount")
+    name = next(iter(extra_volumes))
+    require(re.fullmatch(r"kube-api-access-[a-z0-9]+", name) is not None,
+            "storage", "unknown injected volume")
+    require(mounts[name] == {
+        "name": name, "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount", "readOnly": True,
+    }, "storage", "service-account mount is not the declared read-only default")
+    projected = volumes[name].get("projected")
+    require(set(volumes[name]) == {"name", "projected"}
+            and isinstance(projected, dict) and set(projected) == {"defaultMode", "sources"}
+            and type(projected["defaultMode"]) is int and projected["defaultMode"] == 420,
+            "storage", "unknown service-account projection")
+    sources = projected["sources"]
+    require(isinstance(sources, list) and len(sources) == 3,
+            "storage", "complete service-account projection required")
+    token = sources[0].get("serviceAccountToken", {})
+    require(set(sources[0]) == {"serviceAccountToken"}
+            and set(token) == {"expirationSeconds", "path"} and token["path"] == "token"
+            and type(token["expirationSeconds"]) is int and 600 <= token["expirationSeconds"] <= 86400,
+            "storage", "unknown token projection configuration")
+    require(sources[1] == {"configMap": {
+        "items": [{"key": "ca.crt", "path": "ca.crt"}], "name": "kube-root-ca.crt",
+    }} and sources[2] == {"downwardAPI": {"items": [{
+        "fieldRef": {"apiVersion": "v1", "fieldPath": "metadata.namespace"}, "path": "namespace",
+    }]}}, "storage", "unknown service-account projection source")
+
+
 def status_gate(status, manifest, run, report, log):
     job, pods = status["job"], status["pods"]["items"]
     item = run["jobs"][0]
     require(job["metadata"]["name"] == item["job"] and job["metadata"]["namespace"] == run["namespace"]
             and len(pods) == 1, "status", "exact one submitted Job/Pod required")
     pod = pods[0]
+    require(job.get("kind") == "Job" and job.get("apiVersion") == "batch/v1"
+            and pod.get("kind") == "Pod" and pod.get("apiVersion") == "v1"
+            and pod["metadata"].get("namespace") == run["namespace"],
+            "status", "actual Job/Pod kind, version or namespace mismatch")
     require(job["metadata"]["labels"].get("repo") == pod["metadata"]["labels"].get("repo") == "openopt"
             and job["metadata"]["labels"].get("owner") == pod["metadata"]["labels"].get("owner") == "infra-openopt",
             "status", "project ownership mismatch")
     owners = [owner for owner in pod["metadata"].get("ownerReferences", []) if owner.get("controller") is True]
     require(len(owners) == 1 and owners[0].get("uid") == job["metadata"]["uid"]
-            and owners[0].get("name") == item["job"], "status", "Pod actual controller UID mismatch")
-    require(job.get("status", {}).get("succeeded") == 1 and not job["status"].get("failed")
+            and owners[0].get("name") == item["job"] and owners[0].get("kind") == "Job"
+            and owners[0].get("apiVersion") == "batch/v1", "status", "Pod actual controller identity mismatch")
+    require(type(job.get("status", {}).get("succeeded")) is int and job["status"]["succeeded"] == 1
+            and not job["status"].get("failed")
             and any(c.get("type") == "Complete" and c.get("status") == "True" for c in job["status"]["conditions"])
             and not any(c.get("type") == "Failed" and c.get("status") == "True" for c in job["status"]["conditions"]),
             "status", "successful Job terminal condition required")
@@ -265,11 +323,19 @@ def status_gate(status, manifest, run, report, log):
     for obj in (manifest, job):
         require(type(obj["spec"]["backoffLimit"]) is int and obj["spec"]["backoffLimit"] == 0,
                 "status", "non-retrying Job required")
-    for spec in (expected_pod, job["spec"]["template"]["spec"], pod["spec"]):
+    for index, spec in enumerate((expected_pod, job["spec"]["template"]["spec"], pod["spec"])):
         require(spec.get("restartPolicy") == "Never" and len(spec["containers"]) == 1
                 and not spec.get("initContainers") and not spec.get("ephemeralContainers"),
                 "status", "unexpected restart/multiple-container execution")
         actual = spec["containers"][0]
+        require(all(spec.get(name) == expected_pod.get(name) for name in (
+            "nodeSelector", "runtimeClassName", "serviceAccountName", "priorityClassName", "securityContext",
+        )), "status", "submitted placement, runtime, execution identity or security drift")
+        require(actual.get("workingDir", "") == expected.get("workingDir", "")
+                and actual.get("securityContext") == expected.get("securityContext")
+                and actual.get("imagePullPolicy") == expected.get("imagePullPolicy"),
+                "status", "submitted working directory or container security/image policy drift")
+        storage_gate(spec, actual, expected_pod, expected, observed_pod=index == 2)
         require(actual.get("name") == expected["name"] and actual.get("command") == expected["command"]
                 and not actual.get("args") and not actual.get("envFrom")
                 and actual.get("image") == expected["image"]
@@ -283,9 +349,12 @@ def status_gate(status, manifest, run, report, log):
                     "status", "submitted resource contract drift")
     states = pod["status"].get("containerStatuses", [])
     require(pod["status"]["phase"] == "Succeeded" and len(states) == 1
-            and states[0]["name"] == expected["name"] and states[0]["restartCount"] == 0
-            and states[0].get("state", {}).get("terminated", {}).get("exitCode") == 0
-            and isinstance(states[0].get("imageID"), str) and "sha256:" in states[0]["imageID"],
+            and states[0]["name"] == expected["name"] and type(states[0]["restartCount"]) is int
+            and states[0]["restartCount"] == 0
+            and type(states[0].get("state", {}).get("terminated", {}).get("exitCode")) is int
+            and states[0]["state"]["terminated"]["exitCode"] == 0
+            and isinstance(states[0].get("imageID"), str)
+            and re.fullmatch(r"[^@\s]+@sha256:[0-9a-f]{64}", states[0]["imageID"]) is not None,
             "status", "successful non-restarted resolved container required")
     require(report["hardware"]["node"] == pod["spec"]["nodeName"], "status", "observed node mismatch")
     markers = [line for line in log.splitlines() if line.startswith("OPENOPT_RELEASE_CUDA verdict=")]

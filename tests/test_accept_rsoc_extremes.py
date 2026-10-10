@@ -96,19 +96,30 @@ def archive(tmp_path, monkeypatch):
         "command": ["python3", str(source / audit.execution.RUNNER), "--artifact-dir",
                     str(output), "--target", f"{audit.TEST}::{audit.FUNCTION}"],
         "env": env, "resources": {"requests": resources.copy(), "limits": resources.copy()},
+        "volumeMounts": [
+            {"name": "threefs", "mountPath": "/3fs", "mountPropagation": "HostToContainer"},
+            {"name": "shared-memory", "mountPath": "/dev/shm"},
+        ],
     }
-    pod_spec = {"restartPolicy": "Never", "containers": [container]}
+    pod_spec = {"restartPolicy": "Never", "containers": [container], "volumes": [
+        {"name": "threefs", "persistentVolumeClaim": {"claimName": "synthetic-3fs"}},
+        {"name": "shared-memory", "emptyDir": {"medium": "Memory", "sizeLimit": "512Mi"}},
+    ]}
     labels = {"repo": "openopt", "owner": "infra-openopt"}
     manifest = {
-        "kind": "Job", "metadata": {"name": job_name, "namespace": "synthetic", "labels": labels},
+        "kind": "Job", "apiVersion": "batch/v1",
+        "metadata": {"name": job_name, "namespace": "synthetic", "labels": labels},
         "spec": {"backoffLimit": 0, "template": {"spec": pod_spec}},
     }
     job = copy.deepcopy(manifest)
     job["metadata"]["uid"] = "synthetic-job-uid"
     job["status"] = {"succeeded": 1, "conditions": [{"type": "Complete", "status": "True"}]}
     pod = {
+        "kind": "Pod", "apiVersion": "v1",
         "metadata": {"name": pod_name, "uid": "synthetic-pod-uid", "labels": labels,
-                     "ownerReferences": [{"name": job_name, "uid": "synthetic-job-uid", "controller": True}]},
+                     "namespace": "synthetic",
+                     "ownerReferences": [{"name": job_name, "uid": "synthetic-job-uid", "controller": True,
+                                          "kind": "Job", "apiVersion": "batch/v1"}]},
         "spec": {**copy.deepcopy(pod_spec), "nodeName": "synthetic-node"},
         "status": {"phase": "Succeeded", "containerStatuses": [{
             "name": "benchmark", "restartCount": 0, "imageID": "synthetic@sha256:" + "a" * 64,
@@ -220,6 +231,8 @@ def test_rehashed_sidecar_corruption_is_rejected(archive, mutation):
 
 @pytest.mark.parametrize("mutation", [
     "args", "env-value", "env-extra", "env-duplicate", "env-from", "restarted", "owner",
+    "working-dir", "source-mount", "source-volume", "placement", "namespace",
+    "owner-kind", "image-digest", "exit-bool", "restart-bool",
 ])
 def test_coordinated_observed_status_mutations_rejected(archive, mutation):
     values = invocation(archive)
@@ -238,10 +251,28 @@ def test_coordinated_observed_status_mutations_rejected(archive, mutation):
             container["env"].append(copy.deepcopy(container["env"][0]))
         elif mutation == "env-from":
             container["envFrom"] = [{"configMapRef": {"name": "unsubmitted"}}]
+        elif mutation == "working-dir":
+            container["workingDir"] = "/unsubmitted"
+        elif mutation == "source-mount":
+            container["volumeMounts"][0]["mountPath"] = "/unsubmitted"
+        elif mutation == "source-volume":
+            spec["volumes"][0] = {"name": "threefs", "emptyDir": {}}
+        elif mutation == "placement":
+            spec["nodeSelector"] = {"nvidia.com/gpu.product": "NVIDIA-A100"}
     if mutation == "restarted":
         status["pods"]["items"][0]["status"]["containerStatuses"][0]["restartCount"] = 1
     if mutation == "owner":
         status["pods"]["items"][0]["metadata"]["ownerReferences"][0]["uid"] = "wrong"
+    if mutation == "namespace":
+        status["pods"]["items"][0]["metadata"]["namespace"] = "foreign"
+    if mutation == "owner-kind":
+        status["pods"]["items"][0]["metadata"]["ownerReferences"][0]["kind"] = "ConfigMap"
+    if mutation == "image-digest":
+        status["pods"]["items"][0]["status"]["containerStatuses"][0]["imageID"] = "foreign@sha256:x"
+    if mutation == "exit-bool":
+        status["pods"]["items"][0]["status"]["containerStatuses"][0]["state"]["terminated"]["exitCode"] = False
+    if mutation == "restart-bool":
+        status["pods"]["items"][0]["status"]["containerStatuses"][0]["restartCount"] = False
     write(archive["status"], status)
     values["status_sha256"] = pin(archive["status"])
     with pytest.raises(ValueError):

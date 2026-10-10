@@ -62,3 +62,21 @@ The earlier post-smoke receipt is
 `owner-extremes-auditor-postsmoke-v1/smoke-ugliqgu0/verification.json`;
 80 passed and four explicit local-CUDA skips. These are development receipts,
 not clean frozen-source independent signoff or new GPU executions.
+
+Independent review of the same `6ab87e9` gate bytes retained nine further false
+acceptances: working directory, source mount/PVC, device selection, Pod
+namespace, controller kind, malformed image digest, and boolean exit/restart
+counts. Numerical baseline replay remained successful; this is an execution
+audit failure, not a failed projection. The revised gate binds these fields,
+checks exact integer terminal counts, and only permits the explicitly checked
+standard read-only Kubernetes service-account projection as an extra volume.
+The original independent 28-node suite is not modified by this repair.
+
+Owner repair receipt:
+`owner-extremes-auditor-status-repair-v1/tests-lvyip99q/verification.json`,
+30 passed, zero skipped, 102.81 seconds, source consistency PASS.
+Real original four-pin replay:
+`owner-extremes-status-repair-actual-v1/rsoc-audit-6le1vi_s/acceptance.json`,
+`RSOC_EXTREMES_REPLAY_PASS` at 2026-10-10T12:28:48 UTC, complete 76 nodes.
+Both are owner development results; independent unchanged-counterexample
+signoff and clean committed revalidation are separate pending gates.
