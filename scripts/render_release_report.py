@@ -32,11 +32,20 @@ REQUIRED = frozenset({
     "cpu", "junit", "wheel", "gpu", "gpu_run", "commercial", "corpus",
     "campaign", "audit", "live", "metadata",
 })
-OPTIONAL = frozenset({"gpu_junit", "cpu_version", "public_qualification"})
+EXTENSIONS = {
+    "extension_native": ("native_conic", "原生锥 CUDA"),
+    "extension_presolve": ("presolve", "保守预处理 CUDA"),
+    "extension_refinement": ("refinement", "精度修正 CUDA"),
+}
+OPTIONAL = frozenset({
+    "gpu_junit", "cpu_version", "public_qualification", "proof_contract_review",
+    "public_robustness", "public_robustness_plan", "public_robustness_corpus",
+    "extension_presolve_run", *EXTENSIONS,
+})
 STATUS = frozenset({
     "PASS", "FAIL", "UNVERIFIED", "QUALIFIED", "REJECTED", "INCONCLUSIVE",
     "RUNNING", "PENDING", "COMPLETE", "solved", "max_iterations",
-    "infeasible", "unbounded", "NOT_QUALIFIED",
+    "infeasible", "unbounded", "NOT_QUALIFIED", "UNQUALIFIED",
 })
 MAX_BYTES = 16 * 1024 * 1024
 LEAKS = (
@@ -633,6 +642,65 @@ class Report:
                     "public_empty_false_pass", "public_qualification")
             self.direct("public_status", "public_qualification", "/verdict")
             self.direct("public_scope", "public_qualification", "/scope")
+        self.extension_rows = []
+        for role, (suite, label) in EXTENSIONS.items():
+            if role not in r:
+                continue
+            evidence = r[role]
+            require(evidence.get("verdict") in {"PASS", "FAIL"},
+                    "incomplete_extension_acceptance", role)
+            timestamp(evidence.get("finished_at"), role)
+            keys = [self.direct(f"{role}_status", role, "/verdict"),
+                    self.direct(f"{role}_finished", role, "/finished_at")]
+            if evidence["verdict"] == "PASS":
+                require(evidence.get("suite") == suite
+                        and (suite == "presolve" or evidence.get("final_source") is True)
+                        and evidence.get("qualified") is False
+                        and evidence.get("certified") is False
+                        and evidence.get("commercial") == "UNVERIFIED"
+                        and evidence.get("performance") == "UNVERIFIED",
+                        "extension_acceptance_overclaim", role)
+                counts = test_counts(evidence, role)
+                require(counts == {
+                    "tests": {"native_conic": 21, "presolve": 8, "refinement": 7}[suite],
+                    "failures": 0, "errors": 0, "skipped": 0,
+                }, "extension_independent_denominator", role)
+                source = evidence.get("source_sha_informational")
+                source_role, source_pointer = role, "/source_sha_informational"
+                if suite == "presolve":
+                    source_role, source_pointer = "extension_presolve_run", "/source_sha"
+                    require(source_role in r and evidence.get("current_core") == "PASS",
+                            "presolve_run_pin_required", role)
+                    original = evidence.get("pins", {}).get("run", {})
+                    selected = self.descriptors[source_role]
+                    require(original.get("sha256") == selected["sha256"]
+                            and shared_path(original.get("path", ""), role) ==
+                            shared_path(selected["path"], role),
+                            "presolve_acceptance_run_mismatch", role)
+                    source = r[source_role].get("source_sha")
+                require(isinstance(source, str) and COMMIT.fullmatch(source),
+                        "extension_source_missing", role)
+                self.scalar(f"{role}_source", source, source_role, source_pointer)
+                self.direct(f"{role}_tests", role, "/tests/tests")
+            self.extension_rows.append((role, label, keys))
+        require("extension_presolve_run" not in r or "extension_presolve" in r,
+                "unused_presolve_run", "extension_presolve_run")
+        if "proof_contract_review" in r:
+            role = "proof_contract_review"
+            evidence = r[role]
+            require(evidence.get("verdict") in {"PASS", "FAIL"},
+                    "incomplete_proof_contract_review", role)
+            timestamp(evidence.get("finished_at"), role)
+            source = evidence.get("producer", {}).get("commit")
+            require(isinstance(source, str) and COMMIT.fullmatch(source),
+                    "proof_review_source_missing", role)
+            self.direct("proof_review_status", role, "/verdict")
+            self.direct("proof_review_finished", role, "/finished_at")
+            self.direct("proof_review_source", role, "/producer/commit")
+        if "public_robustness" in r:
+            self.robustness()
+        require(not ({"public_robustness_plan", "public_robustness_corpus"} & set(r))
+                or "public_robustness" in r, "unused_robustness_contract", "public_robustness")
         self.failure_rows = []
 
         def failures(value, role, tokens):
@@ -643,7 +711,9 @@ class Report:
             elif isinstance(value, list):
                 for index, child in enumerate(value):
                     failures(child, role, tokens + [str(index)])
-            elif isinstance(value, str) and value in {"FAIL", "REJECTED", "NOT_QUALIFIED"}:
+            elif isinstance(value, str) and value in {
+                "FAIL", "REJECTED", "NOT_QUALIFIED", "UNQUALIFIED",
+            }:
                 key = self.scalar(f"failure_{len(self.failure_rows)}", value, role,
                                   "/" + "/".join(tokens))
                 self.failure_rows.append((role, key))
@@ -652,7 +722,120 @@ class Report:
             if isinstance(record, dict):
                 failures(record, role, [])
         self.scalar("evidence_failure_statuses", len(self.failure_rows), "metadata", "",
-                    "count-FAIL-REJECTED-NOT_QUALIFIED-in-all-pinned-json-inputs")
+                    "count-failure-or-unqualified-status-in-all-pinned-json-inputs")
+
+    def robustness(self):
+        role = "public_robustness"
+        evidence = self.records[role]
+        require(evidence.get("numeric_verdict") in {"PASS", "UNQUALIFIED"}
+                and evidence.get("original_verdict") in {"PASS", "UNQUALIFIED"}
+                and evidence.get("speedup_claim") is False
+                and evidence.get("tiny_dual_clipping") is False,
+                "robustness_qualification_overclaim", role)
+        timestamp(evidence.get("finished_at"), role)
+        require(evidence.get("version") in {"public-robustness-v1", "public-robustness-v2"},
+                "unknown_robustness_version", role)
+        require({"public_robustness_plan", "public_robustness_corpus"} <= set(self.records),
+                "robustness_plan_corpus_required", role)
+        plan = self.records["public_robustness_plan"]
+        corpus = self.records["public_robustness_corpus"]
+        require(evidence.get("corpus_sha256") ==
+                self.descriptors["public_robustness_corpus"]["sha256"],
+                "robustness_corpus_pin_mismatch", role)
+        arms, cases = plan.get("arms"), corpus.get("cases")
+        require(isinstance(arms, list) and bool(arms) and isinstance(cases, list)
+                and bool(cases) and evidence.get("arms") == arms
+                and evidence.get("gates") == plan.get("gates")
+                and isinstance(plan.get("gates"), dict) and bool(plan["gates"]),
+                "robustness_contract_mismatch", role)
+        arm_map, case_map = {}, {}
+        for arm in arms:
+            require(isinstance(arm, dict) and isinstance(arm.get("arm"), str)
+                    and isinstance(arm.get("solver"), str) and arm["arm"] not in arm_map,
+                    "robustness_plan_arm_identity", role)
+            public_text(arm["arm"], role)
+            arm_map[arm["arm"]] = arm["solver"]
+        for case in cases:
+            require(isinstance(case, dict) and isinstance(case.get("case_id"), str)
+                    and case["case_id"] not in case_map
+                    and isinstance(case.get("model_sha256"), str)
+                    and HASH.fullmatch(case["model_sha256"]),
+                    "robustness_corpus_identity", role)
+            case_map[case["case_id"]] = case["model_sha256"]
+        expected = {(case, arm, model, solver)
+                    for case, model in case_map.items() for arm, solver in arm_map.items()}
+
+        def membership(selected, coordinate):
+            require(isinstance(selected, list) and bool(selected), coordinate, role)
+            found = set()
+            for row in selected:
+                require(isinstance(row, dict), coordinate, role)
+                identity = tuple(row.get(key) for key in
+                                 ("case_id", "arm", "model_sha256", "solver"))
+                require(all(isinstance(value, str) for value in identity)
+                        and identity not in found and type(row.get("attempt")) is int
+                        and row["attempt"] == 1 and type(row.get("denominator")) is int
+                        and row["denominator"] == 1, coordinate, role)
+                found.add(identity)
+            require(found == expected, coordinate, role)
+
+        membership(plan.get("rows"), "robustness_plan_incomplete")
+        membership(evidence.get("rows"), "robustness_result_incomplete")
+        rows, counts = evidence.get("rows"), evidence.get("arm_counts")
+        require(isinstance(rows, list) and bool(rows) and isinstance(counts, dict)
+                and set(counts) == set(arm_map), "empty_robustness_attempts", role)
+        require(all(isinstance(row, dict) for row in rows),
+                "invalid_robustness_attempt", role)
+        require(integer(evidence.get("planned_denominator"), role, True) == len(rows)
+                and integer(evidence.get("attempted_count"), role) ==
+                sum(row.get("attempted") is True for row in rows),
+                "robustness_denominator_mismatch", role)
+        allowed = {"QUALIFIED", "UNQUALIFIED", "FAIL", "BUDGET_EXHAUSTED"}
+        identities = set()
+        self.robustness_rows = []
+        for arm, entry in sorted(counts.items()):
+            public_text(arm, role)
+            selected = [row for row in rows if row.get("arm") == arm]
+            require(selected and isinstance(entry, dict)
+                    and set(entry) == allowed | {"denominator"}
+                    and integer(entry["denominator"], role, True) == len(selected),
+                    "robustness_arm_denominator", role)
+            for row in selected:
+                identity = (row.get("case_id"), arm)
+                require(isinstance(identity[0], str) and identity not in identities
+                        and row.get("verdict") in allowed
+                        and type(row.get("attempted")) is bool
+                        and (row["verdict"] not in {"QUALIFIED", "UNQUALIFIED"}
+                             or row["attempted"] is True),
+                        "robustness_attempt_identity", role)
+                identities.add(identity)
+            for value in allowed:
+                require(integer(entry[value], role) ==
+                        sum(row["verdict"] == value for row in selected),
+                        "robustness_arm_false_count", role)
+            token = arm.replace("~", "~0").replace("/", "~1")
+            index = len(self.robustness_rows)
+            keys = [self.direct(f"robustness_{index}_{name.lower()}", role,
+                                f"/arm_counts/{token}/{name}")
+                    for name in ("denominator", "QUALIFIED", "UNQUALIFIED", "FAIL",
+                                 "BUDGET_EXHAUSTED")]
+            self.robustness_rows.append((arm, keys))
+        require(len(identities) == len(rows), "robustness_unaccounted_attempts", role)
+        expected = "PASS" if all(row["verdict"] == "QUALIFIED" for row in rows) else "UNQUALIFIED"
+        require(evidence["numeric_verdict"] == expected,
+                "robustness_false_overall_status", role)
+        self.direct("robustness_status", role, "/numeric_verdict")
+        self.direct("robustness_original_status", role, "/original_verdict")
+        self.direct("robustness_planned", role, "/planned_denominator")
+        self.direct("robustness_attempted", role, "/attempted_count")
+        self.direct("robustness_finished", role, "/finished_at")
+        self.direct("robustness_version", role, "/version")
+        self.scalar("robustness_settings_binding", "UNVERIFIED", role, "",
+                    "renderer-does-not-execute-independent-full-settings-review")
+        self.scalar("robustness_runtime_binding", "UNVERIFIED", role, "",
+                    "renderer-does-not-execute-independent-runtime-review")
+        require(evidence.get("license_verified") is False,
+                "robustness_dataset_rights_not_reviewed", role)
 
     def table(self, caption, headings, rows):
         return (f'<div class="table" role="region" aria-label="{html.escape(caption)}" tabindex="0">'
@@ -714,6 +897,20 @@ class Report:
                  f'<p>隔离 wheel：{s("wheel_status")}，{s("wheel_modules")} 个模块；'
                  f'项目许可 {s("wheel_license")} 不替依赖或商业 SDK 重新许可。</p>'
                  f'<p>wheel 源码一致性门：{s("wheel_source_consistency")}；缺字段不称冻结版本。</p>')
+        if self.extension_rows:
+            body += ("<h3>独立原模型回放门</h3><p>下表不是顶层 CUDA 测试计数，"
+                     "而是执行证据与原始问题数值的独立验收。FAIL 不因 pytest 通过而升级。</p>")
+            body += self.table("独立 CUDA 验收，逐项绑定不同源码",
+                               ["范围", "验收", "验收时间", "测试数", "源码坐标"], [
+                [label, s(keys[0]), s(keys[1]),
+                 s(f"{role}_tests") if f"{role}_tests" in self.scalars else "失败验收不授予计数",
+                 s(f"{role}_source") if f"{role}_source" in self.scalars else "失败记录未提供"]
+                for role, label, keys in self.extension_rows])
+        if "proof_review_status" in self.scalars:
+            body += (f'<p>数值证明生产/回放合同审查：{s("proof_review_status")}；'
+                     f'时间 {s("proof_review_finished")}；'
+                     f'审查源码 <code>{s("proof_review_source")}</code>。'
+                     '此审查只覆盖 CPU 生产与负例，PASS 也不授予 GPU 来源、商业或精确证明资格。</p>')
         if "wheel_hash" in self.scalars:
             body += (f'<p>wheel SHA256：<code>{s("wheel_hash")}</code>；'
                      f'安装包数值 source commit：<code>{s("wheel_source_commit")}</code>；'
@@ -732,6 +929,22 @@ class Report:
                      f'范围 {s("public_scope")}；计划 {s("public_planned")}，'
                      f'尝试 {s("public_attempted")}，合格 {s("public_qualified")}，'
                      f'非合格 {s("public_rejected")}。仅绑定此输入声明，不扩成商业资格。</p>')
+        if "robustness_status" in self.scalars:
+            body += (f'<h3>公开题组合臂实验</h3><p>新臂数值资格 {s("robustness_status")}；'
+                     f'实验版本 {s("robustness_version")}；'
+                     f'原实验资格 {s("robustness_original_status")}；'
+                     f'计划 {s("robustness_planned")}，实际尝试 {s("robustness_attempted")}；'
+                     f'完成时间 {s("robustness_finished")}。'
+                     '这是组合配置观察，不是单变量消融、商业排名或公平延迟对比。'
+                     '数据再分发权未经确认，不发布原始或派生数组。</p>')
+            body += (f'<p>完整 settings 配置绑定 {s("robustness_settings_binding")}；'
+                     f'runtime 运行环境绑定 {s("robustness_runtime_binding")}。'
+                     '旧 v1 缺少完整配置与环境校验，不追认为 v2 执行。'
+                     '分母只验调用者独立固定的计划、题集与组合臂全集，不代替数值执行验收。</p>')
+            body += self.table("公开题失败不削分母",
+                               ["组合臂", "分母", "合格", "非合格", "失败", "未开始预算耗尽"],
+                               [[html.escape(arm), *[s(key) for key in keys]]
+                                for arm, keys in self.robustness_rows])
         body += '</section><section id="commercial"><h2>商用缺口</h2>'
         body += (f'<p>探测结果 {s("commercial_result")}；计划 {s("commercial_planned")}，'
                  f'尝试 {s("commercial_attempted")}，实际求解尝试 {s("commercial_solve_attempted")}，'

@@ -212,3 +212,43 @@ remain visible. Passing renderer tests certify this tool's fixture scope,
 not release solver correctness, browser rendering, screen-reader behavior,
 online publication or commercial qualification. These latter checks belong
 to their explicitly authorized final acceptance steps.
+
+## Independent Stop-Gate Inputs
+
+Optional caller-pinned roles `extension_native`, `extension_presolve` and
+`extension_refinement` carry separate extension acceptance JSON, not a pytest
+result substituted for an independent original-model replay. PASS requires
+explicit final-source acceptance for native/refinement, complete counts, the
+original source commit, and no commercial/performance/exact-certificate upgrade. FAIL
+records may lack those success-only fields; their failure and timestamp remain
+visible without publishing error payloads. Historical source coordinates never
+become the report's newer source coordinate implicitly.
+Presolve instead requires `current_core: PASS` and a separate caller-pinned
+`extension_presolve_run` role matching the acceptance's original run descriptor.
+Its source commit comes from that explicit run; missing final-source fields
+are not invented or populated from a later checkout.
+
+Optional `proof_contract_review` shows the CPU contract review status, finish
+time and explicit producer commit. Even PASS does not qualify GPU coordinator
+origin, remote attestation, exact certificates or commercial comparisons.
+
+Optional `public_robustness` requires separate caller-pinned
+`public_robustness_plan` and `public_robustness_corpus` roles. Exact plan/result
+membership must equal corpus cases x predeclared arms, including original model
+hashes, solvers and single-attempt identity. Reduced or changed result sets
+cannot be accepted by merely resealing row counts.
+It consumes complete attempted rows and per-arm counts.
+Every case/arm identity is unique, every row belongs to an arm, and all
+QUALIFIED/UNQUALIFIED/FAIL/BUDGET_EXHAUSTED counts are recomputed. Planned and
+actual attempted denominators remain separate. The producer's overall
+`PASS` is accepted only when every row is QUALIFIED; otherwise it must remain
+UNQUALIFIED. Candidate qualification requires an actual attempt. Combined arms are not a
+single-variable ablation or performance ranking. The selected contract does
+not upgrade unverified dataset rights, clip tiny duals or claim speedups.
+The original experiment version is displayed. Full settings/runtime binding
+remains UNVERIFIED in this renderer; in particular v1 is not a v2 execution.
+Successful independent extension acceptance requires the original complete
+suite denominator (native 21, presolve 8, refinement 7) and zero skips, errors
+or failures. This stricter scope does not ban ordinary CPU regression skips.
+UNQUALIFIED status occurrences join the recursively retained failure
+statuses; the count remains occurrences, not distinct failed problems.

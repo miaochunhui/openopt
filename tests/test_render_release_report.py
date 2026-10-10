@@ -438,6 +438,197 @@ def test_timestamp_is_not_ipv6_but_real_addresses_rejected():
             report.public_text(value, "address")
 
 
+def optional_record(path, role, value):
+    manifest = json.loads(path.read_bytes())
+    manifest["inputs"].append(save(path.parent / (role + ".json"), value))
+    return save(path, manifest)["sha256"]
+
+
+def extension_record(suite):
+    return {
+        "verdict": "PASS", "suite": suite, "final_source": True,
+        "qualified": False, "certified": False,
+        "commercial": "UNVERIFIED", "performance": "UNVERIFIED",
+        "source_sha_informational": "e" * 40,
+        "finished_at": "2026-10-10T10:00:00+00:00",
+        "tests": {"tests": {"native_conic": 21, "presolve": 8, "refinement": 7}[suite],
+                  "failures": 0, "errors": 0, "skipped": 0},
+    }
+
+
+def test_independent_extension_fail_cannot_hide_behind_pytest_pass(inputs):
+    path, _, _ = inputs
+    failed = {"verdict": "FAIL", "error": "/private/not-published",
+              "finished_at": "2026-10-10T10:00:00+00:00"}
+    files = report.generate(path, optional_record(path, "extension_refinement", failed))
+    scalars = json.loads(files["summary.json"])["scalars"]
+    assert scalars["gpu_status"] == "PASS"
+    assert scalars["extension_refinement_status"] == "FAIL"
+    assert scalars["evidence_failure_statuses"] == 7
+    assert b"/private/not-published" not in files["benchmark-report-v4.html"]
+    assert "FAIL 不因 pytest 通过而升级" in files["design-v4.html"].decode()
+
+
+@pytest.mark.parametrize("mutation", ["suite", "retrospective", "qualified", "certified",
+                                     "commercial", "performance", "count", "source",
+                                     "skip", "denominator"])
+def test_extension_acceptance_overclaim_rejected(inputs, mutation):
+    path, _, _ = inputs
+    value = extension_record("native_conic")
+    if mutation == "suite":
+        value["suite"] = "refinement"
+    elif mutation == "retrospective":
+        value["final_source"] = False
+    elif mutation in {"qualified", "certified"}:
+        value[mutation] = True
+    elif mutation in {"commercial", "performance"}:
+        value[mutation] = "PASS"
+    elif mutation == "count":
+        value["tests"]["failures"] = 1
+    elif mutation == "skip":
+        value["tests"]["skipped"] = 1
+    elif mutation == "denominator":
+        value["tests"]["tests"] = 1
+    else:
+        value["source_sha_informational"] = "HEAD"
+    with pytest.raises(report.Rejected):
+        report.generate(path, optional_record(path, "extension_native", value))
+
+
+def test_proof_contract_review_is_not_cuda_qualification(inputs):
+    path, _, _ = inputs
+    value = {"verdict": "FAIL", "producer": {"commit": "e" * 40},
+             "finished_at": "2026-10-10T10:00:00+00:00",
+             "private": "/home/hidden"}
+    files = report.generate(path, optional_record(path, "proof_contract_review", value))
+    scalars = json.loads(files["summary.json"])["scalars"]
+    assert scalars["proof_review_status"] == "FAIL"
+    assert scalars["proof_review_source"] == "e" * 40
+    assert b"/home/hidden" not in files["design-v4.html"]
+
+
+def test_presolve_source_comes_from_explicit_acceptance_bound_run(inputs):
+    path, _, _ = inputs
+    optional_record(path, "extension_presolve_run", {"source_sha": "e" * 40})
+    descriptor = next(item for item in json.loads(path.read_bytes())["inputs"]
+                      if item["id"] == "extension_presolve_run")
+    value = extension_record("presolve")
+    del value["source_sha_informational"]
+    del value["final_source"]
+    value["current_core"] = "PASS"
+    value["pins"] = {"run": {"path": descriptor["path"], "sha256": descriptor["sha256"]}}
+    files = report.generate(path, optional_record(path, "extension_presolve", value))
+    assert json.loads(files["summary.json"])["scalars"]["extension_presolve_source"] == "e" * 40
+    value["pins"]["run"]["sha256"] = "0" * 64
+    with pytest.raises(report.Rejected, match="presolve_acceptance_run_mismatch"):
+        report.generate(path, reseal(path, {"extension_presolve": value}, "extension_presolve"))
+
+
+def robustness_record():
+    return {
+        "version": "public-robustness-v1",
+        "arms": [{"arm": "strict", "solver": "openopt"}], "gates": {"eps_abs": 1e-7},
+        "numeric_verdict": "UNQUALIFIED", "original_verdict": "UNQUALIFIED",
+        "finished_at": "2026-10-10T10:00:00+00:00",
+        "planned_denominator": 2, "attempted_count": 2,
+        "speedup_claim": False, "tiny_dual_clipping": False, "license_verified": False,
+        "rows": [{"case_id": "case-a", "arm": "strict", "solver": "openopt",
+                  "model_sha256": "a" * 64, "attempt": 1, "denominator": 1,
+                  "attempted": True, "verdict": "QUALIFIED"},
+                 {"case_id": "case-b", "arm": "strict", "solver": "openopt",
+                  "model_sha256": "b" * 64, "attempt": 1, "denominator": 1,
+                  "attempted": True, "verdict": "UNQUALIFIED"}],
+        "arm_counts": {"strict": {"denominator": 2, "QUALIFIED": 1, "UNQUALIFIED": 1,
+                                  "FAIL": 0, "BUDGET_EXHAUSTED": 0}},
+    }
+
+
+def robustness_inputs(path, value):
+    original = robustness_record()
+    optional_record(path, "public_robustness_plan", {
+        "arms": original["arms"], "gates": original["gates"], "rows": original["rows"],
+    })
+    optional_record(path, "public_robustness_corpus", {
+        "cases": [{"case_id": "case-a", "model_sha256": "a" * 64},
+                  {"case_id": "case-b", "model_sha256": "b" * 64}],
+    })
+    corpus = next(item for item in json.loads(path.read_bytes())["inputs"]
+                  if item["id"] == "public_robustness_corpus")
+    value["corpus_sha256"] = corpus["sha256"]
+    return optional_record(path, "public_robustness", value)
+
+
+def test_robustness_denominator_and_unqualified_status_preserved(inputs):
+    path, _, _ = inputs
+    files = report.generate(path, robustness_inputs(path, robustness_record()))
+    scalars = json.loads(files["summary.json"])["scalars"]
+    assert scalars["robustness_0_denominator"] == 2
+    assert scalars["robustness_0_qualified"] == scalars["robustness_0_unqualified"] == 1
+    assert scalars["robustness_status"] == "UNQUALIFIED"
+    assert scalars["robustness_version"] == "public-robustness-v1"
+    assert scalars["robustness_settings_binding"] == scalars["robustness_runtime_binding"] == "UNVERIFIED"
+    assert scalars["evidence_failure_statuses"] == 10
+
+
+@pytest.mark.parametrize("mutation", ["planned", "attempted", "qualified_count", "drop_arm",
+                                     "duplicate", "clip", "speedup", "rights",
+                                     "false_pass", "unattempted_candidate"])
+def test_robustness_coordinated_false_denominator_rejected(inputs, mutation):
+    path, _, _ = inputs
+    value = robustness_record()
+    if mutation == "planned":
+        value["planned_denominator"] = 1
+    elif mutation == "attempted":
+        value["attempted_count"] = 1
+    elif mutation == "qualified_count":
+        value["arm_counts"]["strict"]["QUALIFIED"] = 2
+    elif mutation == "drop_arm":
+        value["rows"][1]["arm"] = "unaccounted"
+    elif mutation == "duplicate":
+        value["rows"][1]["case_id"] = "case-a"
+    elif mutation == "false_pass":
+        value["numeric_verdict"] = "PASS"
+    elif mutation == "unattempted_candidate":
+        value["rows"][0]["attempted"] = False
+        value["attempted_count"] = 1
+    else:
+        value[{"clip": "tiny_dual_clipping", "speedup": "speedup_claim",
+               "rights": "license_verified"}[mutation]] = True
+    with pytest.raises(report.Rejected):
+        report.generate(path, robustness_inputs(path, value))
+
+
+def test_robustness_success_uses_producer_pass_contract(inputs):
+    path, _, _ = inputs
+    value = robustness_record()
+    value["rows"][1]["verdict"] = "QUALIFIED"
+    value["arm_counts"]["strict"]["QUALIFIED"] = 2
+    value["arm_counts"]["strict"]["UNQUALIFIED"] = 0
+    value["numeric_verdict"] = "PASS"
+    files = report.generate(path, robustness_inputs(path, value))
+    assert json.loads(files["summary.json"])["scalars"]["robustness_status"] == "PASS"
+    value["numeric_verdict"] = "UNQUALIFIED"
+    with pytest.raises(report.Rejected, match="robustness_false_overall_status"):
+        report.generate(path, reseal(path, {"public_robustness": value}, "public_robustness"))
+
+
+def test_robustness_resealed_failed_row_drop_rejected_by_independent_plan(inputs):
+    path, _, _ = inputs
+    value = robustness_record()
+    value["rows"] = value["rows"][:1]
+    value["planned_denominator"] = value["attempted_count"] = 1
+    value["numeric_verdict"] = "PASS"
+    value["arm_counts"]["strict"].update(denominator=1, UNQUALIFIED=0)
+    with pytest.raises(report.Rejected, match="robustness_result_incomplete"):
+        report.generate(path, robustness_inputs(path, value))
+
+
+def test_robustness_projection_without_independent_contract_rejected(inputs):
+    path, _, _ = inputs
+    with pytest.raises(report.Rejected, match="robustness_plan_corpus_required"):
+        report.generate(path, optional_record(path, "public_robustness", robustness_record()))
+
+
 @pytest.mark.parametrize("false_pass", [False, True])
 def test_optional_public_qualification_no_invented_run(inputs, false_pass):
     path, _, _ = inputs
