@@ -3,7 +3,9 @@
 run requires an explicit one-card RTX PRO 4500 CUDA placement. cpu-smoke is
 deliberately a different scope. seal/replay are CPU-only and never run a solver,
 test factory or source snapshot. Caller pins, full source membership and raw
-array bytes are mandatory; a seal is integrity binding, not remote attestation.
+array bytes are mandatory; a seal is integrity binding, not execution acceptance.
+CUDA runs require independently pre-pinned models. Only an external coordinator
+audit can qualify execution; numerical replay always leaves it UNVERIFIED.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ import threading
 import time
 import traceback
 from types import SimpleNamespace
+from uuid import UUID
 
 import numpy as np
 
@@ -33,8 +36,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 ARTIFACT_ROOT = Path("/hf3fs-jd/data/tmp").resolve()
 RUNNER = "scripts/gpu_release_proof.py"
-GPU_SCOPE = "frozen original-model CUDA numerical replay"
+GPU_SCOPE = "pre-pinned original-model numerical replay; CUDA execution UNVERIFIED"
 CPU_SCOPE = "CPU smoke only; GPU UNVERIFIED"
+NUMERICAL_PASS = "SEMANTIC_NUMERICAL_PASS"
 FIELDS = ("P", "q", "A", "l", "u")
 CASES = (
     "scaling_basic", "scaling_ill_conditioned", "jacobi_coo", "jacobi_csr",
@@ -277,6 +281,41 @@ def tensor_hash(record):
 
 def model_hash(model):
     return sha(encode({name: tensor_hash(model[name]) for name in FIELDS}))
+
+
+def load_expectations(path, expected_sha256, current_root):
+    """Read caller-trusted pre-dispatch arrays, never reconstruct a model."""
+    path = external(path)
+    data = read(path)
+    require(sha(data) == pin(expected_sha256), path, "caller expectations pin mismatch")
+    saved = parse(data, path)
+    require(isinstance(saved, dict) and set(saved) == {
+        "schema_version", "source_sha256", "cases",
+    } and type(saved["schema_version"]) is int and saved["schema_version"] == 1,
+            path, "unknown/incomplete pre-dispatch expectations")
+    cases = saved["cases"]
+    require(isinstance(cases, dict) and cases and set(cases) <= set(CASES),
+            path, "expectations case denominator mismatch")
+    require(isinstance(saved["source_sha256"], dict) and saved["source_sha256"],
+            path, "expectations source membership missing")
+    same_sources(saved["source_sha256"], source_map(current_root), "expectations/current source")
+    for case, entry in saved["cases"].items():
+        require(isinstance(entry, dict) and set(entry) == {"model", "model_sha256"}
+                and isinstance(entry["model"], dict) and set(entry["model"]) == set(FIELDS)
+                and pin(entry["model_sha256"]) == model_hash(entry["model"]),
+                case, "pre-dispatch model descriptor/digest mutation")
+        for name, record in entry["model"].items():
+            require(record["device"] == "cpu" and record["dtype"] == "torch.float64",
+                    case + "/" + name, "expectations must be reviewed CPU float64 models")
+            load_tensor(path.parent, record, case + "/expected/" + name)
+    return saved, {"path": str(path), "sha256": expected_sha256, "bytes": len(data)}
+
+
+def match_expected_model(model, expected, case):
+    require(model_hash(model) == expected["model_sha256"]
+            and all(tensor_hash(model[name]) == tensor_hash(expected["model"][name])
+                    for name in FIELDS),
+            case, "original model differs from caller pre-dispatch expectation")
 
 
 def policy(case, device):
@@ -555,7 +594,7 @@ def trace_termination(workspace):
     return trace
 
 
-def execute_case(case, root, device):
+def execute_case(case, root, device, *, expected_model=None):
     import torch
     import openopt.operators as operators
     from openopt.certificates import (
@@ -575,6 +614,8 @@ def execute_case(case, root, device):
                                   l=problem.l, u=problem.u)
     model = {name: save_tensor(root, case + "-original-" + name, getattr(problem, name))
              for name in FIELDS}
+    if expected_model is not None:
+        match_expected_model(model, expected_model, case)
     observed, extensions, resident_model = {}, {}, {}
     start = time.perf_counter()
     if case.startswith("jacobi_"):
@@ -755,7 +796,7 @@ def hardware(device):
         "numpy": np.__version__, "python": sys.version,
         "cpu_quota": None, "cpu_scope": "current process rusage; not Pod cgroup",
         "node": os.environ.get("OPENOPT_NODE"), "pod": os.environ.get("HOSTNAME"),
-        "gpu": None, "gpu_count": 0, "cuda_capability": None,
+        "gpu": None, "gpu_count": 0, "cuda_capability": None, "gpu_uuid": None,
     }
     if device == "cuda:0":
         require(torch.cuda.is_available() and torch.cuda.device_count() == 1,
@@ -764,23 +805,28 @@ def hardware(device):
                       cpu_scope="Pod cgroup v2")
         result.update(gpu=torch.cuda.get_device_name(0), gpu_count=torch.cuda.device_count(),
                       cuda_capability=list(torch.cuda.get_device_capability(0)))
+        uuid = torch.cuda.get_device_properties(0).uuid
+        require(isinstance(uuid, str), "hardware", "CUDA device UUID unavailable")
+        result["gpu_uuid"] = "GPU-" + str(UUID(uuid.removeprefix("GPU-")))
         require("RTX PRO 4500" in result["gpu"] and result["node"] and result["pod"],
                 "hardware", "actual RTX PRO 4500, node and Pod identity required")
     return result
 
 
-def telemetry_check(samples, device):
+def telemetry_check(samples, device, *, gpu_uuid=None, gpu_name=None):
     require(isinstance(samples, list) and len(samples) >= 2, "telemetry", "runtime samples missing")
     for sample in samples:
         require("error" not in sample and type(sample.get("cpu", {}).get("usage_usec")) is int,
                 "telemetry", "failed/absent CPU cgroup sample")
         if device == "cuda:0":
-            require(sample.get("returncode") == 0, "telemetry", "nvidia-smi failed")
+            require(type(sample.get("returncode")) is int and sample["returncode"] == 0,
+                    "telemetry", "nvidia-smi failed")
             rows = sample["stdout"].splitlines()
             require(len(rows) == 1, "telemetry", "one-card identity required")
             values = [value.strip() for value in rows[0].split(",")]
-            require(len(values) == 6 and values[0].startswith("GPU-")
-                    and "RTX PRO 4500" in values[1], "telemetry", "actual card evidence missing")
+            require(len(values) == 6 and values[0] == gpu_uuid and values[1] == gpu_name
+                    and re.fullmatch(r"GPU-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", values[0])
+                    and "RTX PRO 4500" in values[1], "telemetry", "CUDA/telemetry card identity mismatch")
             utilization, memory, total = (float(v) for v in values[2:5])
             require(0 <= utilization <= 100 and 0 <= memory <= total and total > 0,
                     "telemetry", "invalid measured utilization/memory")
@@ -788,7 +834,8 @@ def telemetry_check(samples, device):
             "telemetry", "cgroup usage moved backwards")
 
 
-def run_cases(artifact_root, cases, device, *, cpu_smoke=False):
+def run_cases(artifact_root, cases, device, *, cpu_smoke=False,
+              expectations=None, expectations_sha256=None):
     require(device == ("cpu" if cpu_smoke else "cuda:0"),
             "device", "run explicitly requires cuda:0; CPU uses cpu-smoke only")
     require(cases and len(set(cases)) == len(cases) and set(cases) <= set(CASES),
@@ -798,23 +845,52 @@ def run_cases(artifact_root, cases, device, *, cpu_smoke=False):
     output = Path(tempfile.mkdtemp(prefix="cpu-smoke-" if cpu_smoke else "cuda-proof-", dir=parent))
     report = {"schema_version": 1, "verdict": "RUNNING", "scope": CPU_SCOPE if cpu_smoke else GPU_SCOPE,
               "started_at": now(), "device": device, "requested_cases": cases, "cases": {},
-              "source_sha256": {}, "hardware": None}
+              "source_sha256": {}, "hardware": None, "expectations": None,
+              "numerical_verdict": "RUNNING", "execution_verdict": "UNVERIFIED"}
     start = time.perf_counter()
     code, telemetry = 0, Telemetry(not cpu_smoke)
     try:
         report["source_sha256"] = freeze_sources(ROOT, output)
+        require(cpu_smoke or expectations is not None, "expectations",
+                "formal CUDA run requires caller pre-dispatch expectations")
+        require((expectations is None) == (expectations_sha256 is None),
+                "expectations", "path and caller pin must be supplied together")
+        expected = None
+        if expectations is not None:
+            expected, report["expectations"] = load_expectations(
+                expectations, expectations_sha256, ROOT)
+            require(set(cases) <= set(expected["cases"]),
+                    "expectations", "requested case absent from pre-dispatch expectations")
         report["hardware"] = hardware(device)
+        if not cpu_smoke:
+            runtime = {
+                "device": device, "gpu_uuid": report["hardware"]["gpu_uuid"],
+                "gpu_name": report["hardware"]["gpu"], "gpu_count": report["hardware"]["gpu_count"],
+                "node": report["hardware"]["node"], "pod": report["hardware"]["pod"],
+            }
+            print("OPENOPT_GPU_PROOF_RUNTIME " + json.dumps(
+                runtime, sort_keys=True, allow_nan=False), flush=True)
         with telemetry:
             for case in cases:
-                report["cases"][case] = execute_case(case, output, device)
+                report["cases"][case] = execute_case(
+                    case, output, device,
+                    expected_model=expected["cases"][case] if expected is not None else None)
                 print(f"OPENOPT_GPU_PROOF_CASE case={case} completed_at={now()}", flush=True)
-        telemetry_check(telemetry.samples, device)
+        telemetry_check(telemetry.samples, device,
+                        gpu_uuid=report["hardware"]["gpu_uuid"], gpu_name=report["hardware"]["gpu"])
+        if expected is not None:
+            current_expected, current_descriptor = load_expectations(
+                expectations, expectations_sha256, ROOT)
+            require(expected == current_expected and report["expectations"] == current_descriptor,
+                    "expectations", "pre-dispatch expectations changed during solve")
         same_sources(report["source_sha256"], source_map(ROOT), "sources after solves")
         imported_source_check()
-        report["verdict"] = "CPU_SMOKE_PASS" if cpu_smoke else "PASS"
+        report.update(verdict="CPU_SMOKE_PASS" if cpu_smoke else NUMERICAL_PASS,
+                      numerical_verdict="PASS")
     except Exception as error:
         code = 1
-        report.update(verdict="FAIL", error=f"{type(error).__name__}: {error}")
+        report.update(verdict="FAIL", numerical_verdict="FAIL",
+                      error=f"{type(error).__name__}: {error}")
         with (output / "failure.log").open("x") as stream:
             stream.write(traceback.format_exc())
     finally:
@@ -842,7 +918,7 @@ def compare_summary(saved, actual, coordinate):
                 coordinate + "/" + key, "saved metric differs from recomputation")
 
 
-def replay_case(root, item, device):
+def replay_case(root, item, device, *, expected_model=None):
     saved = parse(read(bound(root, item)), item["path"])
     case = saved["case"]
     require(case in CASES and saved["device"] == device and saved["dtype"] == "torch.float64",
@@ -855,6 +931,8 @@ def replay_case(root, item, device):
     require(set(saved["model"]) == set(FIELDS)
             and saved["model_sha256"] == model_hash(saved["model"]),
             case, "original model hash mutation")
+    if expected_model is not None:
+        match_expected_model(saved["model"], expected_model, case)
     problem = {name: load_tensor(root, saved["model"][name], case + "/" + name) for name in FIELDS}
     require(set(saved["resident_model"]) == set(FIELDS), case, "resident model incomplete")
     resident = {name: load_tensor(root, saved["resident_model"][name], case + "/resident/" + name)
@@ -979,13 +1057,21 @@ def replay_case(root, item, device):
     elif case in ("infeasible", "unbounded"):
         require(set(extension) == {"checkpoint"}, case, "generated-direction trace missing")
         trace = extension["checkpoint"]
-        require(trace["iteration"] == saved["iterations"] and type(trace["rho"]) is float
-                and trace["rho"] > 0, case, "terminal checkpoint coordinates mutation")
+        require(type(trace["iteration"]) is int and trace["iteration"] == saved["iterations"]
+                and (trace["iteration"] % config.check_interval == 0
+                     or trace["iteration"] == config.max_iterations),
+                case, "terminal checkpoint is outside frozen check interval")
+        require(not config.adaptive_rho and type(trace["rho"]) is float
+                and math.isfinite(trace["rho"]) and trace["rho"] == config.rho,
+                case, "terminal checkpoint nonadaptive rho mutation")
         tensors = trace["tensors"]
         require(set(tensors) == {"previous_x", "previous_y", "current_x", "current_y", "dx", "dy"},
                 case, "incomplete generated checkpoint vectors")
         data = {key: load_tensor(root, value, case + "/checkpoint/" + key)
                 for key, value in tensors.items()}
+        require(all(v.shape == (problem["q"].shape if key.endswith("x") or key == "dx"
+                                else problem["l"].shape) and np.isfinite(v).all()
+                    for key, v in data.items()), case, "invalid checkpoint shape/values")
         require(all(value["device"] == device for value in tensors.values()),
                 case, "checkpoint computation placement mutation")
         require(np.array_equal(data["dx"], data["current_x"] - data["previous_x"])
@@ -1000,10 +1086,24 @@ def replay_case(root, item, device):
         if case == "unbounded":
             require(np.array_equal(vectors["feasible_base"], data["current_x"]),
                     case, "feasible base replaced with a planted witness")
-        evidence_name = "infeasible_evidence" if case == "infeasible" else "unbounded_evidence"
-        require(trace[evidence_name]["passed"] is True
-                and trace[evidence_name]["checks"] == actual["checks"],
-                case, "terminal original-check evidence mutation")
+        if trace["iteration"] <= config.check_interval:
+            require(not np.any(data["previous_x"]) and not np.any(data["previous_y"]),
+                    case, "first checkpoint must start from actual zero iterates")
+        from openopt.certificates import check_primal_infeasibility, check_unbounded_direction
+
+        host = SimpleNamespace(**problem)
+        both = {
+            "infeasible": check_primal_infeasibility(
+                host, data["dy"], atol=atol, rtol=rtol).to_dict(),
+            "unbounded": check_unbounded_direction(
+                host, data["dx"], feasible_x=data["current_x"], atol=atol, rtol=rtol).to_dict(),
+        }
+        for kind, summary in both.items():
+            require(encode(trace[kind + "_evidence"]) == encode(summary),
+                    case + "/" + kind, "terminal full direction summary differs from recomputation")
+        require(both["infeasible"]["passed"] != both["unbounded"]["passed"]
+                and both[case]["passed"] is True,
+                case, "terminal direction evidence is conflicting or does not select status")
     else:
         require(extension == {}, case, "unexpected gap extension")
     return {"case": case, "status": expected, **actual}
@@ -1019,7 +1119,8 @@ def inventory(root):
     return result
 
 
-def validate_result(result_path, expected_sha256, current_root, *, allow_cpu_smoke=False):
+def validate_result(result_path, expected_sha256, current_root, *, allow_cpu_smoke=False,
+                    expectations=None, expectations_sha256=None):
     result_path = external(result_path)
     data = read(result_path)
     require(sha(data) == pin(expected_sha256), result_path, "caller result pin mismatch")
@@ -1030,7 +1131,8 @@ def validate_result(result_path, expected_sha256, current_root, *, allow_cpu_smo
     require(not cpu or allow_cpu_smoke, "scope", "CPU smoke cannot be accepted as GPU evidence")
     require(device in ("cpu", "cuda:0")
             and saved["scope"] == (CPU_SCOPE if cpu else GPU_SCOPE)
-            and saved["verdict"] == ("CPU_SMOKE_PASS" if cpu else "PASS")
+            and saved["verdict"] == ("CPU_SMOKE_PASS" if cpu else NUMERICAL_PASS)
+            and saved["numerical_verdict"] == "PASS" and saved["execution_verdict"] == "UNVERIFIED"
             and type(saved["returncode"]) is int and saved["returncode"] == 0,
             result_path, "failed/unknown execution or scope mutation")
     cases = saved["requested_cases"]
@@ -1041,16 +1143,30 @@ def validate_result(result_path, expected_sha256, current_root, *, allow_cpu_smo
     require(isinstance(sources, dict) and sources, "sources", "empty source membership")
     same_sources(sources, source_map(root / "source"), "frozen source snapshot")
     same_sources(sources, source_map(current_root), "current source")
+    require((expectations is None) == (expectations_sha256 is None),
+            "expectations", "path and caller pin must be supplied together")
+    require(cpu or expectations is not None, "expectations",
+            "CUDA replay requires independent caller pre-dispatch expectations")
+    expected, trusted = None, None
+    if expectations is not None:
+        expected, trusted = load_expectations(expectations, expectations_sha256, current_root)
+        require(set(cases) <= set(expected["cases"]),
+                "expectations", "replayed case absent from trusted pre-dispatch expectations")
+    require(encode(saved["expectations"]) == encode(trusted),
+            "expectations", "producer expectations differ from independent caller descriptor")
     hw = saved["hardware"]
     require(hw["requested_device"] == device and hw["torch"] and hw["numpy"],
             "hardware", "runtime/placement evidence missing")
     if not cpu:
-        require(hw["gpu_count"] == 1 and "RTX PRO 4500" in hw["gpu"]
+        require(type(hw["gpu_count"]) is int and hw["gpu_count"] == 1 and "RTX PRO 4500" in hw["gpu"]
                 and hw["node"] and hw["pod"] and hw["cuda"]
                 and hw["cpu_quota"] and hw["cpu_scope"] == "Pod cgroup v2"
-                and hw["cuda_capability"] == [12, 0],
+                and hw["cuda_capability"] == [12, 0]
+                and isinstance(hw["gpu_uuid"], str)
+                and re.fullmatch(r"GPU-[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", hw["gpu_uuid"]),
                 "hardware", "actual CUDA 4500 placement/runtime mutation")
-    telemetry_check(parse(read(bound(root, saved["telemetry"])), "telemetry"), device)
+    telemetry_check(parse(read(bound(root, saved["telemetry"])), "telemetry"), device,
+                    gpu_uuid=hw["gpu_uuid"], gpu_name=hw["gpu"])
     execution = read(root / "execution.log").decode()
     require(f"OPENOPT_GPU_PROOF verdict={saved['verdict']}" in execution
             and f"result_sha256={expected_sha256}" in execution
@@ -1059,10 +1175,13 @@ def validate_result(result_path, expected_sha256, current_root, *, allow_cpu_smo
     outcomes = []
     for name in cases:
         require(saved["cases"][name]["path"] == name + ".json", name, "case sidecar substitution")
-        outcome = replay_case(root, saved["cases"][name], device)
+        outcome = replay_case(root, saved["cases"][name], device,
+                              expected_model=expected["cases"][name] if expected is not None else None)
         require(outcome["case"] == name, name, "selected case identity mismatch")
         outcomes.append(outcome)
-    return {"verdict": "CPU_SMOKE_REPLAY_PASS" if cpu else "PASS",
+    return {"verdict": "CPU_SMOKE_REPLAY_PASS" if cpu else NUMERICAL_PASS,
+            "numerical_verdict": "PASS", "execution_verdict": "UNVERIFIED",
+            "expectations": trusted,
             "scope": saved["scope"], "device": device, "cases": outcomes,
             "case_count": len(outcomes), "source_count": len(sources), "hardware": hw,
             "result_sha256": expected_sha256,
@@ -1070,15 +1189,18 @@ def validate_result(result_path, expected_sha256, current_root, *, allow_cpu_smo
                              "commercial parity, native conic/MIP or remote attestation"}
 
 
-def seal(result_path, expected_sha256, current_root, *, allow_cpu_smoke=False):
+def seal(result_path, expected_sha256, current_root, *, allow_cpu_smoke=False,
+         expectations=None, expectations_sha256=None):
     outcome = validate_result(result_path, expected_sha256, current_root,
-                              allow_cpu_smoke=allow_cpu_smoke)
+                              allow_cpu_smoke=allow_cpu_smoke, expectations=expectations,
+                              expectations_sha256=expectations_sha256)
     root = external(result_path).parent
     return {"schema_version": 1, "scope": outcome["scope"], "evidence_root": str(root),
             "result": descriptor(root, external(result_path)), "files": inventory(root)}
 
 
-def replay(bundle_path, expected_sha256, current_root, *, allow_cpu_smoke=False):
+def replay(bundle_path, expected_sha256, current_root, *, allow_cpu_smoke=False,
+           expectations=None, expectations_sha256=None):
     data = read(external(bundle_path))
     require(sha(data) == pin(expected_sha256), bundle_path, "caller bundle pin mismatch")
     bundle = parse(data, bundle_path)
@@ -1090,7 +1212,8 @@ def replay(bundle_path, expected_sha256, current_root, *, allow_cpu_smoke=False)
     path = bound(root, bundle["result"])
     require(path == root / "result.json", "result", "sealed result substitution")
     outcome = validate_result(path, bundle["result"]["sha256"], current_root,
-                              allow_cpu_smoke=allow_cpu_smoke)
+                              allow_cpu_smoke=allow_cpu_smoke, expectations=expectations,
+                              expectations_sha256=expectations_sha256)
     require(outcome["scope"] == bundle["scope"], "bundle", "sealed scope mutation")
     return outcome
 
@@ -1106,6 +1229,8 @@ def main(argv=None):
     parser.add_argument("--bundle", type=Path)
     parser.add_argument("--sha256")
     parser.add_argument("--current-root", type=Path)
+    parser.add_argument("--expectations", type=Path)
+    parser.add_argument("--expectations-sha256")
     parser.add_argument("--allow-cpu-smoke", action="store_true")
     args = parser.parse_args(argv)
     if args.action in ("run", "cpu-smoke"):
@@ -1115,7 +1240,8 @@ def main(argv=None):
             require("all" not in args.case or args.case == ["all"],
                     "cases", "all cannot be combined with another selection")
             cases = list(CASES) if args.case == ["all"] else args.case
-            run_cases(args.artifact_dir, cases, args.device, cpu_smoke=args.action == "cpu-smoke")
+            run_cases(args.artifact_dir, cases, args.device, cpu_smoke=args.action == "cpu-smoke",
+                      expectations=args.expectations, expectations_sha256=args.expectations_sha256)
         except Exception as error:
             print(f"OPENOPT_GPU_PROOF verdict=FAIL error={type(error).__name__}: {error}", flush=True)
             return 1
@@ -1131,15 +1257,18 @@ def main(argv=None):
             require(not output.is_relative_to(external(args.result).parent),
                     "seal", "seal output cannot mutate frozen evidence tree")
             value = seal(args.result, args.result_sha256, args.current_root,
-                         allow_cpu_smoke=args.allow_cpu_smoke)
+                         allow_cpu_smoke=args.allow_cpu_smoke, expectations=args.expectations,
+                         expectations_sha256=args.expectations_sha256)
             write(output / "bundle.json", value)
             report.update(verdict="CPU_SMOKE_SEALED" if args.allow_cpu_smoke else "SEALED",
                           bundle=str(output / "bundle.json"),
-                          bundle_sha256=sha(read(output / "bundle.json")), scope=value["scope"])
+                          bundle_sha256=sha(read(output / "bundle.json")), scope=value["scope"],
+                          numerical_verdict="PASS", execution_verdict="UNVERIFIED")
         else:
             require(args.bundle and args.sha256, "replay", "caller bundle pin required")
             report.update(replay(args.bundle, args.sha256, args.current_root,
-                                 allow_cpu_smoke=args.allow_cpu_smoke))
+                                 allow_cpu_smoke=args.allow_cpu_smoke, expectations=args.expectations,
+                                 expectations_sha256=args.expectations_sha256))
     except Exception as error:
         code = 1
         report.update(verdict="FAIL", error=f"{type(error).__name__}: {error}")
