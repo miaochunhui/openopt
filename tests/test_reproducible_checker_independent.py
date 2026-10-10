@@ -277,3 +277,76 @@ def test_default_evidence_and_config_match_verified_preimplementation_baseline(t
         "exact_json_matches": len(rows), "evidence_sha256": rows,
         "default_config_preserved_except_new_opt_in_field": True,
     })
+
+
+def test_v2_real_nonpaired_nullspace_remains_unavailable(tmp_path, request, monkeypatch):
+    """P=I-11.T/4 is PSD; every null-vector row cancels one versus three."""
+    P = [[.75 if i == j else -.25 for j in range(4)] for i in range(4)]
+    kernel = [.5] * 4
+    assert all(exact_dot(row, kernel) == 0 for row in P)
+    assert checker._bmv(P, kernel) == [0.] * 4
+    assert not checker._paired_kernel_zero(P, kernel)
+    p = model(P, [0.] * 4)
+    evidence = checker.check_qp_candidate(p, [0.] * 4, [], arithmetic=MODE)
+    eigenvalues, vectors = checker._jacobi(P)
+    # A dyadic, independently checked eigensystem isolates the computed-zero
+    # branch; it is not represented as an observed Jacobi output.
+    exact_eigenvalues = [0., 1., 1., 1.]
+    exact_vectors = [
+        [.5, .5, .5, .5], [.5, -.5, .5, -.5],
+        [.5, .5, -.5, -.5], [.5, -.5, -.5, .5],
+    ]
+    columns = checker._bt(exact_vectors, 4)
+    for i, column in enumerate(columns):
+        assert all(exact_dot(row, column) == Fraction(exact_eigenvalues[i]) * Fraction(column[j])
+                   for j, row in enumerate(P))
+        assert all(exact_dot(column, other) == int(i == j) for j, other in enumerate(columns))
+    monkeypatch.setattr(checker, "_jacobi", lambda matrix: (exact_eigenvalues, exact_vectors))
+    controlled = checker.check_qp_candidate(p, [0.] * 4, [], arithmetic=MODE)
+    receipt(tmp_path, request, "nonpaired-real-kernel", {
+        "model": {"P": P, "q": [0.] * 4, "A": [], "l": [], "u": []},
+        "known_exact_kernel": kernel, "exact_kernel_residual": ["0"] * 4,
+        "PSD_identity": "x.T P x = sum(x_i^2) - sum(x_i)^2/4 >= 0",
+        "paired_kernel_proven": False, "eigenvalues": eigenvalues,
+        "vectors": vectors, "evidence": evidence.to_dict(),
+        "controlled_exact_eigensystem": {
+            "scope": "exactly verified eigensystem injection, not observed Jacobi output",
+            "eigenvalues": exact_eigenvalues, "vectors": exact_vectors,
+            "evidence": controlled.to_dict(),
+        },
+    })
+    for observed in (evidence, controlled):
+        assert not observed.passed
+        assert not observed.checks["dual_objective_available"]
+        assert not observed.checks["duality_gap"]
+        assert observed.metrics["dual_objective"] is None
+        assert observed.metrics["duality_gap"] is None
+        assert "unproved" in observed.unavailable["dual_objective"]
+
+
+@pytest.mark.parametrize("scale", [2. ** -400, 1., 2. ** 400])
+def test_v2_pair_identity_is_exact_before_rounding(scale):
+    vector = [1., 1., 1., 1.]
+    assert checker._paired_kernel_zero([[scale, -scale, 2 * scale, -2 * scale]], vector)
+    assert checker._paired_kernel_zero([[scale, -scale / 2, 0., 0.]], [1., 2., 1., 1.])
+    wrong = [scale, -scale, 2 * scale, -(2 * scale + scale * 2. ** -51)]
+    assert exact_dot(wrong, vector) != 0
+    assert not checker._paired_kernel_zero([wrong], vector)
+
+
+def test_v2_identifier_cannot_reaccept_v1():
+    assert MODE == "reproducible_binary64_v2"
+    assert checker.reproducible_checker_contract()["algorithm"] == MODE
+    with pytest.raises(ValueError, match="unsupported original checker arithmetic"):
+        checker.check_qp_candidate(model([[1.]], [0.]), [0.], [],
+                                   arithmetic="reproducible_binary64_v1")
+
+
+def test_v2_null_kernel_pair_is_not_a_complete_psd_proof():
+    P = [[1., -1., 0.], [-1., 1., 0.], [0., 0., -1.]]
+    kernel = [1., 1., 0.]
+    assert checker._paired_kernel_zero(P, kernel)
+    assert all(exact_dot(row, kernel) == 0 for row in P)
+    assert exact_objective(model(P, [0., 0., 0.]), [0., 0., 1.]) == -Fraction(1, 2)
+    with pytest.raises(ValueError, match="positive semidefinite"):
+        checker.check_qp_candidate(model(P, [0., 0., 0.]), [0., 0., 0.], [], arithmetic=MODE)
