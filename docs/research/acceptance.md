@@ -117,8 +117,9 @@ At 08:01 UTC the owner revised GPU performance to retain NPZ, host x/y and
 common dtype/eps/arm configs, and clarified excluded input generation. The
 checker now consumes those fields directly. Original missing-status GPU
 `campaign-u4darfl7` is independently rejected; no old artifact is retroactively
-patched or accepted. Correctness full replay remains blocked until the owner
-also emits both problem sidecars and all batch host vectors.
+patched or accepted. The owner then emitted both problem sidecars and all
+batch host vectors in `campaign-_rge0l3h`; that new correctness result passed
+independent replay at 08:06:37 UTC. The old incomplete runs remain rejected.
 
 ## CPU Verification
 
@@ -165,6 +166,9 @@ solver or generate new performance evidence.
 - CPU targeted `tests-v3/tests-hysc6hps/verification.json`: 45 tests, zero
   failures/errors/skips; postflight `smoke-29wwpsmo`: 83 executed passes,
   four explicit CUDA skips. Both under the acceptance artifact root below.
+- Final parameter-parity revision
+  `tests-config-final/tests-ljg38own/verification.json`: 47 tests, zero
+  failures/errors/skips, completed at 08:06:15 UTC.
 - Exact benchmarks-seat source root
   `/data/dev/openopt-wt-qp3-20261010-benchmarks` accepted the real
   `openopt-qp3-20261010-benchmarks/cpu-baseline-final/result.json`:
@@ -184,10 +188,19 @@ solver or generate new performance evidence.
   First cause retained in `real-gpu-v3/seal-fmb7cvtb/acceptance.json`.
   Older `campaign-u4darfl7` was rejected at `correctness/batch_0` for missing
   solver status in `real-gpu-check/check-0rza31s1/acceptance.json`.
+- New correctness `campaign-_rge0l3h`, operators `campaign-p5cr56h9` and
+  adaptive `campaign-szfx788c` passed strict replay at 08:06:37 UTC: seven
+  correctness solutions plus 165 JUnit tests with zero errors/failures/skips,
+  and 30 solutions per performance path. Operators ranking stays UNVERIFIED
+  because caller-PSD and dense spectral validation are not equivalent.
+  Bundle `real-newpaths/seal-7h_owss3/bundle.json`, hash
+  `d59822abf36c7ecc14607183e9ea7f2589e920713ce2bd35293a8db149764488`;
+  accepted record `real-newpaths-check/check-c3oxakps/acceptance.json`.
 
 All abbreviated acceptance paths above are under
 `/hf3fs-jd/data/tmp/openopt-qp3-20261010-acceptance/`. GPU campaign inputs
 are under `/3fs/research3fs/data/tmp/openopt-campaign-gpu/`. No old failed
-evidence has been repaired in place. Main owner still owns correctness
-sidecar production, admission wiring, final integration/report and qualified
-commercial runs. CPU tests are not GPU execution evidence.
+evidence has been repaired in place. Correctness sidecar/replay gaps are
+closed for the new run, not for historical incomplete results. Main owner
+still owns admission wiring, final integration/report and qualified commercial
+runs. CPU tests are not GPU execution evidence.

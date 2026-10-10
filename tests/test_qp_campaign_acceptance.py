@@ -111,6 +111,7 @@ def gpu_fixture(root, correctness=False):
     q = {**{key: 0.0 for key in gate.METRICS}, "verdict": "PASS", "solver_status": "solved"}
     result = {}
     if correctness:
+        result.update(dtype="float64", eps_abs=1e-7, eps_rel=1e-7)
         p = dict(P=np.eye(3), q=np.array([-0.1, -0.2, -0.3]),
                  A=np.eye(3), l=np.full(3, -1.0), u=np.ones(3),
                  expected=np.array([0.1, 0.2, 0.3]), witness_y=np.zeros(3))
@@ -417,3 +418,13 @@ def test_check_alias_and_missing_correctness_replay_are_strict(tmp_path):
     completed = subprocess.run([sys.executable, "-B", str(Path(gate.__file__)),
                                 "--check", "--help"], capture_output=True, text=True)
     assert completed.returncode == 0 and "--check" in completed.stdout
+
+
+@pytest.mark.parametrize("field,value", [("dtype", "float32"), ("eps_abs", 1e-3)])
+def test_correctness_config_mutants_rejected(tmp_path, field, value):
+    result, source, report = gpu_fixture(tmp_path, correctness=True)
+    report["result"][field] = value
+    dump(result, report)
+    bundle, digest = pin(tmp_path, result, source)
+    with pytest.raises(gate.Rejected, match="dtype/eps parity"):
+        gate.accept(bundle, digest)

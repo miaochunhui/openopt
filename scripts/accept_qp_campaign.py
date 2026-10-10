@@ -515,11 +515,17 @@ def validate_gpu(report: dict, sidecars: dict) -> dict:
         required = {"dense_adaptive_False", "dense_adaptive_True", "batch_0", "batch_1", "batch_2",
                     "sparse_coo", "sparse_csr"}
         require(set(checks) >= required, "correctness/checks", "new-path coverage missing")
+        eps_abs = number(result["eps_abs"], "correctness/eps_abs", positive=True)
+        eps_rel = number(result["eps_rel"], "correctness/eps_rel", positive=True)
+        require(result["dtype"] == "float64" and eps_abs == eps_rel == 1e-7,
+                "correctness/configuration", "correctness dtype/eps parity mismatch")
         problems = {label: load_problem(sidecars[f"problem-{label}.npz"], f"problem-{label}.npz")
                     for label in ("dense", "sparse")}
         for label, arrays in problems.items():
+            require(str(arrays["P"].dtype) == result["dtype"],
+                    "correctness/" + label, "correctness problem dtype mismatch")
             recompute(arrays, {"x": arrays["expected"], "y": arrays["witness_y"]},
-                      1e-7, 1e-7, "correctness/" + label + "/witness")
+                      eps_abs, eps_rel, "correctness/" + label + "/witness")
         for name, measured in checks.items():
             check_quality(measured, "correctness/" + name, GPU_LIMITS)
             require(measured.get("solver_status", measured.get("status")) == "solved",
@@ -528,7 +534,7 @@ def validate_gpu(report: dict, sidecars: dict) -> dict:
             require("host_x" in measured and "host_y" in measured,
                     "correctness/" + name, "host solution evidence missing")
             actual = recompute(arrays, {"x": measured["host_x"], "y": measured["host_y"]},
-                               1e-7, 1e-7, "correctness/" + name)
+                               eps_abs, eps_rel, "correctness/" + name)
             for key in (*METRICS, "objective", "solution_error"):
                 require(math.isclose(measured[key], actual[key], rel_tol=1e-8, abs_tol=1e-12),
                         "correctness/" + name, "GPU independent quality mismatch: " + key)
