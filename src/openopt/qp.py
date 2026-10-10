@@ -1,16 +1,20 @@
 """Experimental domain-neutral dense convex quadratic programming.
 
-Minimize 0.5*x.T*P*x + q.T*x subject to l <= A*x <= u. ADMM uses a
-regularized positive-definite system; this module does not certify infeasibility
-or unboundedness. Explicit devices never fall back. No portfolio assumptions.
+Minimize 0.5*x.T*P*x + q.T*x subject to l <= A*x <= u. Optional termination
+uses independent original-coordinate numerical evidence, never exact proofs.
+Explicit devices never fall back. No portfolio assumptions.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import math
+from typing import TYPE_CHECKING
 
 import torch
+
+if TYPE_CHECKING:
+    from .certificates import NumericalEvidence
 
 
 @dataclass(frozen=True)
@@ -39,6 +43,10 @@ class QPConfig:
     adaptive_rho_tolerance: float = 5.0
     rho_min: float = 1e-6
     rho_max: float = 1e6
+    dual_gap_termination: bool = False
+    direction_termination: bool = False
+    direction_atol: float = 1e-8
+    direction_rtol: float = 1e-8
 
     def validate(self) -> None:
         if self.dtype not in (torch.float32, torch.float64):
@@ -70,6 +78,17 @@ class QPConfig:
             raise ValueError("adaptive_rho_tolerance must be finite and greater than one")
         if self.adaptive_rho and not self.rho_min <= self.rho <= self.rho_max:
             raise ValueError("adaptive initial rho must be within rho_min/rho_max")
+        for name in ("dual_gap_termination", "direction_termination"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be a boolean")
+        if self.dual_gap_termination and self.eps_rel >= 1:
+            raise ValueError("dual-gap eps_rel must be less than one")
+        if (isinstance(self.direction_atol, bool)
+                or not math.isfinite(self.direction_atol) or self.direction_atol <= 0):
+            raise ValueError("direction_atol must be finite and positive")
+        if (isinstance(self.direction_rtol, bool)
+                or not math.isfinite(self.direction_rtol) or not 0 <= self.direction_rtol < 1):
+            raise ValueError("direction_rtol must be finite and in [0, 1)")
         device = torch.device(self.device)
         if device.type not in ("cpu", "cuda"):
             raise ValueError("QP supports CPU or CUDA only")
@@ -92,6 +111,12 @@ class QPResult:
     normal_cone_residual: float
     rho_updates: int = 0
     final_rho: float = 1.0
+    dual_objective: float | None = None
+    duality_gap: float | None = None
+    infeasibility_direction: torch.Tensor | None = None
+    unbounded_direction: torch.Tensor | None = None
+    feasible_base: torch.Tensor | None = None
+    termination_evidence: NumericalEvidence | None = None
 
 
 def _norm(x: torch.Tensor) -> float:
@@ -164,6 +189,12 @@ class PreparedQP:
         if eigen_min < -symmetry_tol:
             raise ValueError("P must be positive semidefinite")
         self.P, self.q, self.A, self.l, self.u = P, q, A, l, u
+        if config.dual_gap_termination or config.direction_termination:
+            # Preserve pre-cast, pre-symmetrization data for independent CPU replay.
+            self.original_problem = QPProblem(*[
+                tensor.detach().to(device="cpu", dtype=torch.float64).clone()
+                for tensor in tensors
+            ])
         gram = A.T @ A
         system = P + config.rho * gram
         system.diagonal().add_(config.sigma)
@@ -175,6 +206,36 @@ class PreparedQP:
                 raise RuntimeError("adaptive QP initial factorization is nonfinite")
             self.gram = gram
         self.factor = factor
+
+    def _termination_check(
+        self, kind: str, iteration: int, rho: float, *vectors: torch.Tensor,
+    ) -> NumericalEvidence:
+        from .certificates import (
+            check_primal_infeasibility, check_qp_candidate, check_unbounded_direction,
+        )
+
+        c = self.config
+        host = [v.detach().to(device="cpu", dtype=torch.float64) for v in vectors]
+        try:
+            if kind == "gap":
+                return check_qp_candidate(
+                    self.original_problem, *host, atol=c.eps_abs, rtol=c.eps_rel,
+                )
+            if kind == "infeasible":
+                return check_primal_infeasibility(
+                    self.original_problem, host[0],
+                    atol=c.direction_atol, rtol=c.direction_rtol,
+                )
+            if kind == "unbounded":
+                return check_unbounded_direction(
+                    self.original_problem, host[0], feasible_x=host[1],
+                    atol=c.direction_atol, rtol=c.direction_rtol,
+                )
+            raise ValueError(f"unknown termination check: {kind}")
+        except (ValueError, RuntimeError, ArithmeticError) as error:
+            raise RuntimeError(
+                f"QP termination check failed kind={kind} iteration={iteration} rho={rho!r}",
+            ) from error
 
     def _factorize_rho(self, rho: float, iteration: int) -> torch.Tensor:
         context = f"adaptive rho factorization failed iteration={iteration} rho={rho!r}"
@@ -200,6 +261,10 @@ class PreparedQP:
         status = "max_iterations"
         primal = dual = normal = math.inf
         rho, factor, rho_updates = c.rho, self.factor, 0
+        evidence = None
+        infeasibility_direction = unbounded_direction = feasible_base = None
+        if c.direction_termination:
+            checkpoint_x, checkpoint_y = x.clone(), y.clone()
         for iteration in range(1, c.max_iterations + 1):
             rhs = c.sigma * x - q + A.T @ (rho * z - y)
             if c.linear_solver == "triangular":
@@ -215,6 +280,10 @@ class PreparedQP:
             adapt = c.adaptive_rho and l.numel() > 0 and iteration % c.adaptive_rho_interval == 0
             if check or adapt:
                 if not bool(torch.isfinite(x).all() & torch.isfinite(y).all()):
+                    if c.dual_gap_termination or c.direction_termination:
+                        raise RuntimeError(
+                            f"QP nonfinite termination iterate iteration={iteration} rho={rho!r}",
+                        )
                     status = "numerical_error"
                     break
                 Px, ATy = P @ x, A.T @ y
@@ -231,9 +300,31 @@ class PreparedQP:
                     raise RuntimeError(
                         f"QP nonfinite residual/tolerance iteration={iteration} rho={rho!r}",
                     )
+                if check and c.dual_gap_termination:
+                    evidence = self._termination_check("gap", iteration, rho, x, y)
                 if check and primal <= primal_tol and dual <= dual_tol and normal <= primal_tol:
-                    status = "solved"
-                    break
+                    if not c.dual_gap_termination or evidence.passed:
+                        status = "solved"
+                        break
+                if check and c.direction_termination:
+                    # Checkpoint differences average ADMM increments; y is unscaled
+                    # even across adaptive-rho updates. No factor or z is checked.
+                    dx, dy = x - checkpoint_x, y - checkpoint_y
+                    checkpoint_x, checkpoint_y = x.clone(), y.clone()
+                    farkas = self._termination_check("infeasible", iteration, rho, dy)
+                    recession = self._termination_check("unbounded", iteration, rho, dx, x)
+                    # Conflicting tolerance-level evidence is ambiguous, not a status.
+                    if farkas.passed != recession.passed:
+                        if farkas.passed:
+                            status, evidence = "infeasible", farkas
+                            v = dy.detach().to(device="cpu", dtype=torch.float64)
+                            infeasibility_direction = v / _norm(v)
+                        else:
+                            status, evidence = "unbounded", recession
+                            d = dx.detach().to(device="cpu", dtype=torch.float64)
+                            unbounded_direction = d / _norm(d)
+                            feasible_base = x.detach().to(device="cpu", dtype=torch.float64).clone()
+                        break
                 if adapt and iteration < c.max_iterations:
                     new_rho = _balanced_rho(
                         rho, primal, dual, max(_norm(Ax), _norm(z)),
@@ -251,6 +342,11 @@ class PreparedQP:
             x=x, y=y, status=status, iterations=iteration, objective=objective,
             primal_residual=primal, dual_residual=dual, normal_cone_residual=normal,
             rho_updates=rho_updates, final_rho=rho,
+            dual_objective=evidence.metrics.get("dual_objective") if evidence else None,
+            duality_gap=evidence.metrics.get("duality_gap") if evidence else None,
+            infeasibility_direction=infeasibility_direction,
+            unbounded_direction=unbounded_direction, feasible_base=feasible_base,
+            termination_evidence=evidence,
         )
 
 
