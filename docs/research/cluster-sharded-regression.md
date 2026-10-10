@@ -134,3 +134,96 @@ Earlier dedicated attempts remain under `unit-v1/tests-oqkj89qf/` (18 passed,
 Their counts overlap and predate later admission/tamper controls. No
 controlled serial/cluster speed comparison or actual container execution
 was performed by the development seat.
+
+## Explicit Fixture V2 Transport
+
+This replacement seat starts at main `5920c7f` and imports its own sharder
+commit `48e1204` into private branch
+`codex/release4-20261010-cluster-fixture-v2` (private cherry-pick `8f5f5b4`).
+Only this cluster entry, its test file and this document are changed next.
+The sharder/verify implementation, production optimizers and cluster are not
+modified. The main coordinator must integrate `48e1204` before the new wrapper.
+
+Version boundaries are explicit:
+
+- Existing sharder/config v1 remains the default file-LPT path. It cannot claim
+  fixture grouping, and `--fixture-aware` with a v1 plan is rejected.
+- The sharder v2 plan needs its own `--fixture-aware --fixture-file ...` input.
+  The cluster `plan` additionally needs `--fixture-aware`; omitting it rejects
+  a v2 source plan. Subsequent run/collect/check/worker consume pinned contracts,
+  not new command-line grouping overrides.
+- The cluster config v2 and transport contract
+  `pytest-source-pinned-fixture-transport-v2` preserve the complete host
+  collection sidecar, audit, selected files, closure, constraints, isolated
+  builtin policies, components, historical leaf costs and explicit targets.
+  Nothing is reconstructed from nodeids alone.
+
+The host pytest installation paths are not container runtime paths. The probe
+maps each audited `_pytest` module to the container installation only after
+exact pytest version, module name, installation origin and source SHA256 match.
+The private numerical/runtime source is not copied, installed, or relaxed.
+Unknown origin/module, missing dependencies, different source bytes or version
+fail before execution. A compatible existing runtime is required; do not
+install SDKs/packages or substitute the host Python.
+
+The probe writes a byte-pinned `runtime-plan.json` and
+`runtime-collection.json` outside the source tree. Mapping only replaces
+runtime source paths and corresponding isolated-builtin origin paths.
+Source pins, fixture dependency edges, connected components, assignments,
+costs and budgets remain identical. Every shard recomputes the full v2 pytest
+collection/audit before calling the original verify entry. The final check
+uses that same pinned runtime plan; the host independently reconstructs its
+allowed path-only transformation and checks all worker/collection/summary pins.
+The summary retains schema 1 with `coverage="tests"`, adding
+`plan_schema_version=2`, source transport plan pin and transport contract.
+
+A genuine user session/module shared component cannot be broken up by this
+transport. Overbudget shared components remain FAIL. This does not repair
+the previously measured heavy `produced` component or expand any deadline.
+Full repository collection in a real container remains coordinator-owned.
+
+## Bounded Independent CPU Acceptance
+
+The test-file entry partitions all wrapper tests into disjoint v1 and v2
+batches. Each invokes the real existing verify entry under a 179-second
+external process deadline, retains timeout/nonzero first cause, and checks
+actual JUnit, source before/after, process/log paths and receipt hashes.
+No actual Kubernetes method is used; a fake transport drives real tiny CPU
+worker subprocesses.
+
+```bash
+sudo -n -u infra env CUDA_VISIBLE_DEVICES=-1 PYTHONDONTWRITEBYTECODE=1 /hf3fs-jd/data/tmp/openopt-validation-env/bin/python -B tests/test_cluster_sharded_regression.py --batch v1 --artifact-dir /hf3fs-jd/data/tmp/openopt-release-20261010/cluster-fixture-v2/reaccept
+sudo -n -u infra env CUDA_VISIBLE_DEVICES=-1 PYTHONDONTWRITEBYTECODE=1 /hf3fs-jd/data/tmp/openopt-validation-env/bin/python -B tests/test_cluster_sharded_regression.py --batch fixture-v2 --artifact-dir /hf3fs-jd/data/tmp/openopt-release-20261010/cluster-fixture-v2/reaccept
+```
+
+Initial v2 minimal acceptance is three passes/39.02 seconds at
+`minimal-v1/tests-cm6fcw69/verification.json`.
+The first disjoint bounded batches are v1 25 passes/123.45 seconds at
+`bounded-v1/v1-51kx1m9a/verification/tests-nhq1jaef/verification.json`, and
+v2 eight passes/62.81 seconds at
+`bounded-v1/fixture-v2-8pje0t7v/verification/tests-y61oxgft/verification.json`.
+Both source gates pass. These precede final origin/summary-binding controls;
+they are not clean final-source evidence. Paths are below
+`/hf3fs-jd/data/tmp/openopt-release-20261010/cluster-fixture-v2/`.
+
+Controls include exact cross-file session-component preservation, full
+function-fixture audit, unaudited wholefile preservation, host-to-runtime
+path mapping, explicit opt-in rejection, version/module/hash/origin mismatch,
+nodes-only sidecar rejection, rehashed constraint forgery rejected by real
+fresh collection, mapping/plan/summary tampering, and complete three-shard
+five-testcase JUnit replay. Tiny counts are test harness evidence, not five
+optimizer instances, commercial qualification, container execution or speed.
+
+Final precommit bounded verification includes the origin/summary controls:
+v1 25 passes/120.10 seconds at
+`bounded-v2/v1-iliqz61f/verification/tests-3detpfz5/verification.json`;
+v2 nine passes/65.27 seconds at
+`bounded-v2/fixture-v2-fqqedz9u/verification/tests-b_s5drjj/verification.json`.
+Both parent `acceptance.json` receipts bind complete source, process, tests and
+verification SHA; source consistency is PASS, failures/errors/skips zero.
+The v2 process wall is 72.09 seconds, distinct from pytest wall.
+Postcondition smoke is 80 passes/four explicit CUDA skips/6.17 seconds at
+`post-smoke-v1/smoke-rsbhjm7l/verification.json`, source-consistency PASS.
+These receipts bind dirty precommit source bytes; clean-source reacceptance
+uses the same two bounded commands after this three-file commit, retaining
+separate evidence rather than rewriting these receipts.

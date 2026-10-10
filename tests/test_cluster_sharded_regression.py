@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 
 import pytest
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from scripts import cluster_sharded_regression as tool
 from scripts import verify_sharded as shard
 
@@ -49,6 +52,54 @@ def tiny(tmp_path):
     plan_path = plan_dir / "plan.json"
     output = tool.prepare(repo, plan_path, shard.digest(plan_path), tmp_path / "cluster",
                           "existing-image:fixture")
+    config_path = output / "cluster-plan.json"
+    return repo, config_path, shard.digest(config_path)
+
+
+@pytest.fixture
+def fixture_tiny(tmp_path):
+    repo = tmp_path / "fixture-repo"
+    for name in ("scripts", "src", "benchmarks", "tests", "examples"):
+        (repo / name).mkdir(parents=True, exist_ok=True)
+    files = []
+    for name in ("verify.py", "verify_sharded.py", "cluster_sharded_regression.py"):
+        relative = f"scripts/{name}"
+        shutil.copyfile(tool.ROOT / relative, repo / relative)
+        files.append(relative)
+    for relative, content in {
+        "pyproject.toml": '[tool.pytest.ini_options]\ntestpaths=["tests"]\n',
+        "scripts/migrate_openpo.py": 'print("FIXTURE_TRANSPORT_PROVENANCE_ONLY")\n',
+        "examples/portfolio_qp.py": 'print("FIXTURE_TRANSPORT_EXAMPLE_ONLY")\n',
+        "tests/conftest.py": (
+            'import pytest\n@pytest.fixture(scope="session")\n'
+            'def shared():\n    return object()\n@pytest.fixture\n'
+            'def dependent(shared):\n    return shared\n'),
+        "tests/test_a.py": (
+            'import pytest\n@pytest.fixture\n'
+            'def independent(tmp_path):\n    return tmp_path\n'
+            'def test_shared_a(dependent):\n    assert dependent is not None\n'
+            'def test_independent_a(independent):\n    assert independent.is_dir()\n'),
+        "tests/test_b.py": (
+            'def test_shared_b(dependent):\n    assert dependent is not None\n'
+            'def test_independent_b():\n    assert 2 == 2\n'),
+        "tests/test_c.py": 'def test_unaudited():\n    assert 3 == 3\n',
+    }.items():
+        (repo / relative).write_text(content, encoding="utf-8")
+        files.append(relative)
+    git(repo, "init")
+    git(repo, "config", "user.name", "Fixture v2 transport")
+    git(repo, "config", "user.email", "fixture@example.invalid")
+    git(repo, "add", *files)
+    git(repo, "commit", "-m", "Freeze cross-file session and independent fixture input")
+    plan_dir = shard.plan_run(
+        repo, tmp_path / "original-fixture-plan", [], shard_timeout=90,
+        fixture_aware=True, fixture_files=["tests/test_a.py", "tests/test_b.py"],
+    )
+    plan_path = plan_dir / "plan.json"
+    output = tool.prepare(
+        repo, plan_path, shard.digest(plan_path), tmp_path / "fixture-cluster",
+        "existing-image:fixture", fixture_aware=True,
+    )
     config_path = output / "cluster-plan.json"
     return repo, config_path, shard.digest(config_path)
 
@@ -458,3 +509,264 @@ def test_actual_local_cpu_runtime_probe_not_container_evidence():
     assert set(result["packages"]) == set(shard.verifier(tool.ROOT).DEPENDENCIES)
     assert all(value["status"] == "FOUND" for value in result["inventory"]["dependencies"].values())
     assert result["inventory"]["commercial_qualification"].startswith("UNVERIFIED")
+
+
+def test_fixture_v2_explicit_optin_and_full_metadata_not_nodes_rebuild(fixture_tiny, tmp_path):
+    repo, path, pin = fixture_tiny
+    config, plan = tool.load_config(path, pin)
+    original = shard.read(config["source_plan"], config["source_plan_sha256"])
+    assert config["schema_version"] == plan["schema_version"] == 2
+    assert config["fixture_transport_contract"] == tool.FIXTURE_TRANSPORT
+    assert shard.read(plan["collection"]["path"]) == shard.read(original["collection"]["path"])
+    assert plan["grouping"] == original["grouping"] and plan["shards"] == original["shards"]
+    audit = plan["grouping"]["audit"]
+    assert audit["runtime_sha256"] and audit["isolated_builtins"]["tmp_path_factory"]
+    shared = next(group for group in plan["grouping"]["groups"]
+                  if "tests/test_a.py::test_shared_a" in group["nodeids"])
+    assert shared["nodeids"] == [
+        "tests/test_a.py::test_shared_a", "tests/test_b.py::test_shared_b",
+    ]
+    assert any(set(shared["nodeids"]).issubset(item["nodeids"]) for item in plan["shards"])
+    with pytest.raises(shard.GateError, match="explicit_opt_in_required"):
+        tool.prepare(repo, Path(config["source_plan"]), config["source_plan_sha256"],
+                     tmp_path / "missing-optin", "existing-image:fixture")
+    assert tool.main([
+        "check", "--plan", str(path), "--plan-sha256", pin, "--fixture-aware",
+    ]) == 1
+
+
+def test_fixture_v2_runtime_install_path_mapping_preserves_all_semantics(fixture_tiny, tmp_path):
+    _, path, _ = fixture_tiny
+    plan = shard.read(shard.read(path)["plan"])
+    mapping = tool.local_runtime_mapping(plan)
+    moved = [dict(item, runtime_path=str(tmp_path / "pod-site" / Path(item["host_path"]).name))
+             for item in mapping]
+    effective, collection = tool.mapped_plan(plan, moved, tmp_path / "pod-collection.json")
+    assert effective["shards"] == plan["shards"]
+    assert effective["grouping"]["groups"] == plan["grouping"]["groups"]
+    assert effective["history"] == plan["history"]
+    audit = effective["grouping"]["audit"]
+    assert set(audit["runtime_sha256"]) == {item["runtime_path"] for item in moved}
+    assert audit["isolated_builtins"]["tmp_path_factory"]["origin"] in audit["runtime_sha256"]
+    assert collection["fixture_audit"] == audit
+    assert collection["nodeids"] == plan["collection"]["nodeids"]
+    assert effective["collection"]["sha256"] == tool.value_pin(collection)
+    bad = copy.deepcopy(moved)
+    bad[0]["sha256"] = "0" * 64
+    assert bad != moved
+    with pytest.raises(shard.GateError, match="mapping_identity_mismatch"):
+        tool.mapped_plan(plan, bad, tmp_path / "bad-collection.json")
+
+
+@pytest.mark.parametrize("mutation,reason", [
+    ("version", "pytest_version_drift"),
+    ("module", "runtime_module_mismatch"),
+    ("hash", "runtime_source_drift"),
+    ("origin", "runtime_origin_drift"),
+    ("sidecar", "full_collection_mismatch"),
+])
+def test_fixture_v2_runtime_negatives_stop_before_execution(fixture_tiny, monkeypatch, mutation, reason):
+    _, path, _ = fixture_tiny
+    config = shard.read(path)
+    plan = shard.read(config["plan"])
+    if mutation == "version":
+        monkeypatch.setattr(pytest, "__version__", "unqualified-version")
+    elif mutation == "module":
+        plan["cluster_fixture_transport"]["runtime_files"][0]["module"] = "_pytest.capture"
+    elif mutation == "hash":
+        real_digest = shard.digest
+        runtime_file = tool.local_runtime_mapping(plan)[0]["runtime_path"]
+
+        def changed_digest(value):
+            return "0" * 64 if str(value) == runtime_file else real_digest(value)
+
+        monkeypatch.setattr(shard, "digest", changed_digest)
+    elif mutation == "origin":
+        from types import SimpleNamespace
+        original_import = tool.importlib.import_module
+        entry = plan["cluster_fixture_transport"]["runtime_files"][0]
+        misplaced = path.parent / "outside-pytest.py"
+        shutil.copyfile(entry["host_path"], misplaced)
+        assert shard.digest(misplaced) == entry["sha256"]
+
+        def relocated_module(name, *args, **kwargs):
+            if name == entry["module"]:
+                return SimpleNamespace(__name__=name, __file__=str(misplaced))
+            return original_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(tool.importlib, "import_module", relocated_module)
+    else:
+        sidecar = shard.read(plan["collection"]["path"])
+        sidecar.pop("fixture_audit")
+        shard.save(plan["collection"]["path"], sidecar)
+        plan["collection"]["sha256"] = shard.digest(plan["collection"]["path"])
+    shard.save(config["plan"], plan)
+    monkeypatch.setattr(tool, "runtime_probe", fake_runtime)
+    monkeypatch.setattr(shard, "launch_shard", lambda *_: pytest.fail("no shard admission"))
+    output = path.parent / "negative-worker"
+    with pytest.raises(shard.GateError, match=reason):
+        tool.worker(Path(config["plan"]), shard.digest(config["plan"]), "probe", output)
+    result = shard.read(output / "worker.json")
+    assert result["verdict"] == "FAIL" and reason in result["error"]
+    assert not list(path.parent.glob("shard-*"))
+
+
+def test_fixture_v2_rehashed_constraint_forgery_fails_real_pod_collection(fixture_tiny, monkeypatch):
+    _, path, _ = fixture_tiny
+    config = shard.read(path)
+    plan = shard.read(config["plan"])
+    audit = plan["grouping"]["audit"]
+    audit["nodes"][1]["constraints"].append("fixture:invented-shared")
+    audit["nodes"][1]["constraints"].sort()
+    collection = {"nodeids": plan["collection"]["nodeids"], "fixture_audit": audit}
+    shard.save(plan["collection"]["path"], collection)
+    plan["collection"]["sha256"] = shard.digest(plan["collection"]["path"])
+    plan["grouping"]["groups"] = shard.fixture_groups(collection["nodeids"], audit)
+    plan["shards"], plan["history"], plan["unknown_nodeids"] = shard.lpt(
+        collection["nodeids"], [], 3, components=plan["grouping"]["groups"],
+    )
+    plan["cluster_fixture_transport"]["host_audit_sha256"] = tool.value_pin(audit)
+    shard.validate_plan(plan)
+    shard.save(config["plan"], plan)
+    monkeypatch.setattr(tool, "runtime_probe", fake_runtime)
+    output = path.parent / "forged-audit-worker"
+    with pytest.raises(shard.GateError, match="fixture_audit_drift"):
+        tool.worker(Path(config["plan"]), shard.digest(config["plan"]), "probe", output)
+    result = shard.read(output / "worker.json")
+    assert result["verdict"] == "FAIL" and "fixture_audit_drift" in result["error"]
+    assert shard.read(output / "collection/collection.json")["nodeids"] == collection["nodeids"]
+    assert not list(path.parent.glob("shard-*"))
+
+
+def test_fixture_v2_real_cpu_workers_full_transport_replay(fixture_tiny, monkeypatch):
+    _, path, pin = fixture_tiny
+    monkeypatch.setattr(tool, "runtime_probe", fake_runtime)
+    client = FakeKubernetes(shard.read(path), execute=True)
+    for stage, terminal in (
+        ("PROBE", "PROBE_PASSED"), ("SMOKE", "SMOKE_PASSED"),
+        ("SHARDS", "SHARDS_PASSED"), ("CHECK", "PASS"),
+    ):
+        assert tool.admit(path, pin, True, client)["state"] == stage
+        assert tool.collect(path, pin, client)["state"] == terminal
+    audit = tool.check(path, pin)
+    assert audit["tests"] == {"tests": 5, "failures": 0, "errors": 0, "skipped": 0}
+    config, plan = tool.load_config(path, pin)
+    state = shard.read(path.parent / "run.json")
+    probe = shard.read(path.parent / "worker-probe/worker.json", state["runtime_sha256"])
+    effective, _, effective_pin = tool.execution_plan(config, plan, probe)
+    assert effective["grouping"]["groups"] == plan["grouping"]["groups"]
+    assert effective["shards"] == plan["shards"]
+    summary = shard.read(path.parent / "verification.json", state["report_sha256"])
+    assert summary["plan_sha256"] == effective_pin
+    assert summary["source_transport_plan_sha256"] == config["plan_sha256"]
+    assert summary["plan_schema_version"] == 2
+    assert summary["source_consistency"]["verdict"] == "PASS"
+    assert len(client.created) == 5
+    shard_jobs = [job for job in state["jobs"] if job["phase"] == "shard"]
+    shared_nodes = {"tests/test_a.py::test_shared_a", "tests/test_b.py::test_shared_b"}
+    shared_owners = [
+        job for job in shard_jobs
+        if shared_nodes.intersection(shard.read(Path(job["output"]) / "worker.json")["shard"]["nodeids"])
+    ]
+    assert len(shared_owners) == 1
+    for job in shard_jobs:
+        result = shard.read(Path(job["output"]) / "worker.json", job["worker_sha256"])
+        fresh = shard.read(Path(job["output"]) / "collection/collection.json",
+                           result["collection_sha256"])
+        assert fresh["fixture_audit"] == effective["grouping"]["audit"]
+    receipt = {
+        "kind": "real_cpu_fixture_with_fake_cluster_not_container_qualification",
+        "source": plan["source"], "source_consistency": summary["source_consistency"],
+        "tests": audit["tests"], "host_audit_sha256": plan["cluster_fixture_transport"]["host_audit_sha256"],
+        "runtime_mapping": probe["fixture_runtime_mapping"],
+        "runtime_plan_sha256": effective_pin, "source_plan_sha256": config["plan_sha256"],
+        "shared_component_owner_count": len(shared_owners), "job_count": len(client.created),
+        "speedup": None,
+    }
+    receipt_path = path.parent / "fixture-transport-acceptance.json"
+    shard.save(receipt_path, receipt)
+    assert json.loads(receipt_path.read_text()) == receipt
+    summary_path = path.parent / "verification.json"
+    corrupted_summary = copy.deepcopy(summary)
+    corrupted_summary["source_transport_plan_sha256"] = "0" * 64
+    shard.save(summary_path, corrupted_summary)
+    corrupted_state = copy.deepcopy(state)
+    corrupted_state["report_sha256"] = shard.digest(summary_path)
+    tool.save(path.parent / "run.json", corrupted_state)
+    with pytest.raises(shard.GateError, match="combined_fixture_transport_binding_mismatch"):
+        tool.check(path, pin)
+    shard.save(summary_path, summary)
+    tool.save(path.parent / "run.json", state)
+    tampered = copy.deepcopy(probe)
+    tampered["fixture_runtime_mapping"][0]["sha256"] = "0" * 64
+    with pytest.raises(shard.GateError, match="mapping_identity_mismatch"):
+        tool.execution_plan(config, plan, tampered)
+    effective["shards"][0]["nodeids"].append("tests/false.py::test_false")
+    shard.save(Path(probe["execution_plan"]), effective)
+    with pytest.raises(shard.GateError, match="hash_mismatch"):
+        tool.check(path, pin)
+
+
+def accept_batch(batch, artifact_root):
+    """Bound each real CPU batch below 180 seconds, retaining process and JUnit."""
+    from scripts import verify
+    root = tool.shared(artifact_root)
+    root.mkdir(parents=True, exist_ok=True)
+    output = Path(tempfile.mkdtemp(prefix=f"{batch}-", dir=root))
+    process = output / "process"
+    process.mkdir()
+    targets = [
+        f"tests/test_cluster_sharded_regression.py::{name}"
+        for name in sorted(globals()) if name.startswith("test_")
+        and name.startswith("test_fixture_v2_") == (batch == "fixture-v2")
+    ]
+    report = {
+        "kind": "bounded-real-cpu-fake-cluster-tests",
+        "batch": batch, "verdict": "RUNNING", "targets": targets,
+        "deadline_s": 179, "started_at": tool.stamp(),
+        "qualification": "CPU fixture correctness only; no cluster/container/speed claim",
+    }
+    try:
+        shard.require(targets and batch in ("v1", "fixture-v2"), "empty_or_invalid_test_batch")
+        before = verify.source_snapshot(tool.ROOT)
+        report["source"] = before
+        command = [sys.executable, "-B", "scripts/verify.py", "tests",
+                   "--artifact-dir", str(output / "verification")]
+        for target in targets:
+            command.extend(["--target", target])
+        report["process"] = shard.command_logged(
+            command, tool.ROOT, process, 179, shard.cpu_env(tool.ROOT, process))
+        shard.require(report["process"]["wall_s"] < 180, "cpu_batch_over_180_seconds")
+        receipts = list((output / "verification").glob("tests-*/verification.json"))
+        shard.require(len(receipts) == 1, "batch_verification_membership_mismatch")
+        receipt = shard.read(receipts[0])
+        shard.require(receipt["verdict"] == "PASS" and receipt["targets"] == targets
+                      and receipt["source"] == before, "batch_verification_not_bound")
+        records, counts = shard.parse_junit(receipts[0].parent / "pytest.xml")
+        shard.require(records and counts == receipt["tests"] and not any(
+            counts[key] for key in ("failures", "errors", "skipped")), "batch_junit_not_pass")
+        report.update(tests=counts, verification=str(receipts[0]),
+                      verification_sha256=shard.digest(receipts[0]),
+                      source_consistency=verify.check_source_consistency(
+                          before, verify.source_snapshot(tool.ROOT)))
+        shard.require(report["source_consistency"]["verdict"] == "PASS", "batch_source_drift")
+        report["verdict"] = "PASS"
+    except Exception as error:
+        report.update(verdict="FAIL", first_failure=f"{type(error).__name__}: {error}")
+        raise
+    finally:
+        report["finished_at"] = tool.stamp()
+        shard.save(output / "acceptance.json", report)
+        print(f"CLUSTER_CPU_BATCH verdict={report['verdict']} batch={batch} "
+              f"receipt={output / 'acceptance.json'}", flush=True)
+    return output
+
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--batch", required=True, choices=("v1", "fixture-v2"))
+    parser.add_argument("--artifact-dir", required=True, type=Path)
+    args = parser.parse_args()
+    accept_batch(args.batch, args.artifact_dir)

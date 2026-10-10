@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+import copy
 from datetime import datetime, timezone
 import fcntl
+import hashlib
 import importlib
 import importlib.metadata
 import importlib.util
@@ -35,6 +37,7 @@ ARTIFACTS = Path("/hf3fs-jd/data/tmp/openopt-release-20261010/shard-cluster")
 PHASES = {"PROBE": "probe", "SMOKE": "shard", "SHARDS": "shard", "CHECK": "check"}
 IMPORTS = ("numpy", "torch", "pytest", "packaging", "scipy", "osqp", "clarabel",
            "highspy", "openopt", "openpo")
+FIXTURE_TRANSPORT = "pytest-source-pinned-fixture-transport-v2"
 
 
 class RuntimeProbeError(shard.GateError):
@@ -132,16 +135,171 @@ def runtime_probe(repo):
     }
 
 
+def value_pin(value):
+    return hashlib.sha256(shard.encoded(value)).hexdigest()
+
+
+def fixture_transport(plan):
+    """Describe runtime source identities without treating host paths as Pod paths."""
+    audit = plan["grouping"]["audit"]
+    modules = {}
+    for node in audit["nodes"]:
+        for fixture in node["closure"]:
+            identity = fixture["identity"]
+            if identity.startswith("builtin:"):
+                module = identity.split(":")[1]
+                shard.require(module.startswith("_pytest."), "invalid_fixture_runtime_module")
+                source = Path(importlib.import_module(module).__file__).resolve()
+                shard.require(str(source) in audit["runtime_sha256"],
+                              "fixture_runtime_origin_not_in_audit")
+                modules[str(source)] = module
+    shard.require(set(modules) == set(audit["runtime_sha256"]),
+                  "fixture_runtime_source_membership_mismatch")
+    return {
+        "contract": FIXTURE_TRANSPORT, "opt_in": True,
+        "pytest_version": audit["pytest_version"],
+        "host_audit_sha256": value_pin(audit),
+        "runtime_files": [
+            {"host_path": path, "module": modules[path], "sha256": pin}
+            for path, pin in sorted(audit["runtime_sha256"].items())
+        ],
+    }
+
+
+def transport_contract(plan):
+    contract = plan.get("cluster_fixture_transport")
+    shard.require(plan["schema_version"] == 2 and isinstance(contract, dict)
+                  and contract.get("contract") == FIXTURE_TRANSPORT
+                  and contract.get("opt_in") is True, "cluster_fixture_opt_in_required")
+    audit = plan["grouping"]["audit"]
+    shard.require(contract["host_audit_sha256"] == value_pin(audit)
+                  and contract["pytest_version"] == audit["pytest_version"],
+                  "transport_host_audit_pin_mismatch")
+    files = contract["runtime_files"]
+    shard.require(isinstance(files, list), "invalid_transport_runtime_files")
+    paths = [item["host_path"] for item in files]
+    modules = [item["module"] for item in files]
+    shard.require(len(paths) == len(set(paths)) and len(modules) == len(set(modules))
+                  and {item["host_path"]: item["sha256"] for item in files}
+                  == audit["runtime_sha256"], "transport_runtime_membership_mismatch")
+    expected_modules = {
+        fixture["identity"].split(":")[1]
+        for node in audit["nodes"] for fixture in node["closure"]
+        if fixture["identity"].startswith("builtin:")
+    }
+    shard.require(set(modules) == expected_modules
+                  and all(module.startswith("_pytest.") for module in modules),
+                  "transport_runtime_module_mismatch")
+    for name, isolation in audit["isolated_builtins"].items():
+        shard.require(any(item["host_path"] == isolation["origin"]
+                          and item["module"] == isolation["module"]
+                          and item["sha256"] == isolation["sha256"] for item in files),
+                      f"transport_builtin_origin_mismatch: {name}")
+    sidecar = shard.read(plan["collection"]["path"], plan["collection"]["sha256"])
+    shard.require(sidecar == {"nodeids": plan["collection"]["nodeids"],
+                              "fixture_audit": audit}, "transport_full_collection_mismatch")
+    return contract
+
+
+def mapped_plan(plan, mapping, collection_path):
+    """Only runtime installation paths change; dependencies/groups/costs do not."""
+    contract = transport_contract(plan)
+    shard.require(len(mapping) == len(contract["runtime_files"]), "transport_mapping_size_mismatch")
+    for expected, actual in zip(contract["runtime_files"], mapping):
+        shard.require(all(actual.get(key) == value for key, value in expected.items())
+                      and isinstance(actual.get("runtime_path"), str)
+                      and Path(actual["runtime_path"]).is_absolute(),
+                      "transport_mapping_identity_mismatch")
+    replacements = {item["host_path"]: item["runtime_path"] for item in mapping}
+    shard.require(len(set(replacements.values())) == len(replacements),
+                  "transport_runtime_path_collision")
+    result = copy.deepcopy(plan)
+    audit = result["grouping"]["audit"]
+    audit["runtime_sha256"] = {
+        replacements[path]: pin for path, pin in audit["runtime_sha256"].items()
+    }
+    for isolation in audit["isolated_builtins"].values():
+        isolation["origin"] = replacements[isolation["origin"]]
+    for node in audit["nodes"]:
+        for fixture in node["closure"]:
+            isolation = fixture["isolated_builtin"]
+            if isolation is not None:
+                isolation["origin"] = replacements[isolation["origin"]]
+    collection = {"nodeids": result["collection"]["nodeids"], "fixture_audit": audit}
+    result["collection"].update(path=str(collection_path), sha256=value_pin(collection))
+    # The source transport descriptor is deliberately retained for host replay.
+    return result, collection
+
+
+def local_runtime_mapping(plan):
+    contract = transport_contract(plan)
+    import pytest
+    shard.require(pytest.__version__ == contract["pytest_version"],
+                  "fixture_transport_pytest_version_drift")
+    mapping = []
+    for item in contract["runtime_files"]:
+        module = importlib.import_module(item["module"])
+        path = Path(module.__file__).resolve()
+        origin = Path(pytest.__file__).resolve().parent.parent / (
+            item["module"].replace(".", "/") + ".py")
+        shard.require(module.__name__ == item["module"] and path == origin,
+                      f"fixture_transport_runtime_origin_drift: {item['module']}")
+        shard.require(path.suffix == ".py" and shard.digest(path) == item["sha256"],
+                      f"fixture_transport_runtime_source_drift: {item['module']}")
+        mapping.append(dict(item, runtime_path=str(path)))
+    return mapping
+
+
+def execution_plan(config, plan, runtime):
+    if plan["schema_version"] == 1:
+        return plan, Path(config["plan"]), config["plan_sha256"]
+    shard.require(runtime is not None, "fixture_runtime_probe_required")
+    path = Path(runtime["execution_plan"])
+    shard.require(path == Path(config["artifacts"]) / "worker-probe/runtime-plan.json",
+                  "runtime_plan_location_mismatch")
+    effective = shard.read(path, runtime["execution_plan_sha256"])
+    collection_path = path.parent / "runtime-collection.json"
+    expected, collection = mapped_plan(plan, runtime["fixture_runtime_mapping"], collection_path)
+    shard.require(effective == expected, "runtime_plan_semantic_drift")
+    shard.require(shard.read(collection_path, effective["collection"]["sha256"]) == collection,
+                  "runtime_collection_transport_drift")
+    return effective, path, runtime["execution_plan_sha256"]
+
+
 def worker(plan_path, plan_pin, phase, output, shard_id=None, runtime_path=None,
            runtime_pin=None, report_path=None, report_pin=None):
     output.mkdir(parents=True, exist_ok=False)
     report = {"schema_version": 1, "phase": phase, "started_at": stamp(), "verdict": "RUNNING"}
     try:
         plan = shard.read(plan_path, plan_pin)
-        shard.validate_plan(plan)
+        if plan["schema_version"] == 1:
+            shard.validate_plan(plan)
         repo = Path(plan["repo"])
         shard.consistent(repo, plan["source"])
         report.update(source=plan["source"], runtime=runtime_probe(repo), plan_sha256=plan_pin)
+        effective, effective_path, effective_pin = plan, plan_path, plan_pin
+        if plan["schema_version"] == 2:
+            mapping = local_runtime_mapping(plan)
+            report["fixture_runtime_mapping"] = mapping
+            if phase == "probe":
+                effective_path = output / "runtime-plan.json"
+                effective, collection = mapped_plan(
+                    plan, mapping, output / "runtime-collection.json")
+                shard.save(output / "runtime-collection.json", collection)
+                shard.save(effective_path, effective)
+                effective_pin = shard.digest(effective_path)
+            else:
+                expected = shard.read(runtime_path, runtime_pin)
+                shard.require(expected["plan_sha256"] == plan_pin
+                              and expected["source"] == plan["source"],
+                              "fixture_probe_source_plan_mismatch")
+                shard.require(expected["fixture_runtime_mapping"] == mapping,
+                              "fixture_runtime_mapping_drift")
+                effective, effective_path, effective_pin = execution_plan(
+                    {"plan": str(plan_path), "plan_sha256": plan_pin,
+                     "artifacts": str(plan_path.parent)}, plan, expected)
+            report.update(execution_plan=str(effective_path), execution_plan_sha256=effective_pin)
+        shard.validate_plan(effective)
         if phase != "probe":
             expected = shard.read(runtime_path, runtime_pin)
             shard.require(expected["verdict"] == "PASS"
@@ -151,20 +309,25 @@ def worker(plan_path, plan_pin, phase, output, shard_id=None, runtime_path=None,
         if phase == "probe":
             collection = output / "collection"
             collection.mkdir()
-            shard.require(shard.collect(repo, collection, plan["collection_timeout_s"]) ==
-                          plan["collection"]["nodeids"], "container_collection_drift")
+            shard.recollect_plan(repo, effective, collection)
             report["collection_sha256"] = shard.digest(collection / "collection.json")
         elif phase == "shard":
             shard.require(type(shard_id) is int and 0 <= shard_id < len(plan["shards"]),
                           "invalid_worker_shard_id")
             result_dir = output.parent / f"shard-{shard_id}"
             result_dir.mkdir(exist_ok=False)
-            report["shard"] = shard.launch_shard(repo, plan, plan["shards"][shard_id], result_dir)
+            if plan["schema_version"] == 2:
+                collection = output / "collection"
+                collection.mkdir()
+                shard.recollect_plan(repo, effective, collection)
+                report["collection_sha256"] = shard.digest(collection / "collection.json")
+            report["shard"] = shard.launch_shard(
+                repo, effective, effective["shards"][shard_id], result_dir)
         elif phase == "check":
             shard.require(report_path is not None and report_pin is not None,
                           "caller_pinned_report_required")
             report["acceptance_dir"] = str(shard.check(
-                repo, plan_path, plan_pin, report_path, report_pin, output / "replay"))
+                repo, effective_path, effective_pin, report_path, report_pin, output / "replay"))
             report["acceptance_sha256"] = shard.digest(
                 Path(report["acceptance_dir"]) / "acceptance.json")
         else:
@@ -186,10 +349,13 @@ def worker(plan_path, plan_pin, phase, output, shard_id=None, runtime_path=None,
 
 def prepare(repo, plan_path, plan_pin, artifact_root, image, python="python3",
             namespace="devtest", pvc="devtest-3fs", service_account="devbox",
-            priority_class="devtest-batch", cpu=4, memory="16Gi", node=None):
+            priority_class="devtest-batch", cpu=4, memory="16Gi", node=None,
+            fixture_aware=False):
     artifacts = shard.new_artifacts(shared(artifact_root), repo, "cluster-")
     source_plan = shard.read(plan_path, plan_pin)
     shard.validate_plan(source_plan)
+    shard.require(type(fixture_aware) is bool and fixture_aware == (
+        source_plan["schema_version"] == 2), "cluster_fixture_explicit_opt_in_required")
     shard.require({"scripts/verify.py", "scripts/verify_sharded.py",
                    "scripts/cluster_sharded_regression.py"}.issubset(
                        source_plan["source"]["sha256"]), "frozen_plan_missing_worker_entry")
@@ -206,14 +372,21 @@ def prepare(repo, plan_path, plan_pin, artifact_root, image, python="python3",
     source = artifacts / "source"
     freeze(repo, source_plan["source"], source, artifacts)
     sidecar = artifacts / "collection.json"
-    shard.save(sidecar, {"nodeids": source_plan["collection"]["nodeids"]})
+    collection = shard.read(source_plan["collection"]["path"], source_plan["collection"]["sha256"])
+    shard.require(collection["nodeids"] == source_plan["collection"]["nodeids"],
+                  "source_collection_membership_mismatch")
+    shard.save(sidecar, collection)
     plan = dict(source_plan)
     plan.update(repo=str(source), collection={
         "nodeids": source_plan["collection"]["nodeids"],
         "path": str(sidecar), "sha256": shard.digest(sidecar)})
+    if fixture_aware:
+        plan["cluster_fixture_transport"] = fixture_transport(source_plan)
+        transport_contract(plan)
+    shard.validate_plan(plan)
     shard.save(artifacts / "plan.json", plan)
     config = {
-        "schema_version": 1, "source_repo": str(repo), "source": plan["source"],
+        "schema_version": plan["schema_version"], "source_repo": str(repo), "source": plan["source"],
         "source_plan": str(plan_path.resolve()), "source_plan_sha256": plan_pin,
         "plan": str(artifacts / "plan.json"), "plan_sha256": shard.digest(artifacts / "plan.json"),
         "image": image, "python": python, "namespace": namespace, "pvc": pvc,
@@ -222,6 +395,8 @@ def prepare(repo, plan_path, plan_pin, artifact_root, image, python="python3",
         "gpu_count": 0, "created_at": stamp(),
         "smoke_id": min(plan["shards"], key=lambda item: (-item["predicted_test_s"], item["id"]))["id"],
     }
+    if fixture_aware:
+        config["fixture_transport_contract"] = FIXTURE_TRANSPORT
     shard.save(artifacts / "cluster-plan.json", config)
     save(artifacts / "run.json", {
         "state": "PREPARED", "jobs": [], "events": [], "first_failure": None,
@@ -395,12 +570,23 @@ def terminal_job(job, pods, expected, uid, image_id=None):
 
 def load_config(path, pin):
     config = shard.read(path, pin)
-    shard.require(config["schema_version"] == 1 and config["gpu_count"] == 0,
+    shard.require(config["schema_version"] in (1, 2) and config["gpu_count"] == 0,
                   "invalid_cluster_config")
     shard.require(Path(config["artifacts"]).resolve() == path.parent.resolve(),
                   "cluster_config_location_mismatch")
     plan = shard.read(config["plan"], config["plan_sha256"])
     shard.validate_plan(plan)
+    shard.require(config["schema_version"] == plan["schema_version"],
+                  "cluster_plan_version_mismatch")
+    if plan["schema_version"] == 2:
+        shard.require(config.get("fixture_transport_contract") == FIXTURE_TRANSPORT,
+                      "cluster_fixture_opt_in_required")
+        transport_contract(plan)
+        original = shard.read(config["source_plan"], config["source_plan_sha256"])
+        expected = copy.deepcopy(original)
+        expected.update(repo=plan["repo"], collection=plan["collection"])
+        expected["cluster_fixture_transport"] = fixture_transport(original)
+        shard.require(plan == expected, "transport_source_plan_semantic_drift")
     shard.require(plan["source"] == config["source"], "cluster_plan_source_mismatch")
     shard.consistent(Path(config["source_repo"]), config["source"])
     shard.consistent(Path(plan["repo"]), config["source"])
@@ -515,14 +701,28 @@ def reaccept_result(config, plan, job, runtime):
     expected = shard.verifier(Path(plan["repo"])).check_source_consistency(
         plan["source"], plan["source"])
     shard.require(result["source_consistency"] == expected, "worker_source_not_consistent")
+    effective = plan
+    if plan["schema_version"] == 2:
+        effective, effective_path, effective_pin = execution_plan(
+            config, plan, result if job["phase"] == "probe" else runtime)
+        shard.require(result["execution_plan"] == str(effective_path)
+                      and result["execution_plan_sha256"] == effective_pin,
+                      "worker_execution_plan_pin_mismatch")
+        if runtime is not None:
+            shard.require(result["fixture_runtime_mapping"] == runtime["fixture_runtime_mapping"],
+                          "worker_fixture_runtime_mapping_drift")
     if runtime is not None:
         shard.require(result["runtime"] == runtime["runtime"], "worker_runtime_drift")
         shard.require(result["runtime_sha256"] == shard.digest(
             Path(config["artifacts"]) / "worker-probe/worker.json"), "worker_runtime_pin_mismatch")
-    if job["phase"] == "probe":
+    if job["phase"] == "probe" or job["phase"] == "shard" and plan["schema_version"] == 2:
         collection_path = Path(job["output"]) / "collection/collection.json"
-        shard.require(shard.read(collection_path, result["collection_sha256"])["nodeids"]
-                      == plan["collection"]["nodeids"], "probe_collection_membership_mismatch")
+        collection = shard.read(collection_path, result["collection_sha256"])
+        shard.require(collection["nodeids"] == plan["collection"]["nodeids"],
+                      "probe_collection_membership_mismatch")
+        if plan["schema_version"] == 2:
+            shard.require(collection == shard.read(effective["collection"]["path"],
+                          effective["collection"]["sha256"]), "container_fixture_audit_drift")
     if job["phase"] == "shard":
         item = result["shard"]
         folder = Path(config["artifacts"]) / f"shard-{job['id']}"
@@ -576,17 +776,22 @@ def worker_failure(job):
 
 def combined_report(config, plan, jobs):
     artifacts = Path(config["artifacts"])
+    runtime = shard.read(artifacts / "worker-probe/worker.json")
+    _, effective_path, effective_pin = execution_plan(config, plan, runtime)
     results = [shard.read(Path(job["output"]) / "worker.json")["shard"]
                for job in jobs if job["phase"] == "shard"]
     summary = {
         "schema_version": 1, "verdict": "PASS", "mode": "tests", "coverage": "tests",
         "targets": ["tests"], "source": plan["source"], "shards": results,
-        "tests": shard.combine(plan, results), "plan": config["plan"],
-        "plan_sha256": config["plan_sha256"], "failures": [], "not_admitted": [],
+        "tests": shard.combine(plan, results), "plan": str(effective_path),
+        "plan_sha256": effective_pin, "failures": [], "not_admitted": [],
         "qualification": "full CPU correctness only; independent container replay pending",
         "source_consistency": shard.consistent(Path(plan["repo"]), plan["source"]),
         "finished_at": stamp(), "speedup": None,
     }
+    if plan["schema_version"] == 2:
+        summary.update(plan_schema_version=2, source_transport_plan_sha256=config["plan_sha256"],
+                       fixture_transport_contract=FIXTURE_TRANSPORT)
     combined = ET.Element("testsuites", name="openopt cluster CPU regression")
     for item in sorted(results, key=lambda value: value["id"]):
         root = ET.parse(item["junit"]).getroot()
@@ -701,6 +906,15 @@ def check(config_path, config_pin):
     verify_accepted(config, plan, state)
     audit = shard.read(state["acceptance"], state["acceptance_sha256"])
     summary = shard.read(artifacts / "verification.json", state["report_sha256"])
+    if plan["schema_version"] == 2:
+        runtime = shard.read(artifacts / "worker-probe/worker.json", state["runtime_sha256"])
+        _, effective_path, effective_pin = execution_plan(config, plan, runtime)
+        shard.require(summary["plan"] == str(effective_path)
+                      and summary["plan_sha256"] == effective_pin
+                      and summary["plan_schema_version"] == 2
+                      and summary["source_transport_plan_sha256"] == config["plan_sha256"]
+                      and summary["fixture_transport_contract"] == FIXTURE_TRANSPORT,
+                      "combined_fixture_transport_binding_mismatch")
     shard.require(audit["source"] == plan["source"] and audit["tests"] == summary["tests"]
                   and audit["verdict"] == "PASS", "container_acceptance_mismatch")
     print(f"OPENOPT_CLUSTER_CHECK verdict=PASS coverage=tests gpu=0 "
@@ -725,6 +939,8 @@ def main(argv=None):
     parser.add_argument("--memory", default="16Gi")
     parser.add_argument("--node")
     parser.add_argument("--submit", action="store_true")
+    parser.add_argument("--fixture-aware", action="store_true",
+                        help="plan-only opt-in to pinned v2 fixture/runtime transport")
     parser.add_argument("--phase", choices=("probe", "shard", "check"))
     parser.add_argument("--output", type=Path)
     parser.add_argument("--shard-id", type=int)
@@ -737,14 +953,18 @@ def main(argv=None):
         if args.action == "plan":
             prepare(args.repo.resolve(), args.plan, args.plan_sha256, args.artifact_dir,
                     args.image, args.python, args.namespace, args.pvc, args.service_account,
-                    args.priority_class, args.cpu, args.memory, args.node)
+                    args.priority_class, args.cpu, args.memory, args.node, args.fixture_aware)
         elif args.action == "run":
+            shard.require(not args.fixture_aware, "fixture_opt_in_is_plan_only")
             admit(args.plan, args.plan_sha256, args.submit)
         elif args.action == "collect":
+            shard.require(not args.fixture_aware, "fixture_opt_in_is_plan_only")
             collect(args.plan, args.plan_sha256)
         elif args.action == "check":
+            shard.require(not args.fixture_aware, "fixture_opt_in_is_plan_only")
             check(args.plan, args.plan_sha256)
         else:
+            shard.require(not args.fixture_aware, "fixture_opt_in_is_plan_only")
             shard.require(args.output is not None and args.phase is not None,
                           "worker_output_and_phase_required")
             worker(args.plan, args.plan_sha256, args.phase, args.output, args.shard_id,
