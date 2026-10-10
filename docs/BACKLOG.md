@@ -60,6 +60,13 @@ complete active-set algorithm. Complete original checks and nonworsening
 baseline accuracy are required. Frozen numerical proof producers and bounded
 one-case-per-Job dispatch are implemented; current-source GPU execution and
 independent cluster/source/sidecar binding remain separate acceptance gates.
+Conservative exact zero-row/+1 identity-equality presolve is implemented and
+publicly exported, disabled by default. Sealed maps, offset and signed dual
+postsolve enforce complete original-model acceptance. Unsupported or
+nonrepresentable fixed substitutions remain unchanged. Installed-wheel probes
+exercise a genuine reduction and original-coordinate solve; full commercial
+presolve, representative benefit and same-source CUDA qualification remain
+unverified.
 
 Historical evidence is linked by the generated v3 report. The earlier v2 experiment
 is historical, byte-frozen evidence; its original source is not replaced.

@@ -12,6 +12,9 @@
   polishing/refinement require original-model numerical checks. API presence
   or CPU tests do not establish CUDA execution, complete cone/MIP scope,
   arbitrary-precision guarantees or commercial qualification.
+  Exact zero-row/+1 identity-equality presolve is also opt-in; sealed
+  reductions must restore and pass all original-model checks. Unsupported
+  substitutions remain unchanged. This is not full commercial presolve.
 - Product direction: a general-purpose GPU-accelerated optimizer targeting
   commercial-grade correctness, robustness and performance. Gurobi and CPLEX
   are LP/QP/MIP baselines; MOSEK is a convex/conic baseline. This is a target,

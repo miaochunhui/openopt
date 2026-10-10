@@ -95,7 +95,12 @@ prototype. `solve_native_conic` requires `NativeConicConfig(enabled=True)` and
 accepts candidates only after independent original-model cone/KKT/gap checks.
 `refine_qp_candidate` provides opt-in unregularized active-set polishing and
 finite-precision residual correction, requiring complete original-coordinate
-checks and nonworsening accuracy. Neither changes the default solver path.
+checks and nonworsening accuracy. `solve_presolved_qp` offers opt-in exact
+zero-row removal and +1 identity-equality fixing, with sealed mappings,
+objective offsets and full original-coordinate primal/dual/gap acceptance.
+Unsupported or nonrepresentable fixed substitutions remain in the model.
+These extensions do not change the default solver path or constitute full
+commercial presolve.
 Their real GPU qualification is separate from CPU tests and API availability.
 MILP has an explicitly selected HiGHS CPU reference backend
 with independent incumbent checks, not a native GPU search engine.
@@ -106,7 +111,8 @@ There is no universal `openopt.minimize`. See
 [the exact boundary](docs/qp-design.md) and
 [release completion gates](docs/release-contract.md).
 See [native conic limits](docs/research/native-conic.md) and
-[refinement acceptance](docs/research/refinement.md).
+[refinement acceptance](docs/research/refinement.md), as well as
+[conservative presolve](docs/research/presolve.md).
 GPU acceleration is not automatically preferable: small problems measured
 slower on GPU. Explicit requests never silently fall back.
 

@@ -82,6 +82,17 @@ and cannot worsen baseline feasibility/stationarity/sign/complementarity/gap.
 Singular systems remain unknown; wrong guesses are rejected and preserve
 baseline values. Neither prototype is a default-path optimization.
 
+`openopt.presolve` separately offers disabled-by-default exact zero-row removal
+and +1 identity-equality fixing. Rational host auditing rejects nonrepresentable
+fixed substitutions rather than perturbing the problem. Sealed original,
+working and reduced models retain maps, shifts and objective offset; postsolve
+restores primal and signed equality multipliers and reruns every original
+feasibility/stationarity/sign/complementarity/dual-gap gate. Exact contradictory
+zero rows may produce independently checked numerical Farkas evidence, not
+exact certificates. Other presolve rules are unsupported. Host structural
+auditing and replay are explicit transfer costs, not a CPU solve fallback or
+a demonstrated performance benefit. See `research/presolve.md`.
+
 The restricted MPS/QPS importer freezes original bytes, model arrays, objective
 sense/offset and bounds. Unsupported constructs are rejected rather than
 silently dropped. Acquisition and public-model qualification are separate

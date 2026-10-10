@@ -32,6 +32,9 @@ from .native_conic import (
     project_cones, prepare_native_conic, solve_native_conic,
 )
 from .refinement import RefinementConfig, RefinedQPCandidate, refine_qp_candidate
+from .presolve import (
+    PresolveConfig, PresolvedQP, PresolvedQPResult, presolve_qp, solve_presolved_qp,
+)
 
 __all__ = list(_openpo_all) + [
     "PreparedQP", "QPConfig", "QPProblem", "QPResult", "prepare_qp", "solve_qp",
@@ -49,5 +52,6 @@ __all__ = list(_openpo_all) + [
     "NativeConicConfig", "NativeConicResult", "PreparedNativeConic",
     "project_cones", "prepare_native_conic", "solve_native_conic",
     "RefinementConfig", "RefinedQPCandidate", "refine_qp_candidate",
+    "PresolveConfig", "PresolvedQP", "PresolvedQPResult", "presolve_qp", "solve_presolved_qp",
 ]
 __version__ = "0.1.0"

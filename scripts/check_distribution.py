@@ -139,6 +139,23 @@ def installed_probe(target):
     )
     if not polished.accepted or not polished.evidence.passed:
         raise ValueError("isolated wheel original-coordinate QP refinement failed")
+    fixed = openopt.QPProblem(
+        general.P, general.q, general.A,
+        torch.tensor([0.5, 0.0], dtype=torch.float64),
+        torch.tensor([0.5, 1.0], dtype=torch.float64),
+    )
+    presolved = openopt.solve_presolved_qp(
+        fixed, presolve=openopt.PresolveConfig(enabled=True),
+    )
+    if (
+        presolved.status != "solved" or not presolved.evidence.passed
+        or presolved.presolved.fixed_variables.tolist() != [0]
+        or presolved.presolved.free_variables.tolist() != [1]
+        or not torch.allclose(
+            presolved.x, torch.tensor([0.5, 0.0], dtype=torch.float64), atol=1e-6,
+        )
+    ):
+        raise ValueError("isolated wheel exact presolve/original postsolve failed")
     integer = openopt.MILPProblem(
         q=[-1.0], A=[[1.0]], l=[0.0], u=[1.5],
         lower=[0.0], upper=[2.0], integrality=[1],
@@ -146,7 +163,7 @@ def installed_probe(target):
     integer_result = openopt.solve_milp(integer, openopt.MILPConfig(backend="highspy"))
     if integer_result.status != "optimal" or integer_result.incumbent != -1.0:
         raise ValueError("isolated wheel MILP CPU reference failed")
-    for name in ("native_conic", "refinement"):
+    for name in ("native_conic", "refinement", "presolve"):
         module = sys.modules[f"openopt.{name}"]
         if not Path(module.__file__).resolve().is_relative_to(target):
             raise ValueError(f"extension loaded outside isolated wheel: {name}")
