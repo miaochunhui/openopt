@@ -20,6 +20,7 @@ import math
 import os
 from pathlib import Path
 import re
+import subprocess
 import sys
 
 import pytest
@@ -53,6 +54,11 @@ def sources():
 def strict_cuda():
     if os.environ.get("OPENOPT_RUN_OPERATOR_CUDA") != "1":
         pytest.skip("operator CUDA opt-in disabled; CUDA qualification UNVERIFIED")
+    return required_cuda_device()
+
+
+def required_cuda_device():
+    """No environment/skip branch: selecting the formal entry requests CUDA."""
     if not torch.cuda.is_available():
         raise RuntimeError("explicit operator CUDA requested but unavailable; no CPU fallback")
     if torch.cuda.device_count() != 1:
@@ -410,6 +416,103 @@ def test_cuda_callback_returning_cpu_tensor_rejected(monkeypatch):
     bad = engine.OperatorQPProblem(problem.P, problem.q, broken, problem.l, problem.u, assume_psd=True)
     with pytest.raises(ValueError, match="device/dtype"):
         engine.prepare_operator_qp(bad, config(device, torch.float64))
+
+
+FORMAL_CASES = [
+    pytest.param("model", kind, name, dtype, id=f"{precision}-{name}-{kind}")
+    for dtype, precision in ((torch.float64, "f64"), (torch.float32, "f32"))
+    for name in MODELS for kind in KINDS
+] + [
+    pytest.param("conversion", kind, loss, torch.float32, id=f"f32-{loss}-{kind}")
+    for loss in LOSSES for kind in KINDS
+] + [
+    pytest.param("zero_row", kind, "zero_row", torch.float64, id=f"f64-zero_row-{kind}")
+    for kind in KINDS
+] + [pytest.param("callback", "matrix_free", "callback_cpu", torch.float64,
+                  id="f64-callback_cpu-matrix_free")]
+
+
+def formal_entry_selected(pytest_config):
+    entry = "test_cuda_collection_entry"
+    return (any("::" + entry in str(target) for target in pytest_config.args)
+            or entry in pytest_config.option.keyword)
+
+
+@pytest.mark.parametrize("role,kind,name,dtype", FORMAL_CASES)
+def test_cuda_collection_entry(role, kind, name, dtype, monkeypatch, tmp_path, request):
+    """Explicit target/keyword authorizes strict CUDA without worker env changes."""
+    if not formal_entry_selected(request.config):
+        pytest.skip("formal CUDA collection entry not explicitly selected; UNVERIFIED")
+    device = required_cuda_device()
+    # Check real device first; opt-in only lives inside this selected node.
+    with monkeypatch.context() as patch:
+        patch.setenv("OPENOPT_RUN_OPERATOR_CUDA", "1")
+        assert strict_cuda() == device
+        if role == "model":
+            test_cuda_original_models_fraction(kind, name, dtype, patch, tmp_path, request)
+        elif role == "conversion":
+            test_cuda_original_conversion_refused(kind, name, patch, tmp_path, request)
+        elif role == "zero_row":
+            test_cuda_zero_row_cannot_borrow_other_row_scale(kind, patch, tmp_path, request)
+        else:
+            assert role == "callback"
+            test_cuda_callback_returning_cpu_tensor_rejected(patch)
+
+
+@pytest.mark.parametrize("failure", ("unavailable", "count", "hardware"))
+def test_cpu_formal_entry_requires_device_before_optin(failure, monkeypatch, tmp_path, request):
+    from types import SimpleNamespace
+
+    monkeypatch.delenv("OPENOPT_RUN_OPERATOR_CUDA", raising=False)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: failure != "unavailable")
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2 if failure == "count" else 1)
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda _: "wrong hardware")
+    fake_request = SimpleNamespace(config=SimpleNamespace(
+        args=["tests/test_operator_original_cuda.py::test_cuda_collection_entry"],
+        option=SimpleNamespace(keyword="")))
+    message = {"unavailable": "unavailable; no CPU fallback", "count": "exactly one",
+               "hardware": "RTX PRO 4500"}[failure]
+    with pytest.raises(RuntimeError, match=message):
+        test_cuda_collection_entry("model", "dense", "interior_qp", torch.float64,
+                                   monkeypatch, tmp_path, fake_request)
+    assert "OPENOPT_RUN_OPERATOR_CUDA" not in os.environ
+
+
+def test_cpu_formal_entry_selection_is_explicit():
+    from types import SimpleNamespace
+
+    for targets, keyword, expected in (
+        (["tests/test_operator_original_cuda.py"], "", False),
+        (["tests/test_operator_original_cuda.py"], "test_cuda", False),
+        (["tests/test_operator_original_cuda.py::test_cuda_collection_entry[f64-interior_qp-dense]"], "", True),
+        (["tests/test_operator_original_cuda.py"], "test_cuda_collection_entry", True),
+    ):
+        assert formal_entry_selected(SimpleNamespace(
+            args=targets, option=SimpleNamespace(keyword=keyword))) is expected
+    ids = [case.id for case in FORMAL_CASES]
+    assert len(ids) == len(set(ids)) == 53
+
+
+def test_cpu_formal_cli_collection_membership(tmp_path):
+    entry = "tests/test_operator_original_cuda.py::test_cuda_collection_entry"
+    expected = {f"{entry}[{case.id}]" for case in FORMAL_CASES}
+    env = os.environ.copy()
+    env.pop("OPENOPT_RUN_OPERATOR_CUDA", None)
+    env.update(PYTHONPATH=os.pathsep.join((str(ROOT), str(ROOT / "src"))),
+               PYTEST_DISABLE_PLUGIN_AUTOLOAD="1", PYTHONDONTWRITEBYTECODE="1")
+    for name, selection in (("target", [entry]),
+                            ("expression", ["tests/test_operator_original_cuda.py",
+                                            "-k", "test_cuda_collection_entry"])):
+        command = [sys.executable, "-m", "pytest", "--collect-only", "-q",
+                   "-o", f"cache_dir={tmp_path / name}", *selection]
+        result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True)
+        write(tmp_path / f"{name}-collection.json", {
+            "command": command, "returncode": result.returncode,
+            "stdout": result.stdout, "stderr": result.stderr,
+            "scope": "CPU collection only; not CUDA execution"})
+        assert result.returncode == 0, "formal collection CLI failed"
+        nodes = [line for line in result.stdout.splitlines() if line.startswith(entry + "[")]
+        assert len(nodes) == len(set(nodes)) == 53 and set(nodes) == expected
 
 
 def scan(argv=None):

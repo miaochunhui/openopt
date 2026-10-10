@@ -48,12 +48,22 @@ Use the existing validation interpreter, infra identity, hidden CUDA and
 single-thread OMP/OpenBLAS/MKL. CPU mechanisms run actual solves, but never
 qualify CUDA. CUDA nodes default to explicit opt-in-disabled skips.
 
-Coordinator formal one-card worker environment must include
-`OPENOPT_RUN_OPERATOR_CUDA=1`. Then the unchanged existing entry is:
+The original CUDA nodes still require `OPENOPT_RUN_OPERATOR_CUDA=1`.
+The shared launch chain does not supply that new variable. Instead, explicitly
+select the separate formal collection entry through the unchanged wrapper:
 
 ```text
-scripts/gpu_release_check.py --target tests/test_operator_original_cuda.py --expression test_cuda --artifact-dir ASSIGNED_EXTERNAL_CASE
+scripts/gpu_release_check.py --target tests/test_operator_original_cuda.py::test_cuda_collection_entry --expression test_cuda_collection_entry --artifact-dir ASSIGNED_EXTERNAL_CASE
 ```
+
+This selects exactly 53 distinct parameterized nodes: 32 original models,
+16 conversion refusals, four zero-row contradictions and one off-device
+callback control. Each checks actual CUDA availability, exactly one device
+and RTX PRO 4500 before setting the opt-in only for that node; then it calls
+the unchanged original case logic. No selected formal node has a skip path.
+Selecting one parameterized node is supported for coordinator sharding.
+Default full-file CPU tests leave the formal entry disabled; broad `test_cuda`
+is not the formal selection and must not be used without the old opt-in.
 
 Opt-in CUDA unavailable, wrong device count or wrong hardware FAIL instead of
 skipping/falling back. Actual placements must be `cuda:0`; a CUDA callback
@@ -132,3 +142,23 @@ must be read from their terminal receipts, not inferred from these names.
 No CUDA solve, kernel trace, GPU acceptance, latency/speedup or commercial
 comparison has been run by this owner. Independent review is pending before
 coordinator dispatch. Owner CPU PASS never closes those gates.
+
+Collection-entry follow-up retains the prior freeze and failures unchanged:
+
+- `operator-original-cuda/collection-entry-unit-v1/tests-7dr9t6rl/verification.json`:
+  61 passed, 106 disabled CUDA nodes, 37.96s, development source consistency
+  PASS. Five additional CPU mechanisms verify unavailable/count/hardware
+  refusal before setting opt-in, explicit selection and real CLI collection
+  membership for both target/expression. Receipt SHA256
+  `adc0b63de162855be891181b18e770de34fc2e9eec0a0cf8932e14638774faff`.
+- `operator-original-cuda/collection-entry-unavailable-v1/tests-0f1ls7py/verification.json`:
+  actual full formal target with opt-in variable removed and CUDA hidden,
+  53 failures, zero skips, 8.02s, exit 1. Every first cause is unavailable CUDA,
+  not a solver acceptance. Receipt SHA256
+  `efc17441ad3fa78ae41a8c12729d32f90abd62b7689bce48321d7f036f033fbc`.
+
+Frozen follow-up receipts use separate `collection-entry-clean-unit-v1`,
+`collection-entry-clean-smoke-v1` and `collection-entry-clean-unavailable-v1`
+roots. Only their actual final outputs establish owner test outcomes.
+The entry is executable through the existing CLI, but actual successful
+RTX execution remains UNVERIFIED until independent review and main dispatch.
