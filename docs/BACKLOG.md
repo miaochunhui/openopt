@@ -105,6 +105,21 @@ entry. These are not promoted to DONE.
 
 ## Release4 Current Stop Gates
 
+Current source/evidence and owners are in `handoff/release4-20261011.md`.
+Loaded Product callable admission has two independently reproduced false accepts;
+four exponential smooth positives remain independently rejected. Both are in
+repair, not accepted. HSD tiny CPU epigraph owner37/independent53 and report
+owner41/independent41 passed actual chair readback, with their bounded scopes
+retained. CUDA harness candidate CPU29 passes after a retained missing-dependency
+failure, but its caller-source review and GPU admission remain pending.
+Outgoing main scan has two shape findings undergoing independent disposition;
+no new push/publication. Actual commercial SDK/solve/license counts remain zero,
+and the latest live snapshot retains three unattributed historical failures.
+General capabilities, licensed comparisons, whole-source regression, multi-GPU
+scaling and coordinated online publication remain incomplete. Goal stays active.
+
+The following 2026-10-10 snapshots are historical:
+
 The newest operational source/evidence is the 23:35 +08:00 section of
 `handoff/release4-20261010.md`; older bullets below are historical snapshots.
 Main0bd236e offline gate45 passed with zero skips; real known-evidence check
