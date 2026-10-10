@@ -2,12 +2,19 @@
 
 from dataclasses import asdict, replace
 import argparse
+import ast
 from fractions import Fraction
 import hashlib
 import json
+import importlib.util
 import os
 from pathlib import Path
 import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from xml.etree import ElementTree
 
 import numpy as np
 import pytest
@@ -282,14 +289,30 @@ def test_model_and_original_property_are_frozen():
         prepared.solve()
 
 
-def test_source_byte_tamper_rejects(monkeypatch, tmp_path):
+def load_hsd_external(source, name):
+    spec = importlib.util.spec_from_file_location(name, source)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(name, None)
+        raise
+    return module
+
+
+def test_source_byte_tamper_rejects(tmp_path):
     source = tmp_path / "hsd_lp.py"
     source.write_bytes(Path(hsd.__file__).read_bytes())
-    monkeypatch.setattr(hsd, "__file__", str(source))
-    prepared = prepare_hsd_lp(equality(), config())
-    source.write_bytes(source.read_bytes() + b"\n# tampered source\n")
-    with pytest.raises(RuntimeError, match="source/projection binding"):
-        prepared.solve()
+    name = "openopt._hsd_owner_disk_tamper"
+    try:
+        module = load_hsd_external(source, name)
+        prepared = module.prepare_hsd_lp(equality(), module.HSDLPConfig(enabled=True))
+        source.write_bytes(source.read_bytes() + b"\n# tampered source\n")
+        with pytest.raises(RuntimeError, match="binding.*source buffer changed"):
+            prepared.solve()
+    finally:
+        sys.modules.pop(name, None)
 
 
 def test_runtime_thread_change_rejects(monkeypatch):
@@ -564,6 +587,182 @@ def test_actual_receipt_and_rehashed_tamper_controls(tmp_path, monkeypatch):
             replay_record(json.loads(tamper_path.read_text()))
 
 
+@pytest.mark.parametrize("function", ["check_hsd_candidate", "check_hsd_primal_ray"])
+def test_loaded_checker_restored_disk_rejects(function, tmp_path):
+    """Same actual load/restore control as the frozen independent red review."""
+    trusted = Path(hsd.__file__).read_bytes()
+    source = tmp_path / "hsd_lp.py"
+    source.write_bytes(trusted)
+    name = "openopt._hsd_owner_" + function
+
+    def load():
+        return load_hsd_external(source, name)
+
+    try:
+        baseline = load()
+        budget = 10 if function == "check_hsd_candidate" else 2
+        p = equality() if function == "check_hsd_candidate" else infeasible()
+        original = baseline.solve_hsd_lp(
+            p, baseline.HSDLPConfig(enabled=True, max_iterations=budget, check_interval=1),
+        )
+        assert original.status == "max_iterations"
+        tree = ast.parse(trusted)
+        node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == function)
+        lines = trusted.decode().splitlines(keepends=True)
+        malicious = (
+            f"def {function}(*args, **kwargs):\n"
+            "    return HSDLPCheck('altered', True, {'false_accept': True}, {}, {})\n"
+        )
+        source.write_text("".join(lines[:node.lineno - 1]) + malicious
+                          + "".join(lines[node.end_lineno:]))
+        altered_sha = hashlib.sha256(source.read_bytes()).hexdigest()
+        module = load()
+        source.write_bytes(trusted)
+        assert source.read_bytes() == trusted
+        rejected = False
+        rejection_reason = None
+        result = None
+        try:
+            result = module.solve_hsd_lp(
+                p, module.HSDLPConfig(enabled=True, max_iterations=budget, check_interval=1),
+            )
+        except RuntimeError as error:
+            assert "binding" in str(error).lower() or "source" in str(error).lower()
+            rejected = True
+            rejection_reason = str(error)
+        (tmp_path / "loaded-restore.json").write_text(json.dumps({
+            "checker": function, "rejected": rejected,
+            "rejection_reason": rejection_reason, "original_model": model_record(p),
+            "baseline_status": original.status,
+            "altered_source_sha256": altered_sha,
+            "restored_sha256": hashlib.sha256(trusted).hexdigest(),
+            "result": None if result is None else serial_result(result),
+            "qualification": "synthetic CPU negative control; no CUDA qualification",
+        }, allow_nan=False) + "\n")
+        assert rejected, "actual altered loaded checker accepted after trusted disk restoration"
+    finally:
+        source.write_bytes(trusted)
+        sys.modules.pop(name, None)
+
+
+@pytest.mark.parametrize("stage", ["prepare", "solve"])
+@pytest.mark.parametrize("mutation", [
+    "helper", "kwdefault", "posdefault", "config_default", "config_field", "config_init",
+    "config_eq", "check_class", "class_getattribute", "class_extra",
+    "projector_alias", "projector_wrapper", "projector_closure",
+    "cone_alias", "dimension_helper", "fraction_alias", "numpy_alias", "global_cap",
+    "binding_require", "binding_codes", "binding_entry",
+])
+def test_actual_loaded_closure_changes_reject(stage, mutation, monkeypatch, tmp_path):
+    prepared = prepare_hsd_lp(equality(), config()) if stage == "solve" else None
+    import openopt.conic as conic_module
+    import openopt.native_conic as native_module
+
+    def bad(*args, **kwargs):
+        return None
+
+    if mutation == "helper":
+        monkeypatch.setattr(hsd, "_dot", bad)
+    elif mutation == "kwdefault":
+        monkeypatch.setattr(hsd.check_hsd_candidate, "__kwdefaults__",
+                            {"eps_abs": 1e-3, "eps_rel": 1e-7})
+    elif mutation == "posdefault":
+        monkeypatch.setattr(hsd._model, "__defaults__", (255,))
+    elif mutation == "config_default":
+        monkeypatch.setattr(hsd.HSDLPConfig, "eps_abs", 1e-3)
+    elif mutation == "config_field":
+        monkeypatch.setattr(hsd.HSDLPConfig.__dataclass_fields__["eps_abs"], "default", 1e-3)
+    elif mutation in ("config_init", "config_eq"):
+        monkeypatch.setattr(hsd.HSDLPConfig, "__init__" if mutation == "config_init" else "__eq__", bad)
+    elif mutation == "check_class":
+        monkeypatch.setattr(hsd, "HSDLPCheck", type("HSDLPCheck", (), {}))
+    elif mutation == "class_getattribute":
+        monkeypatch.setattr(hsd.PreparedHSDLP, "__getattribute__", bad)
+    elif mutation == "class_extra":
+        monkeypatch.setattr(hsd.PreparedHSDLP, "__getattr__", bad, raising=False)
+    elif mutation == "projector_alias":
+        monkeypatch.setattr(hsd, "project_cones", bad)
+    elif mutation == "projector_wrapper":
+        trusted = native_module.project_cones
+
+        def misleading(*args, **kwargs):
+            return trusted(*args, **kwargs)
+        misleading.__wrapped__ = trusted.__wrapped__
+        monkeypatch.setattr(native_module, "project_cones", misleading)
+        monkeypatch.setattr(hsd, "project_cones", misleading)
+    elif mutation == "projector_closure":
+        wrapper = native_module.project_cones
+        cell = dict(zip(wrapper.__code__.co_freevars, wrapper.__closure__))["func"]
+        original = cell.cell_contents
+        cell.cell_contents = bad
+        try:
+            with pytest.raises(RuntimeError, match="binding"):
+                (prepared.solve() if stage == "solve" else prepare_hsd_lp(equality(), config()))
+        finally:
+            cell.cell_contents = original
+        return
+    elif mutation == "cone_alias":
+        monkeypatch.setattr(hsd, "SecondOrderCone", conic_module.NonnegativeCone)
+    elif mutation == "dimension_helper":
+        monkeypatch.setattr(conic_module, "_dimension", bad)
+    elif mutation == "fraction_alias":
+        monkeypatch.setattr(hsd, "Fraction", float)
+    elif mutation == "numpy_alias":
+        monkeypatch.setattr(hsd, "np", type("FakeNumpy", (), {})())
+    elif mutation == "binding_require":
+        monkeypatch.setattr(hsd, "_binding_require", bad)
+    elif mutation == "binding_codes":
+        monkeypatch.setattr(hsd, "_binding_codes", bad)
+    elif mutation == "binding_entry":
+        monkeypatch.setattr(hsd, "_loaded_binding", bad)
+    else:
+        monkeypatch.setattr(hsd, "MAX_ITERATIONS", 10001)
+    rejected = False
+    reason = None
+    try:
+        if stage == "solve":
+            hsd.PreparedHSDLP.solve(prepared)
+        else:
+            prepare_hsd_lp(equality(), config())
+    except (RuntimeError, TypeError) as error:
+        rejected = True
+        reason = str(error)
+    (tmp_path / "closure-negative.json").write_text(json.dumps({
+        "stage": stage, "mutation": mutation, "rejected": rejected, "reason": reason,
+        "source_sha256": hashlib.sha256(Path(hsd.__file__).read_bytes()).hexdigest(),
+    }, allow_nan=False) + "\n")
+    assert rejected and ("binding" in reason or mutation == "config_init")
+
+
+def test_subclass_and_extra_config_cannot_override_validate():
+    class MaliciousConfig(HSDLPConfig):
+        def validate(self):
+            pytest.fail("subclass validation must never execute")
+    with pytest.raises(TypeError, match="config must"):
+        prepare_hsd_lp(equality(), MaliciousConfig(enabled=True))
+    supplied = config()
+    object.__setattr__(supplied, "extra_behavior", True)
+    with pytest.raises(TypeError, match="config must"):
+        prepare_hsd_lp(equality(), supplied)
+
+
+def test_post_solve_loaded_helper_change_rejects(monkeypatch):
+    prepared = prepare_hsd_lp(equality(), config(max_iterations=1))
+    original = torch.linalg.lu_solve
+    calls = []
+
+    def mutate_during_solve(*args, **kwargs):
+        calls.append(1)
+        result = original(*args, **kwargs)
+        monkeypatch.setattr(hsd.check_hsd_candidate, "__kwdefaults__",
+                            {"eps_abs": 1e-7, "eps_rel": 0.0})
+        return result
+    monkeypatch.setattr(torch.linalg, "lu_solve", mutate_during_solve)
+    with pytest.raises(RuntimeError, match="binding.*defaults"):
+        prepared.solve()
+    assert len(calls) == 1
+
+
 @pytest.mark.skipif(os.environ.get("OPENOPT_RUN_HSD_CUDA_TESTS") != "1",
                     reason="owner-only explicit CUDA target; local CPU is not CUDA evidence")
 def test_cuda_actual_residency_and_analytic_candidate():
@@ -579,11 +778,206 @@ def test_cuda_actual_residency_and_analytic_candidate():
     assert check_hsd_candidate(equality(), host(result.x), host(result.s), host(result.y)).passed
 
 
+SCOPED_PATHS = ("src/openopt/hsd_lp.py", "tests/test_hsd_lp.py", "docs/research/hsd-lp.md")
+
+
+def scan_scoped_sources(artifact_root, scan_tool, needle_file):
+    """Reuse the existing literal scanner without its unsafe secret-tail output."""
+    root = Path(__file__).resolve().parents[1]
+    artifact_root = artifact_root.resolve()
+    assert not artifact_root.is_relative_to(root)
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    directory = Path(tempfile.mkdtemp(prefix="scan-", dir=artifact_root))
+    spec = importlib.util.spec_from_file_location("_hsd_scanner", scan_tool)
+    scanner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(scanner)
+    needle = needle_file.read_text().strip()
+    assert needle, "empty scanner sensitivity anchor"
+    paths = [str(root / p) for p in SCOPED_PATHS]
+    hashes = {p: hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in paths}
+    hits, _ = scanner.scan_literal(paths, [needle])
+    shape = re.compile(
+        r"(?i)IDENTIFIED" + r" BY|pass" + r"""word["']?\s*[:=]\s*["'][^"']{6,}"""
+        r"|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"
+    )
+    shape_hits = sum(bool(shape.search(Path(p).read_text())) for p in paths)
+    canary = directory / "sensitivity.txt"
+    anchor = "hsd-binding-scan-" + "not-a-credential"
+    canary.write_text(anchor)
+    seen, _ = scanner.scan_literal([str(canary)], [anchor])
+    canary.write_text("cleared sensitivity fixture\n")
+    cleared, _ = scanner.scan_literal([str(canary)], [anchor])
+    after = {p: hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in paths}
+    receipt = {"verdict": "PASS" if hits == shape_hits == cleared == 0 and seen == 1
+               and hashes == after else "FAIL", "files": hashes,
+               "literal_hits": hits, "shape_hits": shape_hits,
+               "sensitivity_seen": seen, "sensitivity_removed": cleared == 0,
+               "source_unchanged": hashes == after,
+               "scan_tool_sha256": hashlib.sha256(scan_tool.read_bytes()).hexdigest()}
+    destination = directory / "scan.json"
+    destination.write_text(json.dumps(receipt, indent=2, allow_nan=False) + "\n")
+    print(json.dumps({"verdict": receipt["verdict"], "receipt": str(destination)}))
+    return 0 if receipt["verdict"] == "PASS" else 1
+
+
+def audit_unit_receipt(path, sha256, owner_commit):
+    """Check clean current bytes and the exact actual collection/JUnit denominator."""
+    from scripts.verify import source_snapshot
+    root = Path(__file__).resolve().parents[1]
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == sha256, "caller receipt pin"
+    receipt = json.loads(path.read_text())
+    current = source_snapshot(root)
+    assert current["clean"] and current["commit"] == owner_commit
+    assert receipt["source"] == current and receipt["source_consistency"]["verdict"] == "PASS"
+    assert receipt["targets"] == ["tests/test_hsd_lp.py"] and receipt["verdict"] == "PASS"
+    directory = path.parent
+    env = os.environ.copy()
+    env.update(PYTEST_DISABLE_PLUGIN_AUTOLOAD="1", PYTHONDONTWRITEBYTECODE="1",
+               PYTHONPATH=os.pathsep.join([str(root / "src"), str(root)]))
+    collected = subprocess.run(
+        [sys.executable, "-B", "-m", "pytest", "--collect-only", "-q",
+         "-o", f"cache_dir={directory / 'collection-cache'}", "tests/test_hsd_lp.py"],
+        cwd=root, env=env, text=True, capture_output=True, check=False,
+    )
+    (directory / "collection.log").write_text(
+        collected.stdout + collected.stderr + f"\nreturncode={collected.returncode}\n")
+    assert collected.returncode == 0
+    selection = [v for v in collected.stdout.splitlines() if v.startswith("tests/test_hsd_lp.py::")]
+    nodes = ElementTree.parse(directory / "pytest.xml").getroot().findall(".//testcase")
+    membership = [v.attrib["classname"] + "::" + v.attrib["name"] for v in nodes]
+    expected = ["tests.test_hsd_lp::" + v.split("::", 1)[1] for v in selection]
+    assert len(selection) == len(set(selection)) == len(nodes) == len(set(membership)) == 104
+    assert sorted(membership) == sorted(expected)
+    assert not any(v.find("failure") is not None or v.find("error") is not None for v in nodes)
+    skipped = [v for v in nodes if v.find("skipped") is not None]
+    assert len(skipped) == 1 and skipped[0].attrib["name"] == \
+        "test_cuda_actual_residency_and_analytic_candidate"
+    negatives = [json.loads(p.read_text()) for p in directory.rglob("loaded-restore.json")]
+    assert len(negatives) == 2 and all(v["rejected"] and v["rejection_reason"] for v in negatives)
+    closures = [json.loads(p.read_text()) for p in directory.rglob("closure-negative.json")]
+    assert len(closures) == 40 and all(v["rejected"] and v["reason"] for v in closures)
+    assert source_snapshot(root) == current
+    result = {"verdict": "HSD_LOADED_REPAIR_AUTHOR_PASS", "source": current,
+              "verification_sha256": sha256, "selection": selection, "membership": membership,
+              "tests": {"passed": 103, "skipped": 1, "failed": 0},
+              "skip_reason": skipped[0].find("skipped").attrib,
+              "loaded_restore_controls": negatives, "serialized_closure_controls": 40,
+              "runtime": {"python": sys.version, "numpy": np.__version__,
+                          "torch": str(torch.__version__), "cuda_available": torch.cuda.is_available(),
+                          "torch_threads": torch.get_num_threads(),
+                          "torch_interop_threads": torch.get_num_interop_threads()},
+              "artifact_sha256": {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                                  for p in (directory / "pytest.xml", directory / "pytest.log",
+                                            directory / "collection.log")},
+              "qualification": "author bounded CPU validation; unchanged independent review pending"}
+    destination = directory / "author-receipt.json"
+    destination.write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
+    print(json.dumps({"verdict": result["verdict"], "receipt": str(destination),
+                      "sha256": hashlib.sha256(destination.read_bytes()).hexdigest()}))
+    return 0
+
+
+def run_unchanged_review(artifact_root, reviewer_root, reviewer_commit, owner_commit):
+    """Run byte-identical historical tests against caller-pinned new production.
+
+    The historical in-module OWNER label is not rewritten or promoted. The
+    enclosing receipt binds actual new owner and reviewer bytes independently.
+    """
+    from scripts.verify import source_snapshot
+    root = Path(__file__).resolve().parents[1]
+    reviewer_root = reviewer_root.resolve()
+    artifact_root = artifact_root.resolve()
+    assert not artifact_root.is_relative_to(root) and not artifact_root.is_relative_to(reviewer_root)
+    before, review_before = source_snapshot(root), source_snapshot(reviewer_root)
+    assert before["clean"] and before["commit"] == owner_commit
+    assert review_before["clean"] and review_before["commit"] == reviewer_commit
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    directory = Path(tempfile.mkdtemp(prefix="unchanged-", dir=artifact_root))
+    mirror = directory / "source"
+    for name in before["sha256"]:
+        destination = mirror / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(root / name, destination)
+    review_paths = ("tests/test_hsd_lp_independent.py", "docs/research/hsd-lp-independent.md")
+    for name in review_paths:
+        destination = mirror / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(reviewer_root / name, destination)
+        assert destination.read_bytes() == (reviewer_root / name).read_bytes()
+    env = os.environ.copy()
+    env.update(CUDA_VISIBLE_DEVICES="-1", PYTHONDONTWRITEBYTECODE="1",
+               OPENBLAS_NUM_THREADS="1", OMP_NUM_THREADS="1", MKL_NUM_THREADS="1",
+               PYTEST_DISABLE_PLUGIN_AUTOLOAD="1", TMPDIR=str(directory),
+               PYTHONPATH=os.pathsep.join([str(mirror / "src"), str(mirror)]))
+    common = [sys.executable, "-B", "-m", "pytest", "-q", "-ra",
+              "-o", f"cache_dir={directory / 'cache'}"]
+    collected = subprocess.run(common + ["--collect-only", review_paths[0]], cwd=mirror,
+                               env=env, text=True, capture_output=True, check=False)
+    (directory / "collection.log").write_text(
+        collected.stdout + collected.stderr + f"\nreturncode={collected.returncode}\n")
+    assert collected.returncode == 0
+    selection = [v for v in collected.stdout.splitlines() if v.startswith(review_paths[0] + "::")]
+    assert len(selection) == len(set(selection)) == 45
+    command = common + ["--basetemp", str(directory / "tmp"),
+                        f"--junitxml={directory / 'pytest.xml'}", review_paths[0]]
+    with (directory / "pytest.log").open("x") as log:
+        log.write(f"command={command!r}\n")
+        log.flush()
+        execution = subprocess.run(command, cwd=mirror, env=env, stdout=log,
+                                   stderr=subprocess.STDOUT, check=False)
+        log.write(f"\nreturncode={execution.returncode}\n")
+    nodes = ElementTree.parse(directory / "pytest.xml").getroot().findall(".//testcase")
+    membership = [v.attrib["classname"] + "::" + v.attrib["name"] for v in nodes]
+    assert sorted(membership) == sorted(
+        "tests.test_hsd_lp_independent::" + v.split("::", 1)[1] for v in selection)
+    counts = {key: sum(v.find(tag) is not None for v in nodes) for key, tag in
+              (("failures", "failure"), ("errors", "error"), ("skipped", "skipped"))}
+    counts.update(tests=len(nodes), passed=len(nodes) - sum(counts.values()))
+    consistency = before == source_snapshot(root) and review_before == source_snapshot(reviewer_root)
+    for name, wanted in before["sha256"].items():
+        assert hashlib.sha256((mirror / name).read_bytes()).hexdigest() == wanted
+    result = {"verdict": "PASS" if execution.returncode == 0 and consistency else "FAIL",
+              "returncode": execution.returncode, "tests": counts,
+              "owner": before, "reviewer": review_before, "source_consistency": consistency,
+              "selection": selection, "membership": membership, "command": command,
+              "unchanged_review_hashes": {p: review_before["sha256"][p] for p in review_paths},
+              "runtime_env": {k: env[k] for k in ("CUDA_VISIBLE_DEVICES", "OPENBLAS_NUM_THREADS",
+                                                 "OMP_NUM_THREADS", "MKL_NUM_THREADS", "PYTHONPATH")},
+              "historical_internal_owner_label": "695df3b1f998ab4ede15c0172cd948cba1910173",
+              "qualification": "author replay of unchanged independent controls; not reviewer signoff",
+              "artifacts": {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in
+                            (directory / "pytest.log", directory / "pytest.xml",
+                             directory / "collection.log")}}
+    destination = directory / "receipt.json"
+    destination.write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
+    print(json.dumps({"verdict": result["verdict"], "tests": counts, "receipt": str(destination),
+                      "sha256": hashlib.sha256(destination.read_bytes()).hexdigest()}))
+    return execution.returncode or (0 if consistency else 2)
+
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="No-solve replay of the pinned bounded HSD CPU receipt")
-    parser.add_argument("--replay", required=True, type=Path)
-    parser.add_argument("--sha256", required=True)
+    parser = argparse.ArgumentParser(description="Pinned HSD CPU replay and scoped validation receipts")
+    parser.add_argument("--replay", type=Path)
+    parser.add_argument("--sha256")
+    parser.add_argument("--artifact-dir", type=Path)
+    parser.add_argument("--scan-tool", type=Path)
+    parser.add_argument("--needle-file", type=Path)
+    parser.add_argument("--audit-unit", type=Path)
+    parser.add_argument("--owner-commit")
+    parser.add_argument("--unchanged-review", type=Path)
+    parser.add_argument("--reviewer-commit")
     args = parser.parse_args()
+    if args.scan_tool:
+        assert args.artifact_dir and args.needle_file
+        raise SystemExit(scan_scoped_sources(args.artifact_dir, args.scan_tool, args.needle_file))
+    if args.audit_unit:
+        assert args.sha256 and args.owner_commit
+        raise SystemExit(audit_unit_receipt(args.audit_unit, args.sha256, args.owner_commit))
+    if args.unchanged_review:
+        assert args.artifact_dir and args.owner_commit and args.reviewer_commit
+        raise SystemExit(run_unchanged_review(args.artifact_dir, args.unchanged_review,
+                                             args.reviewer_commit, args.owner_commit))
+    assert args.replay and args.sha256
     if hashlib.sha256(args.replay.read_bytes()).hexdigest() != args.sha256:
         raise SystemExit("HSD replay caller byte pin mismatch")
     print(json.dumps(replay_record(json.loads(args.replay.read_text())), allow_nan=False))

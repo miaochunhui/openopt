@@ -11,7 +11,10 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from fractions import Fraction
+import ast
+import dataclasses
 import hashlib
+import inspect
 import json
 import math
 from pathlib import Path
@@ -19,6 +22,7 @@ import sys
 
 import numpy as np
 import torch
+from types import CodeType, FunctionType, ModuleType
 
 from .conic import ConicProblem, NonnegativeCone, SecondOrderCone, ZeroCone
 from .native_conic import project_cones
@@ -210,6 +214,319 @@ def _source_hashes() -> dict[str, str]:
         "openopt.native_conic": Path(sys.modules[project_cones.__module__].__file__).resolve(),
     }
     return {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in paths.items()}
+
+
+def _binding_require(condition: bool, coordinate: str) -> None:
+    if not condition:
+        raise RuntimeError(f"HSD loaded source binding rejected: {coordinate}")
+
+
+def _binding_codes(code: CodeType, prefix: str = "") -> dict[str, CodeType]:
+    result = {}
+    for child in code.co_consts:
+        if type(child) is CodeType:
+            name = prefix + child.co_name
+            result[name] = child
+            result.update(_binding_codes(child, name + "."))
+    return result
+
+
+def _binding_code_shape(code: CodeType) -> tuple:
+    """Generated dataclass code has runtime filenames/line numbers, not source ones."""
+    constants = tuple(_binding_code_shape(v) if type(v) is CodeType else v
+                      for v in code.co_consts)
+    return (code.co_code, constants, code.co_names, code.co_varnames,
+            code.co_freevars, code.co_cellvars, code.co_argcount,
+            code.co_posonlyargcount, code.co_kwonlyargcount, code.co_flags,
+            getattr(code, "co_exceptiontable", b""))
+
+
+def _binding_value(node: ast.expr, namespace: dict) -> object:
+    if isinstance(node, ast.Attribute) and ast.unparse(node) == "torch.float64":
+        return sys.modules["torch"].float64
+    if isinstance(node, ast.Name):
+        _binding_require(node.id in ("MAX_EMBEDDING_DIMENSION", "MAX_ITERATIONS"),
+                         "unsupported default name")
+        declaration = namespace["_binding_constants"][node.id]
+        return ast.literal_eval(declaration)
+    if isinstance(node, ast.Call):
+        _binding_require(isinstance(node.func, ast.Name) and node.func.id == "HSDLPConfig"
+                         and not node.args and not node.keywords, "unsupported default call")
+        cls = namespace["HSDLPConfig"]
+        # Defaults are inspected structurally; never invoke a source constructor.
+        return ("HSDLPConfig-instance", cls)
+    try:
+        return ast.literal_eval(node)
+    except (ValueError, TypeError) as error:
+        raise RuntimeError("HSD loaded source binding unsupported default expression") from error
+
+
+def _binding_same(actual: object, wanted: object) -> bool:
+    if (type(wanted) is tuple and len(wanted) == 2
+            and wanted[0] == "HSDLPConfig-instance"):
+        cls = wanted[1]
+        return type(actual) is cls and set(vars(actual)) == set(cls.__dataclass_fields__) and all(
+            _binding_same(vars(actual)[key], field.default)
+            for key, field in cls.__dataclass_fields__.items()
+        )
+    if type(actual) is not type(wanted):
+        return False
+    if type(wanted) in (tuple, list):
+        return len(actual) == len(wanted) and all(
+            _binding_same(a, b) for a, b in zip(actual, wanted)
+        )
+    if type(wanted) is dict:
+        return set(actual) == set(wanted) and all(
+            _binding_same(actual[key], value) for key, value in wanted.items()
+        )
+    return actual == wanted
+
+
+def _binding_defaults(function: FunctionType, node: ast.FunctionDef, namespace: dict) -> None:
+    positional = tuple(_binding_value(v, namespace) for v in node.args.defaults)
+    keywords = {arg.arg: _binding_value(v, namespace)
+                for arg, v in zip(node.args.kwonlyargs, node.args.kw_defaults) if v is not None}
+    _binding_require(_binding_same(function.__defaults__, positional or None)
+                     and _binding_same(function.__kwdefaults__, keywords or None),
+                     node.name + " defaults")
+
+
+def _binding_function(value: object, node: ast.FunctionDef, key: str, codes: dict,
+                      module: ModuleType, path: str, namespace: dict) -> None:
+    _binding_require(type(value) is FunctionType, key + " function identity")
+    function = value
+    decorators = [ast.unparse(v) for v in node.decorator_list]
+    if decorators == ["property"]:
+        decorators = []
+    if decorators:
+        _binding_require(decorators == ["torch.no_grad()"], key + " unsupported wrapper")
+        function = getattr(value, "__wrapped__", None)
+        _binding_require(type(function) is FunctionType, key + " missing wrapped function")
+        expected = sys.modules["torch"].no_grad()(function)
+        _binding_require(value.__code__ == expected.__code__
+                         and value.__globals__ is expected.__globals__
+                         and value.__defaults__ is None and value.__kwdefaults__ is None,
+                         key + " no_grad wrapper code")
+        actual_cells = dict(zip(value.__code__.co_freevars, value.__closure__ or ()))
+        wanted_cells = dict(zip(expected.__code__.co_freevars, expected.__closure__ or ()))
+        _binding_require(set(actual_cells) == set(wanted_cells), key + " wrapper closure")
+        for name, cell in actual_cells.items():
+            actual, wanted = cell.cell_contents, wanted_cells[name].cell_contents
+            if name == "func":
+                good = actual is function
+            else:
+                good = (inspect.ismethod(actual) and inspect.ismethod(wanted)
+                        and actual.__func__ is wanted.__func__
+                        and type(actual.__self__) is type(wanted.__self__)
+                        and vars(actual.__self__) == vars(wanted.__self__))
+            _binding_require(good, key + " wrapper cell " + name)
+    _binding_require(function.__code__ == codes.get(key)
+                     and function.__code__.co_filename == path
+                     and function.__globals__ is vars(module)
+                     and function.__closure__ is None,
+                     key + " runtime code differs from trusted buffers")
+    _binding_defaults(function, node, namespace)
+
+
+def _binding_dataclass(cls: type, node: ast.ClassDef, module: ModuleType,
+                       codes: dict, path: str, namespace: dict) -> None:
+    _binding_require(type(cls) is type and cls.__module__ == module.__name__
+                     and cls.__name__ == node.name and cls.__bases__ == (object,)
+                     and cls.__new__ is object.__new__
+                     and cls.__getattribute__ is object.__getattribute__,
+                     node.name + " dataclass identity")
+    declarations = [v for v in node.body if isinstance(v, ast.AnnAssign)]
+    annotations = {v.target.id: ast.unparse(v.annotation) for v in declarations}
+    defaults = {v.target.id: _binding_value(v.value, namespace)
+                for v in declarations if v.value is not None}
+    _binding_require(cls.__annotations__ == annotations, node.name + " annotations")
+    fields = getattr(cls, "__dataclass_fields__", {})
+    params = getattr(cls, "__dataclass_params__", None)
+    _binding_require(list(fields) == list(annotations) and params is not None
+                     and params.frozen is True and params.init is True and params.eq is True
+                     and params.order is False and params.unsafe_hash is False,
+                     node.name + " dataclass fields/parameters")
+    for name, field in fields.items():
+        wanted = defaults.get(name, dataclasses.MISSING)
+        _binding_require(field.default_factory is dataclasses.MISSING and field.init is True
+                         and field.compare is True and field.kw_only is False
+                         and field.type == annotations[name]
+                         and (_binding_same(field.default, wanted)
+                              and _binding_same(vars(cls).get(name, dataclasses.MISSING), wanted)),
+                         node.name + "." + name + " field/default")
+    methods = {v.name: v for v in node.body if isinstance(v, ast.FunctionDef)}
+    for name, declaration in methods.items():
+        _binding_function(vars(cls).get(name), declaration, node.name + "." + name,
+                          codes, module, path, namespace)
+    skeleton = {"__module__": module.__name__, "__annotations__": annotations, **defaults}
+    if "__post_init__" in methods:
+        skeleton["__post_init__"] = vars(cls)["__post_init__"]
+    # Generate only standard assignment/comparison templates, not source execution.
+    expected = dataclasses.dataclass(frozen=True)(type(node.name, (object,), skeleton))
+    _binding_require(set(vars(cls)) == set(vars(expected)) | set(methods),
+                     node.name + " extra class behavior")
+    for name in ("__init__", "__eq__", "__hash__", "__setattr__", "__delattr__", "__repr__"):
+        actual, wanted = vars(cls)[name], vars(expected)[name]
+        _binding_require(type(actual) is FunctionType
+                         and _binding_code_shape(actual.__code__) == _binding_code_shape(wanted.__code__)
+                         and actual.__globals__ is wanted.__globals__
+                         and _binding_same(actual.__defaults__, wanted.__defaults__)
+                         and _binding_same(actual.__kwdefaults__, wanted.__kwdefaults__),
+                         node.name + "." + name + " generated code/defaults")
+        actual_cells = dict(zip(actual.__code__.co_freevars, actual.__closure__ or ()))
+        wanted_cells = dict(zip(wanted.__code__.co_freevars, wanted.__closure__ or ()))
+        _binding_require(set(actual_cells) == set(wanted_cells), node.name + " generated closure")
+        for key, cell in actual_cells.items():
+            a, w = cell.cell_contents, wanted_cells[key].cell_contents
+            if w is expected:
+                good = a is cls
+            elif type(w) is FunctionType:
+                good = (type(a) is FunctionType
+                        and _binding_code_shape(a.__code__) == _binding_code_shape(w.__code__)
+                        and a.__globals__ is w.__globals__ and a.__closure__ is None
+                        and a.__defaults__ is None and a.__kwdefaults__ is None
+                        and getattr(actual, "__wrapped__", None) is a)
+            elif type(w) is set:
+                good = type(a) is set and not a
+            else:
+                good = a is w
+            _binding_require(good, node.name + "." + name + " generated closure " + key)
+
+
+def _loaded_binding(buffers: dict[str, bytes] | None = None) -> dict[str, bytes]:
+    """Compile verified current buffers; inspect actual code without source execution.
+
+    This is a local in-process integrity contract, not interpreter attestation.
+    Project/source and installed Python/torch dependencies remain trust anchors.
+    """
+    # Bootstrap before calling guard helpers: a replaced require/code walker
+    # must not disable verification of its own implementation.
+    import ast as trusted_ast
+    import sys as trusted_sys
+    from types import CodeType as TrustedCodeType, FunctionType as TrustedFunctionType
+    from pathlib import Path as TrustedPath
+
+    source = TrustedPath(__file__).read_bytes()
+    work = [("", compile(source, __file__, "exec", dont_inherit=True,
+                         optimize=trusted_sys.flags.optimize))]
+    bootstrap_codes = {}
+    while work:
+        prefix, parent = work.pop()
+        for child in parent.co_consts:
+            if type(child) is TrustedCodeType:
+                key = prefix + child.co_name
+                bootstrap_codes[key] = child
+                work.append((key + ".", child))
+    bootstrap_names = [node.name for node in trusted_ast.parse(source).body
+                       if isinstance(node, trusted_ast.FunctionDef)
+                       and (node.name.startswith("_binding_") or node.name == "_loaded_binding")]
+    for key in bootstrap_names:
+        value = globals().get(key)
+        if (type(value) is not TrustedFunctionType
+                or value.__code__ != bootstrap_codes.get(key)
+                or value.__globals__ is not globals() or value.__closure__ is not None):
+            raise RuntimeError(f"HSD loaded source binding bootstrap rejected: {key}")
+    current = sys.modules.get(__name__)
+    _binding_require(current is not None and vars(current) is globals(), "HSD module cache")
+    conic = sys.modules.get("openopt.conic")
+    native = sys.modules.get("openopt.native_conic")
+    _binding_require(conic is not None and native is not None, "dependency module cache")
+    modules = {"openopt.hsd_lp": current, "openopt.conic": conic, "openopt.native_conic": native}
+    data = {}
+    syntax = {}
+    compiled = {}
+    paths = {}
+    for name, module in modules.items():
+        spec = getattr(module, "__spec__", None)
+        filename = getattr(module, "__file__", None)
+        _binding_require(type(filename) is str and spec is not None
+                         and spec.origin == filename and spec.name == module.__name__
+                         and sys.modules.get(module.__name__) is module, name + " origin/cache")
+        path = Path(filename)
+        _binding_require(path.is_absolute() and not path.is_symlink(), name + " path")
+        raw = path.read_bytes()
+        _binding_require(buffers is None or buffers.get(name) == raw, name + " source buffer changed")
+        data[name], paths[name] = raw, str(path)
+        syntax[name] = ast.parse(raw)
+        compiled[name] = _binding_codes(compile(
+            raw, str(path), "exec", dont_inherit=True, optimize=sys.flags.optimize,
+        ))
+    _binding_require(buffers is None or set(buffers) == set(data), "exact source buffer membership")
+    for name, module in modules.items():
+        tree = syntax[name]
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    _binding_require(getattr(module, alias.asname or alias.name, None)
+                                     is sys.modules.get(alias.name),
+                                     name + " imported module " + alias.name)
+            elif isinstance(node, ast.ImportFrom) and node.module != "__future__":
+                dependency = ("openopt." + node.module) if node.level else node.module
+                target = sys.modules.get(dependency)
+                _binding_require(target is not None, name + " dependency " + dependency)
+                for alias in node.names:
+                    _binding_require(getattr(module, alias.asname or alias.name, None)
+                                     is getattr(target, alias.name, None),
+                                     name + " imported alias " + alias.name)
+    for name, module in modules.items():
+        tree, codes, path = syntax[name], compiled[name], paths[name]
+        namespace = dict(vars(module))
+        namespace["_binding_constants"] = {
+            node.targets[0].id: node.value for node in tree.body
+            if isinstance(node, ast.Assign) and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+        }
+        functions = None if name == "openopt.hsd_lp" else (
+            {"_dimension"} if name == "openopt.conic" else
+            {"_finite", "_norm", "_scalar", "_cones", "_rotated_projection", "project_cones"}
+        )
+        classes = None if name == "openopt.hsd_lp" else (
+            {"ConicProblem", "ZeroCone", "NonnegativeCone", "SecondOrderCone", "RotatedSecondOrderCone"}
+            if name == "openopt.conic" else set()
+        )
+        for node in tree.body:
+            if isinstance(node, ast.FunctionDef) and (functions is None or node.name in functions):
+                _binding_function(getattr(module, node.name, None), node, node.name,
+                                  codes, module, path, namespace)
+            if isinstance(node, ast.ClassDef) and (classes is None or node.name in classes):
+                cls = getattr(module, node.name, None)
+                if node.decorator_list:
+                    _binding_require([ast.unparse(v) for v in node.decorator_list]
+                                     == ["dataclass(frozen=True)"], node.name + " class decorator")
+                    _binding_dataclass(cls, node, module, codes, path, namespace)
+                else:
+                    _binding_require(type(cls) is type and cls.__module__ == module.__name__
+                                     and cls.__bases__ == (object,)
+                                     and cls.__new__ is object.__new__
+                                     and cls.__getattribute__ is object.__getattribute__,
+                                     node.name + " class identity")
+                    declarations = {v.name for v in node.body if isinstance(v, ast.FunctionDef)}
+                    _binding_require(set(vars(cls)) == declarations | {
+                        "__module__", "__doc__", "__dict__", "__weakref__",
+                    }, node.name + " unexpected class behavior")
+                    for method in node.body:
+                        if isinstance(method, ast.FunctionDef):
+                            value = vars(cls).get(method.name)
+                            if isinstance(value, property):
+                                _binding_require(value.fset is None and value.fdel is None,
+                                                 method.name + " property accessors")
+                                value = value.fget
+                            _binding_function(value, method, node.name + "." + method.name,
+                                              codes, module, path, namespace)
+        if name == "openopt.hsd_lp":
+            for key in ("MAX_ITERATIONS", "MAX_EMBEDDING_DIMENSION", "__all__"):
+                _binding_require(_binding_same(getattr(module, key),
+                                               ast.literal_eval(namespace["_binding_constants"][key])),
+                                 key + " global constant")
+            _binding_require(module.Cone == conic.ZeroCone | conic.NonnegativeCone | conic.SecondOrderCone,
+                             "HSD cone type alias")
+        if name == "openopt.conic":
+            for key, target in (("Zero", "ZeroCone"), ("Nonnegative", "NonnegativeCone"),
+                                ("SOC", "SecondOrderCone"), ("RSOC", "RotatedSecondOrderCone")):
+                _binding_require(getattr(module, key) is getattr(module, target), key + " cone alias")
+    for name, module in modules.items():
+        _binding_require(Path(module.__file__).read_bytes() == data[name], name + " concurrent rewrite")
+    return data
 
 
 def _f(value: float) -> Fraction:
@@ -455,7 +772,22 @@ class PreparedHSDLP:
 
     @torch.no_grad()
     def __init__(self, problem: ConicProblem, config: HSDLPConfig = HSDLPConfig()):
-        if not isinstance(config, HSDLPConfig):
+        from types import FunctionType as TrustedFunctionType, CodeType as TrustedCodeType
+        from pathlib import Path as TrustedPath
+        import sys as trusted_sys
+
+        trusted_code = compile(TrustedPath(__file__).read_bytes(), __file__, "exec",
+                               dont_inherit=True, optimize=trusted_sys.flags.optimize)
+        expected_entry = next(v for v in trusted_code.co_consts
+                              if type(v) is TrustedCodeType and v.co_name == "_loaded_binding")
+        entry = _loaded_binding
+        if (type(entry) is not TrustedFunctionType or entry.__code__ != expected_entry
+                or entry.__globals__ is not globals() or entry.__closure__ is not None
+                or entry.__defaults__ != (None,) or entry.__kwdefaults__ is not None):
+            raise RuntimeError("HSD loaded source binding entry rejected before prepare")
+        self._source_buffers = entry()
+        self._binding_entry = entry
+        if type(config) is not HSDLPConfig or set(vars(config)) != set(HSDLPConfig.__dataclass_fields__):
             raise TypeError("config must be HSDLPConfig")
         device = config.validate()
         if not isinstance(problem, ConicProblem):
@@ -527,6 +859,7 @@ class PreparedHSDLP:
         _finite(value, name)
 
     def _integrity(self) -> None:
+        _loaded_binding(self._source_buffers)
         if self.config != self._config_seal or _hash_model(self._original) != self._model_sha256:
             raise RuntimeError("HSD frozen model/config changed")
         if _source_hashes() != self._source_sha256 or project_cones is not self._projector:
@@ -565,6 +898,10 @@ class PreparedHSDLP:
 
     @torch.no_grad()
     def solve(self, *, feasible_base: object | None = None) -> HSDLPResult:
+        binding = object.__getattribute__(self, "_binding_entry")
+        if _loaded_binding is not binding:
+            raise RuntimeError("HSD loaded source binding entry changed before solve")
+        binding(object.__getattribute__(self, "_source_buffers"))
         self._integrity()
         c, p = self.config, self._original
         base_tensor, base_check = None, None
@@ -667,6 +1004,7 @@ class PreparedHSDLP:
                 x = s = y = None
                 break
             previous_primal, previous_recession = primal_good, recession_good
+        binding(object.__getattribute__(self, "_source_buffers"))
         self._integrity()
         settings = asdict(c)
         settings["dtype"] = str(c.dtype)

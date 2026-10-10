@@ -140,3 +140,94 @@ Clean frozen receipts are external under the `frozen-unit` and `frozen-smoke`
 roots, populated after commit without changing these three files. CPU results
 do not establish CUDA acceptance, universal
 robustness, public/industrial coverage, exact proofs or commercial qualification.
+
+## Loaded Binding Repair V1
+
+The independent `9c6b69bda8e86ad8cd3b198ebb72afa155186bff` review of owner
+`695df3b1f998ab4ede15c0172cd948cba1910173` remains historical FAIL:
+43 passed, two failed, zero skipped, 8.40 seconds. Its receipt is
+`/hf3fs-jd/data/tmp/openopt-release-20261010/hsd-independent/clean-full-v1/review-j3id7xaj/receipt.json`,
+SHA256 `438aa68a33aa98d18b81b2c6e2ae7e4a32723ced2c1c1c54eb6c7f0dcabd55c8`.
+Loading an altered checker and then restoring trusted disk bytes falsely
+accepted an equality candidate at iteration four (`x=2.7473684210526317`
+instead of two; four of six original gates failed) and a Farkas ray at
+iteration two (`y=[1,1.5]`, original `A.T y=0.5`, threshold at most `1e-7`).
+Neither restored disk hashes nor a captured projector identity bound those
+actually loaded functions. No historical result is upgraded.
+
+The repair preserves numerical operations, thresholds, defaults and opt-in
+device policy. It adds a bounded local loaded-code contract for:
+
+- Every HSD top-level function, helper, method, property and default; the
+  original-model/cone dataclasses and dimension helper; the projection and
+  its finite/norm/scalar/cone/rotated helpers in native conic.
+- Source-compiled code objects, actual globals, closures, imported module
+  identities/cache/origins, cone/type aliases, constants, exact configuration
+  class and fields. Dataclass-generated assignment/comparison/frozen/repr
+  templates and closures are compared to stdlib-generated structural
+  templates, without executing project source.
+- The actual `torch.no_grad` wrapper code and its actual `func` and context
+  closure, not arbitrary traversal of `__wrapped__`. A wrapper with a trusted
+  `__wrapped__` but different executable code or closure is rejected.
+- A separately compiled guard entry before preparation, guard helper
+  bootstrap checks, then retained source buffers and verified entry at solve
+  entry and after iteration completion, before returning a result. Existing
+  model, source, tensor and runtime integrity checks remain active.
+
+The guard compiles trusted local source buffers without executing them.
+At preparation, the intended source files and installed Python/stdlib/torch
+runtime are trust anchors. A caller must separately pin the intended clean
+source; self-consistent malicious source on disk is not authenticated by
+this guard. This is not protection against arbitrary hostile interpreter,
+stdlib/dependency replacement, concurrent mutation-and-restoration between
+checks, or remote attestation. Runtime monkeypatches/wrappers are not silently
+accepted just because they preserve a module name or `__wrapped__`.
+There is extra CPU inspection/source IO overhead; no speedup is claimed.
+
+All repair evidence is external under
+`/hf3fs-jd/data/tmp/openopt-release-20261010/hsd-loaded-repair/`.
+The author's same load/restore controls actually failed twice before repair:
+`red-v1/tests-mo7_a372/verification.json`. Development
+`full-binding-v4/tests-3f0epe72/verification.json` is 103 passed, one explicitly
+disabled local CUDA target, zero failed (35.77 seconds), with unchanged
+dirty-source consistency. It is not clean-source acceptance. Earlier failures
+are retained: v1's old source-path fixture violated the origin contract; v2
+exposed class `__getattribute__` interception before instance integrity
+dispatch. The entry check now precedes that dispatch. The 42 prepare/solve
+closure controls include guard helpers and entry replacement; another control
+changes checker defaults during the actual LU solve and requires post-solve
+rejection. Two load/restore JSON records retain original model, rejection
+reason and altered/restored byte hashes.
+
+The only skipped author test is
+`test_cuda_actual_residency_and_analytic_candidate`: absent
+`OPENOPT_RUN_HSD_CUDA_TESTS=1` explicitly skips local CUDA. Under explicit
+opt-in, unavailable CUDA fails. No GPU submission, GPU proof, commercial
+qualification or general solver acceptance occurs here.
+
+After a clean commit, rerun `scripts/verify.py tests --target
+tests/test_hsd_lp.py` under the CPU environment. The test-file CLI
+`--audit-unit /absolute/verification.json --sha256 FULL_SHA256 --owner-commit
+FULL_COMMIT` checks current clean complete source membership, actual exact
+104-item collection/JUnit membership, both load/restore rejections, the forty
+serialized closure controls (the two direct closure-cell controls are
+asserted in pytest), and the one named CUDA skip. It writes
+`author-receipt.json` beside verification; no solve occurs in this audit.
+`--scan-tool /data/dev/infra/ops/dsh/scan-secrets-precommit.py --needle-file
+/home/infra/.config/dsh-n600-token --artifact-dir /absolute/external/root`
+scans only the three repair paths, keeps the needle solely in memory, and
+records positive/cleared sensitivity controls without secret-tail rendering.
+
+The frozen independent 45 tests and document are not edited. Author execution
+of those unchanged bytes against a new clean owner is available with
+`--unchanged-review /data/dev/openopt-wt-release4-20261010-hsd-independent
+--reviewer-commit 9c6b69bda8e86ad8cd3b198ebb72afa155186bff --owner-commit
+FULL_NEW_OWNER --artifact-dir /absolute/external/root`. It creates a
+non-Git external source mirror, pins both complete source sets, compares
+actual 45-item collection/JUnit membership and retains any FAIL. The old
+test's internal historical owner label is disclosed, never used to
+authenticate the new owner. Its projector counting fixture replaces the HSD
+imported alias with an arbitrary observation wrapper; that conflicts with
+this strict alias contract. Do not weaken the guard, edit the original
+negative assertions, or claim independent closure to hide that incompatibility.
+Fresh caller-pinned independent review remains required.
