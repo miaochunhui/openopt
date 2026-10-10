@@ -1,6 +1,6 @@
 """Experimental sparse/matrix-free QP, separate from the dense QP core.
 
-Only real float32/float64, fixed-rho ADMM and unpreconditioned CG are supported.
+Only real float32/float64, fixed-rho ADMM and opt-in preconditioned CG are supported.
 Finite operator probes are diagnostics, NOT a convexity certificate. Callers
 must explicitly declare that P is symmetric positive semidefinite.
 """
@@ -15,6 +15,7 @@ import torch
 
 __all__ = [
     "LinearOperator", "TensorOperator", "MatrixFreeOperator",
+    "Preconditioner", "JacobiPreconditioner",
     "CGResult", "CGConvergenceError", "conjugate_gradient",
     "OperatorQPProblem", "OperatorQPConfig", "OperatorQPResult",
     "PreparedOperatorQP", "prepare_operator_qp", "solve_operator_qp",
@@ -115,6 +116,92 @@ class TensorOperator:
         _vector(vector, self.shape[0], self.device, self.dtype, "rmatvec input")
         return self._multiply(self._transpose, vector)
 
+    def diagonal(self) -> torch.Tensor:
+        """Extract an owned diagonal in O(nnz + n) sparse storage, never densify."""
+        if self.shape[0] != self.shape[1]:
+            raise ValueError("diagonal requires a square tensor operator")
+        if self.matrix.layout == torch.strided:
+            return self.matrix.diagonal().clone()
+        coo = self.matrix.to_sparse_coo().coalesce()
+        rows, columns = coo.indices()
+        selected = rows == columns
+        result = torch.zeros(self.shape[1], device=self.device, dtype=self.dtype)
+        result.index_add_(0, rows[selected], coo.values()[selected])
+        return result
+
+    def column_squared_norms(self) -> torch.Tensor:
+        """Return diag(A' A) without forming a Gram matrix."""
+        if self.matrix.layout == torch.strided:
+            return self.matrix.square().sum(dim=0)
+        coo = self.matrix.to_sparse_coo().coalesce()
+        result = torch.zeros(self.shape[1], device=self.device, dtype=self.dtype)
+        result.index_add_(0, coo.indices()[1], coo.values().square())
+        return result
+
+
+@runtime_checkable
+class Preconditioner(Protocol):
+    """Fixed, deterministic SPD inverse action z=M^-1 r, resident on device.
+
+    Callers declare symmetry/positive definiteness and must not mutate inputs
+    or change the action during CG. Positive r'z checks are not an SPD proof.
+    """
+
+    shape: tuple[int, int]
+    device: torch.device
+    dtype: torch.dtype
+
+    def apply(self, residual: torch.Tensor) -> torch.Tensor: ...
+
+
+class JacobiPreconditioner:
+    """Owned finite, strictly positive system diagonal; no clipping or shifts."""
+
+    def __init__(self, diagonal: torch.Tensor):
+        if not isinstance(diagonal, torch.Tensor):
+            raise TypeError("Jacobi diagonal must be a tensor")
+        _metadata((diagonal.numel(), diagonal.numel()), diagonal.device, diagonal.dtype)
+        _vector(diagonal, diagonal.numel(), diagonal.device, diagonal.dtype, "Jacobi diagonal")
+        if not diagonal.numel() or bool((diagonal <= 0).any()):
+            raise ValueError("Jacobi diagonal must be nonempty and strictly positive")
+        self._diagonal = diagonal.detach().clone()
+        self.shape = (diagonal.numel(), diagonal.numel())
+        self.device, self.dtype = diagonal.device, diagonal.dtype
+
+    @property
+    def diagonal(self) -> torch.Tensor:
+        return self._diagonal.clone()
+
+    def apply(self, residual: torch.Tensor) -> torch.Tensor:
+        _vector(residual, self.shape[1], self.device, self.dtype, "Jacobi input")
+        result = residual / self._diagonal
+        _vector(result, self.shape[0], self.device, self.dtype, "Jacobi output")
+        return result
+
+
+class _CheckedPreconditioner:
+    def __init__(self, preconditioner: Preconditioner, system: LinearOperator):
+        if not isinstance(preconditioner, Preconditioner):
+            raise TypeError("preconditioner must implement the Preconditioner contract")
+        _metadata(preconditioner.shape, preconditioner.device, preconditioner.dtype)
+        if (
+            preconditioner.shape != system.shape or preconditioner.device != system.device
+            or preconditioner.dtype != system.dtype
+        ):
+            raise ValueError("preconditioner shape/device/dtype must match system; no transfer")
+        self.preconditioner, self.system = preconditioner, system
+
+    def apply(self, residual: torch.Tensor) -> torch.Tensor:
+        try:
+            result = self.preconditioner.apply(residual)
+        except Exception as error:
+            raise RuntimeError(f"preconditioner.apply callback failed: {error}") from error
+        _vector(
+            result, self.system.shape[0], self.system.device, self.system.dtype,
+            "preconditioner.apply output",
+        )
+        return result
+
 
 @dataclass(frozen=True)
 class MatrixFreeOperator:
@@ -209,16 +296,37 @@ class CGConvergenceError(RuntimeError):
         )
 
 
+def _preconditioned_residual(
+    preconditioner: _CheckedPreconditioner, residual: torch.Tensor,
+    system: LinearOperator, rhs: torch.Tensor, x: torch.Tensor,
+    iteration: int, tolerance: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    try:
+        transformed = preconditioner.apply(residual)
+        squared = residual @ transformed
+        if not bool(torch.isfinite(squared)) or float(squared) <= 0:
+            raise ValueError("nonpositive/nonfinite preconditioned residual product r'z")
+    except (TypeError, ValueError, RuntimeError) as error:
+        raise CGConvergenceError(
+            f"invalid preconditioner: {error}", iteration,
+            _l2(rhs - system.matvec(x)), tolerance,
+        ) from error
+    return transformed, squared
+
+
 @torch.no_grad()
 def conjugate_gradient(
     operator: LinearOperator, rhs: torch.Tensor, *, initial: torch.Tensor | None = None,
     max_iterations: int = 1000, eps_abs: float = 1e-10, eps_rel: float = 1e-10,
+    preconditioner: Preconditioner | None = None,
 ) -> CGResult:
     """Solve an assumed SPD system; every accepted residual is recomputed.
 
     Recurrence residuals only nominate convergence. If a nominated iterate
     fails the true b-Kx test, restart the direction with the true residual,
-    within the original iteration budget. Never return a failed inner solve.
+    within the original iteration budget, reapplying M^-1 on restart. Acceptance
+    uses the original unpreconditioned L2 residual/tolerance, never r'M^-1 r.
+    With preconditioner=None the original arithmetic path is unchanged.
     """
     _integer("CG max_iterations", max_iterations)
     _positive("CG eps_abs", eps_abs)
@@ -226,6 +334,7 @@ def conjugate_gradient(
     K = _CheckedOperator(operator, "CG system")
     if K.shape[0] != K.shape[1] or not K.shape[0]:
         raise ValueError("CG system must be nonempty and square")
+    M = None if preconditioner is None else _CheckedPreconditioner(preconditioner, K)
     _vector(rhs, K.shape[0], K.device, K.dtype, "CG rhs")
     b = rhs.detach().clone()
     if initial is not None:
@@ -238,8 +347,12 @@ def conjugate_gradient(
     true_norm = _l2(residual)
     if true_norm <= tolerance:
         return CGResult(x, 0, true_norm, tolerance)
-    direction = residual.clone()
-    squared = residual @ residual
+    if M is None:
+        direction = residual.clone()
+        squared = residual @ residual
+    else:
+        transformed, squared = _preconditioned_residual(M, residual, K, b, x, 0, tolerance)
+        direction = transformed.clone()
     for iteration in range(1, max_iterations + 1):
         product = K.matvec(direction)
         curvature = float(direction @ product)
@@ -261,14 +374,26 @@ def conjugate_gradient(
             if iteration == max_iterations:
                 raise CGConvergenceError("iteration limit", iteration, true_norm, tolerance)
             residual = true_residual
-            squared = residual @ residual
-            direction = residual.clone()
+            if M is None:
+                squared = residual @ residual
+                direction = residual.clone()
+            else:
+                transformed, squared = _preconditioned_residual(
+                    M, residual, K, b, x, iteration, tolerance,
+                )
+                direction = transformed.clone()
             continue
-        updated = residual @ residual
+        if M is None:
+            transformed = residual
+            updated = residual @ residual
+        else:
+            transformed, updated = _preconditioned_residual(
+                M, residual, K, b, x, iteration, tolerance,
+            )
         if not bool(torch.isfinite(updated)) or float(squared) <= 0:
             true_norm = _l2(b - K.matvec(x))
             raise CGConvergenceError("invalid residual recurrence", iteration, true_norm, tolerance)
-        direction = residual + (updated / squared) * direction
+        direction = transformed + (updated / squared) * direction
         squared = updated
     raise AssertionError("validated positive CG iteration budget was not entered")
 
@@ -297,10 +422,13 @@ class OperatorQPConfig:
     cg_max_iterations: int = 1000
     cg_eps_abs: float = 1e-10
     cg_eps_rel: float = 1e-10
+    cg_preconditioner: str = "none"
 
     def validate(self) -> torch.device:
         if self.dtype not in (torch.float32, torch.float64):
             raise ValueError("operator QP supports float32/float64 only")
+        if self.cg_preconditioner not in ("none", "jacobi"):
+            raise ValueError("cg_preconditioner must be 'none' or 'jacobi'")
         for name in ("rho", "sigma", "eps_abs", "eps_rel", "cg_eps_abs", "cg_eps_rel"):
             _positive(name, getattr(self, name))
         for name in ("max_iterations", "check_interval", "cg_max_iterations"):
@@ -404,6 +532,7 @@ class PreparedOperatorQP:
     @torch.no_grad()
     def __init__(
         self, problem: OperatorQPProblem, config: OperatorQPConfig = OperatorQPConfig(),
+        *, preconditioner: Preconditioner | None = None,
     ):
         device = config.validate()
         if problem.assume_psd is not True:
@@ -433,6 +562,20 @@ class PreparedOperatorQP:
             raise ValueError("bounds cannot contain NaN")
         if bool(torch.isposinf(l).any() | torch.isneginf(u).any() | (l > u).any()):
             raise ValueError("invalid/reversed bounds")
+        if config.cg_preconditioner == "jacobi":
+            if preconditioner is not None:
+                raise ValueError("choose automatic Jacobi OR an explicit preconditioner, not both")
+            if not isinstance(P.operator, TensorOperator) or not isinstance(A.operator, TensorOperator):
+                raise ValueError(
+                    "automatic Jacobi requires tensor P/A; matrix-free callers must explicitly "
+                    "supply preconditioner=JacobiPreconditioner(diag_K) or an SPD inverse action"
+                )
+            diagonal = P.operator.diagonal()
+            _vector(diagonal, q.numel(), device, config.dtype, "P Jacobi diagonal")
+            if bool((diagonal < 0).any()):
+                raise ValueError("P Jacobi diagonal is negative; assume_psd contradicted")
+            diagonal = diagonal + config.rho * A.operator.column_squared_norms() + config.sigma
+            preconditioner = JacobiPreconditioner(diagonal)
         _probe(P, quadratic=True)
         _probe(A)
         self.config, self.P, self.A = config, P, A
@@ -441,6 +584,9 @@ class PreparedOperatorQP:
             P.shape, device, config.dtype,
             self._system_matvec, self._system_matvec,
         )
+        if preconditioner is not None:
+            _CheckedPreconditioner(preconditioner, self.system)
+        self.preconditioner = preconditioner
 
     def _system_matvec(self, vector: torch.Tensor) -> torch.Tensor:
         return (
@@ -463,6 +609,7 @@ class PreparedOperatorQP:
                 inner = conjugate_gradient(
                     self.system, rhs, initial=x, max_iterations=c.cg_max_iterations,
                     eps_abs=c.cg_eps_abs, eps_rel=c.cg_eps_rel,
+                    preconditioner=self.preconditioner,
                 )
             except CGConvergenceError as error:
                 raise CGConvergenceError(
@@ -501,11 +648,13 @@ class PreparedOperatorQP:
 
 def prepare_operator_qp(
     problem: OperatorQPProblem, config: OperatorQPConfig = OperatorQPConfig(),
+    *, preconditioner: Preconditioner | None = None,
 ) -> PreparedOperatorQP:
-    return PreparedOperatorQP(problem, config)
+    return PreparedOperatorQP(problem, config, preconditioner=preconditioner)
 
 
 def solve_operator_qp(
     problem: OperatorQPProblem, config: OperatorQPConfig = OperatorQPConfig(),
+    *, preconditioner: Preconditioner | None = None,
 ) -> OperatorQPResult:
-    return prepare_operator_qp(problem, config).solve()
+    return prepare_operator_qp(problem, config, preconditioner=preconditioner).solve()
