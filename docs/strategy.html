@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>openopt Commercial Target And GPU Contract</title>
+<style>
+:root { --ink: #18362f; --paper: #f4f0e6; --accent: #bb4c24; }
+body { margin: 0; background: linear-gradient(140deg, var(--paper), #e6eee6);
+  color: var(--ink); font: 18px/1.6 Georgia, serif; }
+main { max-width: 960px; margin: auto; padding: 48px 24px; }
+h1 { font-size: clamp(2rem, 6vw, 3.5rem); line-height: 1.15; }
+h2 { margin-top: 2rem; border-top: 1px solid #b9c7ba; padding-top: 1rem; }
+code { font: .9em/1.5 monospace; overflow-wrap: anywhere; }
+a { color: var(--accent); } table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; padding: 12px; border-bottom: 1px solid #b9c7ba; }
+.table { overflow-x: auto; } th { white-space: nowrap; }
+</style>
+<main>
+<p>Product decision / 2026-10-10</p>
+<h1>Commercial Ambition. Open Implementation. GPU Acceleration.</h1>
+<p>openopt aims to match leading closed-source optimizers on supported problem
+classes, then demonstrate GPU advantages where the workloads justify them.
+There is no universally best solver declared here. Current code is the OpenPO
+portfolio foundation, not yet a general LP/QP, conic or mixed-integer release.</p>
+<h2>License</h2>
+<p>The user selected BSD Zero Clause (<code>0BSD</code>) for project code,
+including imported OpenPO: use, modification and redistribution for any purpose,
+with or without fee, without copyleft or attribution conditions. The software
+is provided without warranty. This is a low-restriction copyright license,
+not an assertion that every legal or patent issue has been cleared.
+Dependencies and optional commercial SDKs retain their own terms.</p>
+<p>The initial migration manifest remains historical evidence of a source
+snapshot without a license declaration. The subsequent decision is carried by
+<a href="../LICENSE">LICENSE</a> and PEP 639 distribution metadata.
+New third-party imports need a separate rights and license review.</p>
+<h2>Scope And Baselines</h2>
+<div class="table"><table>
+<thead><tr><th>Stage</th><th>Commercial Targets</th><th>Open References</th></tr></thead>
+<tbody>
+<tr><td>1. General LP and convex QP</td><td>Gurobi, IBM CPLEX; MOSEK where applicable</td>
+<td>HiGHS, OSQP, Clarabel</td></tr>
+<tr><td>2. Convex cones, starting with SOCP</td><td>MOSEK; other applicable solvers</td>
+<td>Clarabel and independent formulations</td></tr>
+<tr><td>3. MILP and MIQP</td><td>Gurobi, IBM CPLEX</td><td>SCIP, HiGHS where supported</td></tr>
+</tbody></table></div>
+<p>Each stage needs a domain-neutral model and result contract, not renamed
+portfolio classes. Nonconvex/global optimization, nonlinear programming,
+constraint programming and SDP are not implied by the general-purpose ambition.
+They require separate scope, implementation and evidence.</p>
+<h2>GPU Execution</h2>
+<p>Design GPU-resident dense, sparse and matrix-free operators; batched solves;
+reusable prepared workspaces; and measured presolve/scaling and transfer costs.
+Triton and PyTorch CUDA are existing foundations, not automatic performance
+wins. Verify returned tensor placement on the requested device. Reject missing
+or incompatible explicitly requested GPUs rather than falling back silently.</p>
+<p>CPU references and measured automatic routing remain useful for small,
+sparse or accuracy-sensitive cases. Single-GPU compatibility does not qualify
+multi-GPU scaling. Keep dense, sparse, batched, cold-start and warm-start
+performance claims separate.</p>
+<h2>Commercial Qualification</h2>
+<p>Before a run, freeze problem sets and hashes, canonical objective/constraint
+formulations, dtype, accuracy thresholds, limits, seeds, hardware allocation,
+solver versions/settings and licensed execution permissions. Use held-out cases
+and publish per-instance results, including failures and censored time limits.
+Do not cherry-pick only converged instances or convenient problem families.</p>
+<p>Correctness gates cover feasible, infeasible, unbounded, degenerate,
+ill-conditioned and invalid inputs; primal/dual residuals, objective gaps and
+termination status. MIP additionally needs integrality, best bound, optimality
+gap and certificates; heuristic quality is not proof of optimality.</p>
+<p>Performance gates include end-to-end transfer-inclusive cold/hot latency,
+p50/p95, solved count, success rate, throughput, peak host/GPU memory and paired
+speedup distributions. Record warm-up and compilation separately. Compare
+commercial defaults and documented tuning without suppressing either arm.
+Accuracy and reliability must pass before a speedup is accepted.</p>
+<p>Gate states: <strong>PASS</strong> only for measured, supported scope;
+<strong>FAIL</strong> for a violated frozen criterion;
+<strong>UNVERIFIED</strong> for missing licenses, hardware or evidence.
+Open-reference tests cannot substitute for an unrun commercial comparison.
+Do not install commercial SDKs, change license servers or disclose credentials
+as a side effect of this product decision.</p>
+<h2>Evidence And Sources</h2>
+<p>Current correctness evidence is in
+<a href="benchmark-report.html">verification status</a>; upcoming work is in
+<a href="BACKLOG.md">the development ledger</a>. No commercial parity or GPU
+speedup has been established by this decision.</p>
+<p>Official references, checked 2026-10-10:
+<a href="https://opensource.org/license/0bsd">OSI 0BSD</a>,
+<a href="https://spdx.org/licenses/0BSD.html">SPDX 0BSD</a>,
+<a href="https://www.gurobi.com/product">Gurobi</a>,
+<a href="https://www.ibm.com/products/ilog-cplex-optimization-studio/cplex-optimizer">IBM CPLEX</a>,
+<a href="https://www.mosek.com/products/mosek/">MOSEK</a>,
+<a href="https://setuptools.pypa.io/en/latest/userguide/license_migration.html">PEP 639 packaging</a>.
+These links establish licensing text and baseline scope, not comparative rankings.</p>
+</main>
+</html>

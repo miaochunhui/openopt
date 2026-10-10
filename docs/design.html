@@ -19,8 +19,14 @@ a { color: var(--accent); }
 <p>A GPU-accelerated optimization project, starting from the existing OpenPO
 portfolio implementation. This extraction is not a general-purpose optimizer
 release and does not redesign the algorithms.</p>
+<h2>Product Target</h2>
+<p>Build a general-purpose, GPU-accelerated open optimizer under 0BSD, targeting
+commercial-grade accuracy, robustness and performance. Qualify LP/QP and future
+mixed-integer scope against Gurobi/CPLEX, and convex/conic scope against MOSEK.
+These are benchmark targets, not an achieved ranking. See the
+<a href="strategy.html">scope and acceptance contract</a>.</p>
 <h2>Architecture</h2>
-<p><code>src/openpo</code> owns the unchanged implementation: low-rank factor
+<p><code>src/openpo</code> owns the imported implementation and independent fixes: low-rank factor
 models, projections, batched solvers, linear constraints, exact references,
 portfolio adapters, multi-period research and certification service libraries.
 <code>src/openopt</code> reexports the same public objects, preserving identity
@@ -30,6 +36,12 @@ and compatibility without copying solver logic.</p>
 stage must define a domain-neutral quadratic operator and LP/QP contract, then
 move portfolio semantics behind adapters. A general model must not disguise
 portfolio assumptions with renamed classes.</p>
+<p>The future general core must own GPU-resident dense/sparse/matrix-free
+operators, explicit device/dtype contracts, batching, presolve/scaling and
+reusable workspaces. Portfolio semantics remain adapters. GPU accuracy,
+hardware compatibility and transfer-inclusive performance are separate gates.
+CPU references and measured automatic routing remain supported; an explicit
+CUDA request must never silently execute on CPU.</p>
 <h2>Correctness Before Speed</h2>
 <p>The independent smoke gate and full migrated test suite verify numerical
 behavior and API compatibility. They are not performance gates. Continuous
@@ -49,7 +61,9 @@ divergence evidence may still open the route.</p>
 <h2>Maintenance And Release</h2>
 <p>Private deployment, proprietary data, credentials, commercial PDFs and
 historical results are excluded. Results and logs stay outside the worktree.
-The rights holder must decide licensing before an open-source release.</p>
+The user selected 0BSD on 2026-10-10. Project code uses that license; dependencies
+and optional commercial SDKs retain their own terms. Wheel acceptance checks
+the license expression and shipped license text.</p>
 <p>See <a href="benchmark-report.html">verification and benchmark status</a>,
 <a href="MIGRATION.md">migration boundary</a> and
 <a href="BACKLOG.md">development ledger</a>.</p>

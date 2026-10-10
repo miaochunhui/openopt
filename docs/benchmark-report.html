@@ -45,6 +45,25 @@ Local evidence:
 and
 <code>/hf3fs-jd/data/tmp/openopt-distribution/wheel-bx3101xo/distribution.json</code>.
 Evidence paths are local artifacts, not files distributed in the repository.</p>
+<h2>License And GPU Contract / 2026-10-10</h2>
+<p>The product now targets commercial-grade optimization under 0BSD, with GPU
+acceleration as a first-class execution path. The
+<a href="strategy.html">commercial comparison contract</a> defines matched
+Gurobi/CPLEX/MOSEK baselines and separate correctness/performance gates.
+Commercial comparisons remain <strong>UNVERIFIED</strong>: no licensed
+commercial run or comparative speedup was performed for this change.</p>
+<p>The updated smoke gate passed 44 tests, including wheel-license positive and
+negative cases, actual CPU/CUDA result tensor placement, and unavailable-GPU
+rejection. Explicit CPU and cuda:0 examples passed. The isolated 48-module wheel
+passed import/solve checks and verified <code>License-Expression: 0BSD</code>
+plus the exact shipped license payload.</p>
+<p>Local artifacts:
+<code>/hf3fs-jd/data/tmp/openopt-verification/smoke-6wfvvg__/verification.json</code>
+and
+<code>/hf3fs-jd/data/tmp/openopt-distribution/wheel-gxio4w2y/distribution.json</code>.
+The numerical solver implementation was not changed in this product/licensing
+update; the full regression result above belongs to the preceding source
+revision, not a new full-suite run.</p>
 <h2>Performance Qualification</h2>
 <p>Timing comparisons require the same objective and constraints, matched
 input hashes, explicit CPU/CUDA devices, warm-up separation, cold/hot timings,

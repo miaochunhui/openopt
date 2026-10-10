@@ -40,11 +40,16 @@ not an endorsement of production deployment or a newly certified result.
 
 ## Licensing And Release
 
-The selected source snapshot contains no `LICENSE` declaration. No permission
-grant or attribution has been invented in this migration. Public open-source
-release is blocked until the rights holder selects a license and confirms the
-redistribution rights of the imported code. Dependencies remain under their
-respective licenses and are installed separately, not vendored.
+The selected source snapshot contained no `LICENSE` declaration; the initial
+import therefore made no license grant. On 2026-10-10, the user explicitly
+directed adoption of maximally permissive licensing for openopt. The project
+now uses BSD Zero Clause (`0BSD`) for its code, including imported OpenPO.
+`LICENSE` and distribution metadata carry that decision.
+
+The original manifest's `NO_LICENSE_DECLARATION_IN_SOURCE` field remains a
+historical source fact, not the current project's license. Dependencies and
+optional commercial SDKs keep their own terms and are not vendored or relicensed.
+New contributions must be licensed compatibly and have redistribution rights.
 
 ## Reproduction
 

@@ -21,6 +21,7 @@ SMOKE_TESTS = [
     "tests/test_openopt_api.py", "tests/test_public_api.py",
     "tests/test_solver.py", "tests/test_constraints.py",
     "tests/test_device_contract.py", "tests/test_projection_correction.py",
+    "tests/test_distribution_license.py", "tests/test_gpu_execution.py",
 ]
 DEPENDENCIES = {
     "numpy": "2.0", "torch": "2.4", "pytest": "8",

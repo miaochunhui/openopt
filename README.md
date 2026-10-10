@@ -1,12 +1,29 @@
 # openopt
 
-GPU-accelerated optimization foundation, extracted from OpenPO into an
-independent repository.
+A general-purpose GPU-accelerated open optimizer in development, targeting the
+correctness, robustness and performance of leading commercial solvers.
+Extracted from OpenPO into an independent repository.
+
+**License:** [BSD Zero Clause (0BSD)](LICENSE). Commercial use, modification and
+redistribution are permitted without copyleft or attribution conditions.
+Dependencies and optional commercial solver SDKs retain their own licenses.
 
 **Current status:** the implementation is a portfolio-optimization research
 foundation. A general-purpose optimization API is the next development stage,
-not an already implemented feature. The imported source had no license
-declaration; a public open-source release requires a rights-holder decision.
+not an already implemented feature. Commercial parity and GPU speedups are
+goals, not results already established by this repository.
+
+## Commercial Target
+
+Gurobi and IBM CPLEX are the LP/QP and mixed-integer comparison targets; MOSEK
+is the convex/conic target. OSQP, Clarabel, HiGHS and SCIP remain reproducible
+open-source references. No single solver is declared universally best.
+
+The staged scope is general LP/convex QP, then conic optimization, then
+MILP/MIQP. GPU-resident operators, batched solves and reusable workspaces are
+the acceleration direction. Each supported problem class must independently
+pass numerical and robustness gates before performance claims.
+See [the target and acceptance contract](docs/strategy.html).
 
 ## Quick Start
 
@@ -68,7 +85,8 @@ Normal verification uses `--provenance`, validating the original import commit
 without preventing subsequent independent source development.
 
 `python3 scripts/check_distribution.py` builds a wheel, checks its module set
-and runs an isolated import/solve test. Its outputs also stay outside the tree.
+and 0BSD license payload/metadata, then runs an isolated import/solve test.
+Its outputs also stay outside the tree.
 
 The source snapshot and explicit import/exclusion lists are recorded in
 `docs/migration-manifest.json`. `docs/MIGRATION.md` describes the boundary,

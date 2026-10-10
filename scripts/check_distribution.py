@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+from email.parser import BytesParser
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,25 @@ import tempfile
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def validate_wheel_license(wheel: zipfile.ZipFile, expected: bytes) -> None:
+    metadata_paths = [
+        name for name in wheel.namelist() if name.endswith(".dist-info/METADATA")
+    ]
+    if len(metadata_paths) != 1:
+        raise ValueError("wheel must contain exactly one distribution METADATA")
+    path = metadata_paths[0]
+    metadata = BytesParser().parsebytes(wheel.read(path))
+    if metadata.get_all("License-Expression") != ["0BSD"]:
+        raise ValueError("wheel must declare License-Expression: 0BSD")
+    if metadata.get_all("License-File") != ["LICENSE"]:
+        raise ValueError("wheel must declare exactly License-File: LICENSE")
+    license_path = path.rsplit("/", 1)[0] + "/licenses/LICENSE"
+    if license_path not in wheel.namelist() or wheel.read(license_path) != expected:
+        raise ValueError("wheel license payload is absent or differs from LICENSE")
+    if not expected.strip():
+        raise ValueError("empty source license")
 
 
 def installed_probe(target):
@@ -75,6 +95,7 @@ def main():
             if len(wheels) != 1:
                 raise ValueError(f"expected exactly one wheel: {wheels}")
             with zipfile.ZipFile(wheels[0]) as wheel:
+                validate_wheel_license(wheel, (ROOT / "LICENSE").read_bytes())
                 names = set(wheel.namelist())
                 expected = {path.relative_to(ROOT / "src").as_posix()
                             for path in (ROOT / "src").rglob("*.py")}
@@ -89,7 +110,10 @@ def main():
                 [sys.executable, "-I", str(Path(__file__).resolve()), "--installed", str(target)],
                 cwd=artifacts, env=env, stdout=log, stderr=subprocess.STDOUT, check=True,
             )
-        report.update(verdict="PASS", wheel=wheels[0].name, modules=len(expected))
+        report.update(
+            verdict="PASS", wheel=wheels[0].name, modules=len(expected),
+            license_expression="0BSD", license_payload_verified=True,
+        )
     except Exception as error:
         report.update(verdict="FAIL", error=f"{type(error).__name__}: {error}")
         raise

@@ -11,23 +11,35 @@ presence of files or old benchmark claims.
 
 ## Next Development Stages
 
-1. Licensing: obtain the rights holder's license and redistribution decision
-   before making an open-source release claim.
-2. General model: specify a domain-neutral LP/QP problem contract, quadratic
+The user selected 0BSD on 2026-10-10. Licensing is implemented in `LICENSE`,
+package metadata and wheel acceptance; it does not relicense dependencies.
+The product target and release gates are in `strategy.html`.
+
+1. General model: specify a domain-neutral LP/QP problem contract, quadratic
    operator interface, constraints, dtype/device semantics and result status.
-   Keep portfolio adapters outside the general core.
-3. Correctness: compare the same problem formulation with OSQP and Clarabel;
-   cover infeasible, unbounded, degenerate, empty and non-finite inputs.
-4. GPU qualification: measure cold/hot, p50/p95, success rate, objective gap,
-   residuals and hardware/software versions on shared paired cases.
-   Decide CPU/GPU routing from measurements, not a GPU-first assumption.
-5. Distribution: build/test a clean wheel and add CI for the supported CPU/CUDA
-   matrix. Add discrete optimization only after its contract and SCIP/HiGHS
-   reference tests exist.
+   Keep portfolio adapters outside the general core; design GPU-resident
+   dense, sparse and matrix-free operators, batching and prepared workspaces.
+2. Correctness and robustness: compare matched LP/QP with licensed Gurobi,
+   CPLEX and MOSEK plus OSQP/Clarabel/HiGHS references. Cover infeasible,
+   unbounded, degenerate, ill-conditioned, empty and non-finite inputs.
+   Missing commercial runs remain UNVERIFIED, not passed.
+3. GPU qualification: measure transfer-inclusive cold/hot latency, p50/p95,
+   success rate, objective gap, primal/dual residuals, throughput, memory and
+   hardware/software versions on identical paired cases. Keep explicit GPU
+   requests strict and choose automatic CPU/GPU routing from measurements.
+4. Convex conic scope: define SOCP and further cone contracts before claiming
+   support; qualify against MOSEK and independent open references.
+5. MILP/MIQP scope: specify bounds, integrality, optimality gaps, presolve,
+   branch-and-bound/cuts and termination certificates. Compare licensed
+   Gurobi/CPLEX and SCIP/HiGHS. A fast heuristic is not an exact MIP solver.
+6. Distribution: clean-wheel acceptance and CPU/CUDA CI, followed by separate
+   reproducible commercial/GPU qualification. No license server or SDK is
+   bundled; commercial benchmark execution requires authorized installations.
 
 ## Explicit Non-Claims
 
 - No general-purpose `minimize` interface is implemented in this extraction.
 - No universal GPU speedup or production qualification is asserted.
+- No commercial solver parity or world-leading ranking is asserted.
 - No cluster, service, credential or networking changes are authorized here.
 - Historical research decisions are not current runtime validation.
