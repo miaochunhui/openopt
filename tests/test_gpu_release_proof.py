@@ -5,6 +5,9 @@ import importlib.util
 import json
 from pathlib import Path
 import shutil
+import subprocess
+import sys
+import time
 
 import numpy as np
 import pytest
@@ -129,8 +132,31 @@ def produced(tmp_path_factory):
 def case_copy(produced, tmp_path, name):
     result, _ = produced
     root = tmp_path / "evidence"
-    shutil.copytree(result.parent, root)
-    saved = json.loads((root / (name + ".json")).read_text())
+    saved = json.loads((result.parent / (name + ".json")).read_bytes())
+    files = {name + ".json", "result.json", "execution.log", "telemetry.json"}
+
+    def references(value):
+        if isinstance(value, dict):
+            if set(value) == {"path", "sha256", "bytes"}:
+                files.add(proof.relative(value["path"]))
+            else:
+                for item in value.values():
+                    references(item)
+        elif isinstance(value, list):
+            for item in value:
+                references(item)
+
+    references(saved)
+    files.update(path.relative_to(result.parent).as_posix()
+                 for path in (result.parent / "source").rglob("*") if path.is_file())
+    expected = {name: proof.descriptor(result.parent, result.parent / name) for name in files}
+    for name in sorted(files):
+        target = root / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(result.parent / name, target)
+    copied = proof.inventory(root)
+    assert set(copied) == files, "case-copy file membership differs"
+    assert copied == expected, "case-copy original byte descriptors differ"
     return root, saved
 
 
@@ -607,3 +633,435 @@ def test_execute_case_rejects_changed_model_before_solving(tmp_path, monkeypatch
     output.mkdir()
     with pytest.raises(proof.ProofError, match="original model differs"):
         proof.execute_case("gap_lp", output, "cpu", expected_model=manifest["cases"]["gap_lp"])
+
+
+@pytest.mark.parametrize("module_name", [
+    "openopt.qp", "openopt.operators", "openopt.scaling", "openopt.certificates",
+])
+@pytest.mark.parametrize("case", ["gap_lp", "infeasible", "unbounded"])
+@pytest.mark.parametrize("entry", ["case", "validate", "seal", "replay", "production"])
+def test_foreign_loaded_modules_reject_original_replay(produced, tmp_path, monkeypatch,
+                                                      module_name, case, entry):
+    """A foreign live module cannot be hidden by identical trusted disk bytes."""
+    import importlib
+
+    current = importlib.import_module(module_name)
+    foreign_path = tmp_path / "foreign" / (module_name.rsplit(".", 1)[1] + ".py")
+    foreign_path.parent.mkdir()
+    foreign_path.write_bytes(Path(current.__file__).read_bytes())
+    spec = importlib.util.spec_from_file_location(module_name, foreign_path)
+    foreign = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, module_name, foreign)
+    spec.loader.exec_module(foreign)
+    parent = sys.modules["openopt"]
+    monkeypatch.setattr(parent, module_name.rsplit(".", 1)[1], foreign)
+    assert foreign.__file__ == str(foreign_path)
+    assert proof.sha(foreign_path.read_bytes()) == proof.sha(Path(current.__file__).read_bytes())
+    result, bundle = produced
+    with pytest.raises(proof.ProofError, match="loaded source"):
+        if entry == "case":
+            proof.replay_case(result.parent, proof.descriptor(
+                result.parent, result.parent / (case + ".json")), "cpu")
+        elif entry == "validate":
+            proof.validate_result(result, proof.sha(result.read_bytes()), ROOT, allow_cpu_smoke=True)
+        elif entry == "seal":
+            proof.seal(result, proof.sha(result.read_bytes()), ROOT, allow_cpu_smoke=True)
+        elif entry == "replay":
+            proof.replay(bundle, proof.sha(bundle.read_bytes()), ROOT, allow_cpu_smoke=True)
+        else:
+            proof.run_cases(tmp_path / "production", [case], "cpu", cpu_smoke=True)
+    assert sys.modules[module_name] is foreign
+    if entry == "production":
+        reports = list((tmp_path / "production").glob("cpu-smoke-*/result.json"))
+        assert len(reports) == 1
+        failed = json.loads(reports[0].read_bytes())
+        assert failed["returncode"] == 1 and failed["numerical_verdict"] == "FAIL"
+        assert failed["execution_verdict"] == "UNVERIFIED" and not failed["cases"]
+        assert "loaded source" in (reports[0].parent / "failure.log").read_text()
+
+
+@pytest.mark.parametrize("case", ["gap_lp", "infeasible", "unbounded"])
+@pytest.mark.parametrize("mutation", [
+    "checker", "checker_filename", "checker_helper", "config_default", "config_constructor",
+    "captured_config",
+])
+def test_loaded_callable_substitution_rejected(produced, monkeypatch, case, mutation):
+    import openopt.certificates as certificates
+    import openopt.qp as qp
+    import openopt.scaling as scaling
+
+    def foreign(*args, **kwargs):
+        raise AssertionError("substituted callable must never be called")
+
+    if mutation in ("checker", "checker_filename", "checker_helper"):
+        name = "_support" if mutation == "checker_helper" else "check_primal_infeasibility"
+        if mutation == "checker_filename":
+            foreign.__code__ = foreign.__code__.replace(co_filename=certificates.__file__)
+        monkeypatch.setattr(certificates, name, foreign)
+    elif mutation == "config_default":
+        monkeypatch.setattr(qp.QPConfig, "rho", 42.)
+    elif mutation == "config_constructor":
+        monkeypatch.setattr(qp.QPConfig, "__init__", foreign)
+    else:
+        # Imported aliases must refer to the checked live definition, not an older class.
+        foreign_config = type("QPConfig", (), {"__module__": "openopt.qp"})
+        monkeypatch.setattr(scaling, "QPConfig", foreign_config)
+    result, _ = produced
+    with pytest.raises(proof.ProofError, match="loaded source"):
+        proof.replay_case(result.parent, proof.descriptor(
+            result.parent, result.parent / (case + ".json")), "cpu")
+
+
+def test_foreign_module_metadata_cannot_hide_actual_code(produced, tmp_path, monkeypatch):
+    import openopt.certificates as current
+    import openopt.scaling as scaling
+
+    path = tmp_path / "certificates.py"
+    path.write_bytes(Path(current.__file__).read_bytes())
+    spec = importlib.util.spec_from_file_location("openopt.certificates", path)
+    foreign = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, "openopt.certificates", foreign)
+    spec.loader.exec_module(foreign)
+    monkeypatch.setattr(sys.modules["openopt"], "certificates", foreign)
+    foreign.__file__ = current.__file__
+    foreign.__spec__.origin = current.__spec__.origin
+    monkeypatch.setattr(scaling, "NumericalEvidence", foreign.NumericalEvidence)
+    monkeypatch.setattr(scaling, "check_qp_candidate", foreign.check_qp_candidate)
+    assert foreign.check_primal_infeasibility.__code__.co_filename == str(path)
+    result, _ = produced
+    with pytest.raises(proof.ProofError, match="loaded source callable"):
+        proof.validate_result(result, proof.sha(result.read_bytes()), ROOT, allow_cpu_smoke=True)
+
+
+@pytest.mark.parametrize("mode", [
+    "fresh", "changed_file", "foreign_preload", "foreign_qp", "foreign_operators", "foreign_scaling",
+    "checker_positional_defaults", "checker_keyword_defaults", "helper_keyword_defaults",
+    "evidence_defaults", "evidence_constructor", "evidence_constructor_code",
+])
+def test_loaded_source_fresh_process(mode, tmp_path):
+    """Execute this checked-in test file, not inline code or artifact snapshot code."""
+    root = tmp_path / "trusted"
+    shutil.copytree(ROOT / "src", root / "src")
+    (root / "scripts").mkdir()
+    shutil.copyfile(ROOT / proof.RUNNER, root / proof.RUNNER)
+    output = tmp_path / "fresh-process.json"
+    command = [
+        sys.executable, "-B", str(Path(__file__).resolve()), "--loaded-source-child",
+        mode, str(root), str(tmp_path / "evidence"), str(output),
+    ]
+    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    (tmp_path / "fresh-process.log").write_text(completed.stdout + completed.stderr)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    result = json.loads(output.read_bytes())
+    assert result["verdict"] == "PASS" and result["mode"] == mode
+    if mode == "fresh":
+        assert result["case_count"] == 3 and result["execution_verdict"] == "UNVERIFIED"
+        identity = result["loaded_source_identity"]
+        assert identity["root"] == str(root)
+        assert all(Path(item["path"]).is_relative_to(root / "src/openopt")
+                   for item in identity["modules"].values())
+        assert {"openopt.certificates.check_primal_infeasibility",
+                "openopt.certificates.check_unbounded_direction",
+                "openopt.qp.QPConfig.validate"} <= set(identity["callables"])
+    else:
+        assert "loaded source" in result["error"]
+
+
+def test_loaded_source_cost_and_live_hashes(tmp_path):
+    """Measured local cost only; no GPU/solver performance qualification."""
+    proof._compiled_source.cache_clear()
+    cold_start = time.perf_counter()
+    identity = proof.loaded_source_check(ROOT)
+    cold = time.perf_counter() - cold_start
+    samples = []
+    for _ in range(5):
+        start = time.perf_counter()
+        assert proof.loaded_source_check(ROOT) == identity
+        samples.append(time.perf_counter() - start)
+    assert proof._compiled_source.cache_info().hits > 0
+    (tmp_path / "guard-cost.json").write_bytes(proof.encode({
+        "verdict": "PASS", "root": str(ROOT), "cold_s": cold, "warm_s": samples,
+        "warm_median_s": float(np.median(samples)),
+        "cache": proof._compiled_source.cache_info()._asdict(),
+        "modules": len(identity["modules"]), "callables": len(identity["callables"]),
+        "qualification": "local CPU guard wall time; no GPU or optimizer speed claim",
+    }))
+
+
+def test_single_case_fixture_preserves_all_referenced_bytes(produced, tmp_path):
+    result, _ = produced
+    start = time.perf_counter()
+    root, saved = case_copy(produced, tmp_path, "gap_lp")
+    copied = proof.inventory(root)
+    elapsed = time.perf_counter() - start
+    original = proof.inventory(result.parent)
+    assert len(copied) < len(original)
+    assert all(value == original[name] for name, value in copied.items())
+    proof.replay_case(root, proof.descriptor(root, root / "gap_lp.json"), "cpu")
+    whole_start = time.perf_counter()
+    whole = tmp_path / "whole-evidence"
+    shutil.copytree(result.parent, whole)
+    assert proof.inventory(whole) == original
+    whole_elapsed = time.perf_counter() - whole_start
+    (tmp_path / "fixture-cost.json").write_bytes(proof.encode({
+        "verdict": "PASS", "original_files": len(original), "copied_files": len(copied),
+        "copied_bytes": sum(item["bytes"] for item in copied.values()),
+        "original_bytes": sum(item["bytes"] for item in original.values()),
+        "copy_and_byte_check_s": elapsed, "whole_copy_and_byte_check_s": whole_elapsed,
+        "copied_inventory": copied, "original_inventory": original, "case": saved["case"],
+        "qualification": "single local fixture copy comparison only; not solver performance",
+    }))
+
+
+@pytest.mark.parametrize("mutation", ["missing", "extra", "same_length_hash"])
+def test_single_case_fixture_rejects_file_set_mutations(produced, tmp_path, monkeypatch, mutation):
+    """The narrowed fixture must prove exact membership AND bytes before returning."""
+    result, _ = produced
+    saved = json.loads((result.parent / "gap_lp.json").read_bytes())
+    chosen = saved["model"]["q"]["components"]["values"]["path"]
+    real_copy = shutil.copyfile
+    calls = []
+
+    def mutated_copy(source, destination):
+        calls.append(Path(source).relative_to(result.parent).as_posix())
+        if Path(source).relative_to(result.parent).as_posix() != chosen:
+            return real_copy(source, destination)
+        if mutation == "missing":
+            return destination
+        answer = real_copy(source, destination)
+        if mutation == "extra":
+            Path(destination).with_name("unreferenced.npy").write_bytes(b"extra bytes")
+        else:
+            original = Path(destination).read_bytes()
+            changed = original[:-1] + bytes([original[-1] ^ 1])
+            assert len(changed) == len(original) and proof.sha(changed) != proof.sha(original)
+            Path(destination).write_bytes(changed)
+        return answer
+
+    monkeypatch.setattr(shutil, "copyfile", mutated_copy)
+    with pytest.raises(AssertionError, match="case-copy"):
+        case_copy(produced, tmp_path, "gap_lp")
+    assert chosen in calls
+    (tmp_path / "fixture-mutation.json").write_bytes(proof.encode({
+        "verdict": "PASS", "mutation": mutation, "chosen": chosen, "copy_calls": calls,
+        "qualification": "fixture membership/hash rejection, not numerical performance",
+    }))
+
+
+def mutate_checker_runtime(monkeypatch, mutation):
+    import openopt.certificates as certificates
+
+    checker = certificates.check_primal_infeasibility
+    evidence = certificates.NumericalEvidence
+    if mutation == "checker_positional_defaults":
+        monkeypatch.setattr(checker, "__defaults__", (None,))
+    elif mutation == "checker_keyword_defaults":
+        monkeypatch.setattr(checker, "__kwdefaults__", {"atol": .5, "rtol": .5})
+    elif mutation == "helper_keyword_defaults":
+        monkeypatch.setattr(certificates._array, "__kwdefaults__", {"bounds": True})
+    elif mutation == "evidence_defaults":
+        monkeypatch.setattr(evidence.__init__, "__defaults__", ("forged qualification",))
+    elif mutation == "evidence_constructor":
+        def replaced(self, *args, **kwargs):
+            raise AssertionError("substituted evidence constructor must never run")
+        monkeypatch.setattr(evidence, "__init__", replaced)
+    elif mutation == "evidence_constructor_code":
+        monkeypatch.setattr(evidence.__init__, "__code__",
+                            evidence.__init__.__code__.replace(co_consts=(None, "forged")))
+    elif mutation == "evidence_keyword_defaults":
+        monkeypatch.setattr(evidence.__init__, "__kwdefaults__", {"kind": "forged"})
+    elif mutation == "evidence_new":
+        # Updating a live type's __new__ changes its CPython constructor slot even
+        # after deleting the attribute. Mutate a detached type, not shared evidence.
+        members = {key: value for key, value in vars(evidence).items()
+                   if key not in ("__dict__", "__weakref__")}
+        members["__new__"] = staticmethod(lambda *args: object())
+        foreign = type(evidence.__name__, evidence.__bases__, members)
+        monkeypatch.setattr(certificates, "NumericalEvidence", foreign)
+    elif mutation == "problem_constructor":
+        monkeypatch.setattr(certificates._Problem.__init__, "__defaults__", (1.,))
+    elif mutation == "wrapper_defaults":
+        monkeypatch.setattr(certificates._arithmetic, "__defaults__", (None,))
+    else:
+        assert mutation == "boolean_tolerance"
+        monkeypatch.setattr(checker, "__kwdefaults__", {"atol": True, "rtol": 1e-8})
+
+
+@pytest.mark.parametrize("mutation", ["numpy_alias", "math_alias", "parent_foreign"])
+def test_checker_globals_and_parent_cache_rejected(tmp_path, monkeypatch, mutation):
+    import importlib
+    from types import SimpleNamespace
+
+    module = importlib.import_module("openopt.certificates")
+    proof.loaded_source_check(ROOT)
+    before = proof.sha(Path(module.__file__).read_bytes())
+    if mutation == "parent_foreign":
+        path = tmp_path / "foreign-certificates.py"
+        path.write_bytes(Path(module.__file__).read_bytes())
+        spec = importlib.util.spec_from_file_location("openopt.certificates", path)
+        foreign = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(foreign)
+        monkeypatch.setattr(sys.modules["openopt"], "certificates", foreign)
+        assert sys.modules["openopt.certificates"] is module
+        assert foreign is not module and proof.sha(path.read_bytes()) == before
+    else:
+        alias = "np" if mutation == "numpy_alias" else "math"
+        original = getattr(module, alias)
+        proxy = SimpleNamespace(**vars(original))
+        monkeypatch.setattr(module, alias, proxy)
+        assert getattr(module, alias) is not original
+    assert proof.sha(Path(module.__file__).read_bytes()) == before
+    with pytest.raises(proof.ProofError, match="loaded source"):
+        proof.loaded_source_check(ROOT)
+
+
+@pytest.mark.parametrize("mutation", [
+    "checker_positional_defaults", "checker_keyword_defaults", "helper_keyword_defaults",
+    "evidence_defaults", "evidence_constructor", "evidence_constructor_code",
+    "evidence_keyword_defaults", "evidence_new", "problem_constructor", "wrapper_defaults",
+    "boolean_tolerance",
+])
+def test_live_checker_defaults_and_evidence_constructor_rejected(monkeypatch, mutation):
+    """Same code/file hash does not imply the same runtime defaults or constructor."""
+    import openopt.certificates as certificates
+
+    proof.loaded_source_check(ROOT)
+    checker = certificates.check_primal_infeasibility
+    code_before = checker.__code__
+    hash_before = proof.sha(Path(certificates.__file__).read_bytes())
+    with pytest.MonkeyPatch.context() as patch:
+        mutate_checker_runtime(patch, mutation)
+        assert checker.__code__ is code_before
+        assert proof.sha(Path(certificates.__file__).read_bytes()) == hash_before
+        with pytest.raises(proof.ProofError, match="loaded source"):
+            proof.loaded_source_check(ROOT)
+    proof.loaded_source_check(ROOT)
+    assert certificates.NumericalEvidence(
+        "fixture", True, {}, {}, {}, {}).qualification.startswith("approximate numerical")
+
+
+@pytest.mark.parametrize("case", ["gap_lp", "infeasible", "unbounded"])
+@pytest.mark.parametrize("entry", ["case", "validate", "seal", "replay", "production"])
+@pytest.mark.parametrize("mutation", [
+    "checker_positional_defaults", "checker_keyword_defaults", "helper_keyword_defaults",
+    "evidence_defaults", "evidence_constructor", "evidence_constructor_code",
+])
+def test_runtime_defaults_reject_original_gap_and_rays(produced, tmp_path, monkeypatch,
+                                                     case, entry, mutation):
+    import openopt.certificates as certificates
+
+    result, bundle = produced
+    case_path = result.parent / (case + ".json")
+    saved = json.loads(case_path.read_bytes())
+    assert saved["numpy_original"]["passed"] and saved["independent_original"]["passed"]
+    before = proof.sha(Path(certificates.__file__).read_bytes())
+    mutate_checker_runtime(monkeypatch, mutation)
+    if entry != "production":
+        forbid_replay_execution(monkeypatch)
+    with pytest.raises(proof.ProofError, match="loaded source"):
+        if entry == "case":
+            proof.replay_case(result.parent, proof.descriptor(result.parent, case_path), "cpu")
+        elif entry == "validate":
+            proof.validate_result(result, proof.sha(result.read_bytes()), ROOT, allow_cpu_smoke=True)
+        elif entry == "seal":
+            proof.seal(result, proof.sha(result.read_bytes()), ROOT, allow_cpu_smoke=True)
+        elif entry == "replay":
+            proof.replay(bundle, proof.sha(bundle.read_bytes()), ROOT, allow_cpu_smoke=True)
+        else:
+            proof.run_cases(tmp_path / "production", [case], "cpu", cpu_smoke=True)
+    if entry == "production":
+        reports = list((tmp_path / "production").glob("cpu-smoke-*/result.json"))
+        assert len(reports) == 1
+        failure = json.loads(reports[0].read_bytes())
+        assert failure["returncode"] == 1 and failure["numerical_verdict"] == "FAIL"
+        assert failure["execution_verdict"] == "UNVERIFIED" and not failure["cases"]
+        assert "loaded source" in (reports[0].parent / "failure.log").read_text()
+    assert proof.sha(Path(certificates.__file__).read_bytes()) == before
+
+
+def loaded_source_child(mode, root, artifact, output):
+    """Fresh-process fixture driver; source comes from caller-trusted test copies."""
+    foreign_modules = {
+        "foreign_preload": "openopt.certificates", "foreign_qp": "openopt.qp",
+        "foreign_operators": "openopt.operators", "foreign_scaling": "openopt.scaling",
+    }
+    foreign = None
+    if mode in foreign_modules:
+        foreign = importlib.import_module(foreign_modules[mode])
+        assert Path(foreign.__file__).is_relative_to(ROOT)
+    spec = importlib.util.spec_from_file_location("fresh_trusted_producer", root / proof.RUNNER)
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+    if mode == "fresh":
+        assert not any(name == "openopt" or name.startswith("openopt.") for name in sys.modules)
+        expected = runner.source_map(root)
+        identity = runner.loaded_source_check(root, expected)
+        result = runner.run_cases(artifact, ["gap_lp", "infeasible", "unbounded"],
+                                  "cpu", cpu_smoke=True)
+        before = runner.inventory(result.parent)
+        with pytest.MonkeyPatch.context() as patch:
+            def forbidden(*args, **kwargs):
+                raise AssertionError("fresh replay attempted solve/factory/snapshot execution")
+            import openopt.qp as qp
+            import openopt.scaling as scaling
+            import openopt.operators as operators
+            for module, names in (
+                (qp, ("prepare_qp", "solve_qp")),
+                (scaling, ("solve_scaled_qp",)),
+                (operators, ("prepare_operator_qp", "conjugate_gradient")),
+                (runner, ("execute_case", "make_problem", "run_cases", "hardware", "freeze_sources")),
+            ):
+                for name in names:
+                    patch.setattr(module, name, forbidden)
+            digest = runner.sha(result.read_bytes())
+            runner.validate_result(result, digest, root, allow_cpu_smoke=True)
+            bundle = runner.seal(result, digest, root, allow_cpu_smoke=True)
+            path = artifact / "bundle.json"
+            runner.write(path, bundle)
+            accepted = runner.replay(path, runner.sha(path.read_bytes()), root, allow_cpu_smoke=True)
+        assert before == runner.inventory(result.parent)
+        assert accepted["case_count"] == 3
+        assert identity == accepted["loaded_source_identity"]
+        value = {"verdict": "PASS", "mode": mode, **{
+            key: accepted[key] for key in ("case_count", "execution_verdict", "loaded_source_identity")}}
+    else:
+        expected = runner.source_map(root)
+        if mode == "changed_file":
+            runner.loaded_source_check(root, expected)
+            path = root / "src/openopt/qp.py"
+            path.write_bytes(path.read_bytes() + b"\n# changed after trusted pin\n")
+        elif mode not in foreign_modules:
+            runner.loaded_source_check(root, expected)
+            import openopt.certificates as certificates
+
+            code = certificates.check_primal_infeasibility.__code__
+            with pytest.MonkeyPatch.context() as patch:
+                mutate_checker_runtime(patch, mode)
+                assert certificates.check_primal_infeasibility.__code__ is code
+                assert runner.source_map(root) == expected
+                try:
+                    runner.loaded_source_check(root, expected)
+                except runner.ProofError as error:
+                    value = {"verdict": "PASS", "mode": mode, "error": str(error),
+                             "unchanged_checker_code": True, "unchanged_source_map": True}
+                else:
+                    raise AssertionError("unsafe runtime defaults/constructor was accepted")
+            output.write_bytes(runner.encode(value))
+            return 0
+        try:
+            runner.loaded_source_check(root, expected)
+        except runner.ProofError as error:
+            value = {"verdict": "PASS", "mode": mode, "error": str(error)}
+        else:
+            raise AssertionError("unsafe loaded source was accepted")
+        if foreign is not None:
+            assert sys.modules[foreign_modules[mode]] is foreign
+            value["foreign_cache_retained"] = True
+    output.write_bytes(runner.encode(value))
+    return 0
+
+
+if __name__ == "__main__":
+    assert len(sys.argv) == 6 and sys.argv[1] == "--loaded-source-child"
+    raise SystemExit(loaded_source_child(
+        sys.argv[2], Path(sys.argv[3]), Path(sys.argv[4]), Path(sys.argv[5])))

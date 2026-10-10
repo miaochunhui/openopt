@@ -11,10 +11,15 @@ audit can qualify execution; numerical replay always leaves it UNVERIFIED.
 from __future__ import annotations
 
 import argparse
+import ast
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import MISSING, asdict
 from datetime import datetime, timezone
+from functools import lru_cache
 import hashlib
+import importlib
+from importlib.machinery import PathFinder
+import inspect
 import json
 import math
 import os
@@ -27,7 +32,7 @@ import tempfile
 import threading
 import time
 import traceback
-from types import SimpleNamespace
+from types import CodeType, ModuleType, SimpleNamespace
 from uuid import UUID
 
 import numpy as np
@@ -178,12 +183,265 @@ def freeze_sources(root, output):
     return sources
 
 
-def imported_source_check():
-    for name, module in sorted(sys.modules.items()):
+@lru_cache(maxsize=16)
+def _compiled_source(data, filename, optimize):
+    """Cache only compilation of exact bytes; live identity is never cached."""
+    def code_map(code, prefix=""):
+        result = {}
+        for child in code.co_consts:
+            if isinstance(child, CodeType):
+                key = prefix + child.co_name
+                result[key] = child
+                result.update(code_map(child, key + "."))
+        return result
+
+    return ast.parse(data), code_map(compile(
+        data, filename, "exec", dont_inherit=True, optimize=optimize))
+
+
+def loaded_source_check(current_root, expected_sources=None):
+    """Bind live configs/checkers to trusted files; compile bytes, never execute them."""
+    root = Path(current_root).resolve()
+    sources = source_map(root) if expected_sources is None else expected_sources
+    require(root == ROOT.resolve() and sha(read(__file__)) == pin(sources.get(RUNNER)),
+            "producer", "loaded source producer differs from explicit trusted root/hash")
+    modules = {}
+
+    def module_identity(name, module):
+        filename = getattr(module, "__file__", None)
+        require(isinstance(filename, str), name, "loaded source has no actual file")
+        path = Path(filename)
+        suffix = "__init__.py" if name == "openopt" else name[8:].replace(".", "/") + ".py"
+        wanted = root / "src/openopt" / suffix
+        require(path.is_absolute() and path.resolve() == wanted
+                and not any(p.is_symlink() for p in (path, *path.parents) if p != root.parent),
+                name, "loaded source file is outside exact trusted root")
+        data = read(path)
+        key = wanted.relative_to(root).as_posix()
+        require(key in sources and sha(data) == pin(sources[key]),
+                name, "loaded source actual file hash differs from trusted source")
+        spec = getattr(module, "__spec__", None)
+        require(spec is not None and spec.origin == str(wanted)
+                and module.__name__ == name and sys.modules.get(name) is module,
+                name, "loaded source module origin/cache identity differs")
+        if name == "openopt":
+            require(list(module.__path__) == [str(root / "src/openopt")],
+                    name, "loaded source package search path differs")
+        else:
+            parent_name, attribute = name.rsplit(".", 1)
+            require(getattr(sys.modules.get(parent_name), attribute, None) is module,
+                    name, "loaded source parent package/cache module differs")
+        return path, data
+
+    # Reject cached foreign packages before any new ordinary import can execute them.
+    for name, module in sorted(tuple(sys.modules.items())):
         if name == "openopt" or name.startswith("openopt."):
-            path = getattr(module, "__file__", None)
-            require(path and Path(path).resolve().is_relative_to(ROOT / "src/openopt"),
-                    name, "executed module is outside the frozen source root")
+            module_identity(name, module)
+    for name in ("openopt", "openopt.qp", "openopt.operators",
+                 "openopt.scaling", "openopt.certificates"):
+        if name not in sys.modules:
+            search = sys.path if name == "openopt" else [str(root / "src/openopt")]
+            spec = PathFinder.find_spec(name, search)
+            suffix = "__init__.py" if name == "openopt" else name[8:] + ".py"
+            require(spec is not None and spec.origin == str(root / "src/openopt" / suffix),
+                    name, "loaded source pending import is outside trusted root")
+    for name in ("openopt.qp", "openopt.operators", "openopt.scaling", "openopt.certificates"):
+        modules[name] = importlib.import_module(name)
+    identities = {}
+    for name, module in sorted(tuple(sys.modules.items())):
+        if name == "openopt" or name.startswith("openopt."):
+            path, data = module_identity(name, module)
+            identities[name] = {"path": str(path), "sha256": sha(data)}
+
+    callables = {}
+
+    def default_value(node, module):
+        if isinstance(node, ast.Attribute):
+            require(ast.unparse(node) == "torch.float64", module.__name__,
+                    "unsupported loaded source default expression")
+            return module.torch.float64
+        return ast.literal_eval(node)
+
+    def same_default(actual, wanted):
+        if type(actual) is not type(wanted):
+            return False
+        if type(wanted) in (list, tuple):
+            return len(actual) == len(wanted) and all(
+                same_default(a, b) for a, b in zip(actual, wanted))
+        if type(wanted) is dict:
+            return set(actual) == set(wanted) and all(
+                same_default(actual[key], value) for key, value in wanted.items())
+        return actual == wanted
+
+    def function_defaults(function, node, module, coordinate):
+        positional = tuple(default_value(value, module) for value in node.args.defaults)
+        keywords = {arg.arg: default_value(value, module)
+                    for arg, value in zip(node.args.kwonlyargs, node.args.kw_defaults)
+                    if value is not None}
+        actual_positional = function.__defaults__
+        actual_keywords = function.__kwdefaults__
+        require((actual_positional is None if not positional else
+                 type(actual_positional) is tuple and len(actual_positional) == len(positional)
+                 and all(same_default(actual, wanted)
+                         for actual, wanted in zip(actual_positional, positional)))
+                and (actual_keywords is None if not keywords else
+                     type(actual_keywords) is dict and set(actual_keywords) == set(keywords)
+                     and all(same_default(actual_keywords[key], value)
+                             for key, value in keywords.items())),
+                coordinate, "loaded source callable runtime defaults substituted")
+
+    def dataclass_constructor(cls, node, module, path, data):
+        coordinate = module.__name__ + "/" + node.name
+        require(type(cls) is type and cls.__bases__ == (object,)
+                and cls.__new__ is object.__new__,
+                coordinate, "loaded source dataclass constructor entry substituted")
+        defaults = {
+            field.target.id: MISSING if field.value is None else default_value(field.value, module)
+            for field in node.body
+            if isinstance(field, ast.AnnAssign) and isinstance(field.target, ast.Name)
+        }
+        fields = getattr(cls, "__dataclass_fields__", {})
+        params = getattr(cls, "__dataclass_params__", None)
+        init = vars(cls).get("__init__")
+        wanted_defaults = tuple(value for value in defaults.values() if value is not MISSING)
+        actual_defaults = getattr(init, "__defaults__", None)
+        require(list(fields) == list(defaults) and params is not None and params.frozen is True
+                and all(fields[key].default_factory is MISSING and fields[key].init is True
+                        and fields[key].kw_only is False
+                        and (fields[key].default is MISSING and key not in vars(cls)
+                             if value is MISSING else
+                             same_default(fields[key].default, value)
+                             and same_default(vars(cls).get(key), value))
+                        for key, value in defaults.items())
+                and inspect.isfunction(init) and init.__globals__ is vars(module)
+                and init.__kwdefaults__ is None
+                and (actual_defaults is None if not wanted_defaults else
+                     type(actual_defaults) is tuple and len(actual_defaults) == len(wanted_defaults)
+                     and all(same_default(actual, wanted)
+                             for actual, wanted in zip(actual_defaults, wanted_defaults))),
+                coordinate, "loaded source dataclass defaults/constructor substituted")
+        # Compare assignment-only generated init, never execute a source class.
+        arguments = ", ".join(["self", *defaults])
+        body = "\n".join(
+            f"        __dataclass_builtins_object__.__setattr__(self, {key!r}, {key})"
+            for key in defaults)
+        generated = (
+            "def factory():\n    __dataclass_builtins_object__ = object\n"
+            f"    def __init__({arguments}):\n{body}\n").encode()
+        wanted_init = _compiled_source(
+            generated, "<string>", sys.flags.optimize)[1]["factory.__init__"]
+        attrs = ("co_code", "co_consts", "co_names", "co_varnames", "co_freevars",
+                 "co_cellvars", "co_argcount", "co_kwonlyargcount", "co_posonlyargcount",
+                 "co_flags")
+        require(init.__code__.co_filename == "<string>"
+                and all(getattr(init.__code__, attr) == getattr(wanted_init, attr) for attr in attrs)
+                and len(init.__closure__ or ()) == 1
+                and init.__closure__[0].cell_contents is object,
+                coordinate, "loaded source generated dataclass constructor code substituted")
+        callables[coordinate.replace("/", ".") + ".__init__"] = {
+            "path": str(path), "sha256": sha(data), "line": node.lineno,
+            "code_filename": "<string>", "generated": "frozen dataclass assignment-only init",
+        }
+
+    for name, module in modules.items():
+        path, data = module_identity(name, module)
+        syntax, compiled = _compiled_source(data, str(path), sys.flags.optimize)
+        for declaration in syntax.body:
+            if isinstance(declaration, ast.Import):
+                for alias in declaration.names:
+                    require(alias.name in ("math", "numpy", "torch"), name,
+                            "unsupported loaded source dependency import")
+                    trusted = {"math": math, "numpy": np}.get(alias.name)
+                    if trusted is None:
+                        trusted = importlib.import_module("torch")
+                    require(getattr(module, alias.asname or alias.name, None) is trusted
+                            and sys.modules.get(alias.name) is trusted,
+                            name + "/" + alias.name, "loaded source dependency module alias substituted")
+            elif isinstance(declaration, ast.ImportFrom) and declaration.module in (
+                    "contextlib", "dataclasses"):
+                dependency = importlib.import_module(declaration.module)
+                for alias in declaration.names:
+                    require(getattr(module, alias.asname or alias.name, None)
+                            is getattr(dependency, alias.name),
+                            name + "/" + alias.name, "loaded source dependency callable alias substituted")
+        if name == "openopt.certificates":
+            selected = {}
+            for node in syntax.body:
+                if isinstance(node, ast.FunctionDef):
+                    selected[node.name] = (getattr(module, node.name, None), node)
+                if isinstance(node, ast.ClassDef):
+                    cls = getattr(module, node.name, None)
+                    require(inspect.isclass(cls) and cls.__module__ == name,
+                            name + "/" + node.name, "loaded source checker class substituted")
+                    dataclass_constructor(cls, node, module, path, data)
+                    for method in node.body:
+                        if isinstance(method, ast.FunctionDef):
+                            value = vars(cls).get(method.name)
+                            if isinstance(value, property):
+                                value = value.fget
+                            selected[node.name + "." + method.name] = (value, method)
+        else:
+            config_name = {"openopt.qp": "QPConfig", "openopt.operators": "OperatorQPConfig",
+                           "openopt.scaling": "ScalingConfig"}[name]
+            config = getattr(module, config_name, None)
+            require(inspect.isclass(config) and config.__module__ == name,
+                    name, "loaded source configuration class substituted")
+            node = next((node for node in syntax.body
+                         if isinstance(node, ast.ClassDef) and node.name == config_name), None)
+            require(node is not None, name, "loaded source configuration declaration missing")
+            dataclass_constructor(config, node, module, path, data)
+            method = next(method for method in node.body
+                          if isinstance(method, ast.FunctionDef) and method.name == "validate")
+            selected = {config_name + ".validate": (config.validate, method)}
+        for key, (value, declaration) in selected.items():
+            function = inspect.unwrap(value)
+            if value is not function:
+                require(key == "_arithmetic"
+                        and value.__code__ == contextmanager(function).__code__
+                        and len(value.__closure__ or ()) == 1
+                        and value.__closure__[0].cell_contents is function
+                        and value.__defaults__ is None and value.__kwdefaults__ is None
+                        and value.__globals__ is contextmanager(function).__globals__,
+                        name + "/" + key, "loaded source checker wrapper substituted")
+            code = getattr(function, "__code__", None)
+            require(code is not None and code.co_filename == str(path)
+                    and key in compiled and code == compiled[key]
+                    and function.__globals__ is vars(module) and function.__closure__ is None,
+                    name + "/" + key, "loaded source callable code differs from trusted bytes")
+            function_defaults(function, declaration, module, name + "/" + key)
+            for declaration in syntax.body:
+                if isinstance(declaration, ast.Assign):
+                    targets, value = declaration.targets, declaration.value
+                elif isinstance(declaration, ast.AnnAssign):
+                    targets, value = [declaration.target], declaration.value
+                else:
+                    continue
+                for target in targets:
+                    if isinstance(target, ast.Name) and target.id in code.co_names:
+                        require(same_default(getattr(module, target.id, MISSING),
+                                             default_value(value, module)),
+                                name + "/" + target.id, "loaded source global constant substituted")
+            callables[name + "." + key] = {"path": code.co_filename, "sha256": sha(data),
+                                         "line": code.co_firstlineno}
+        for key, value in vars(module).items():
+            if isinstance(value, ModuleType) and value.__name__.startswith("openopt."):
+                require(sys.modules.get(value.__name__) is value,
+                        name + "/" + key, "loaded source captured foreign module alias")
+            origin = getattr(value, "__module__", None)
+            if (origin in modules and origin != name and callable(value)
+                    and (key.startswith("check_") or key.endswith("Config")
+                         or key == "NumericalEvidence")):
+                require(getattr(modules[origin], getattr(value, "__name__", ""), None) is value,
+                        name + "/" + key, "loaded source captured foreign callable alias")
+    # Detect a file rewrite during the check, without importing artifact source.
+    for name, identity in identities.items():
+        require(sha(read(identity["path"])) == identity["sha256"],
+                name, "loaded source file changed during identity check")
+    return {"root": str(root), "modules": identities, "callables": callables}
+
+
+def imported_source_check():
+    return loaded_source_check(ROOT)
 
 
 def save_array(root, label, array):
@@ -595,6 +853,7 @@ def trace_termination(workspace):
 
 
 def execute_case(case, root, device, *, expected_model=None):
+    loaded_source_check(ROOT)
     import torch
     import openopt.operators as operators
     from openopt.certificates import (
@@ -851,6 +1110,7 @@ def run_cases(artifact_root, cases, device, *, cpu_smoke=False,
     code, telemetry = 0, Telemetry(not cpu_smoke)
     try:
         report["source_sha256"] = freeze_sources(ROOT, output)
+        report["loaded_source_identity"] = loaded_source_check(ROOT, report["source_sha256"])
         require(cpu_smoke or expectations is not None, "expectations",
                 "formal CUDA run requires caller pre-dispatch expectations")
         require((expectations is None) == (expectations_sha256 is None),
@@ -884,7 +1144,8 @@ def run_cases(artifact_root, cases, device, *, cpu_smoke=False,
             require(expected == current_expected and report["expectations"] == current_descriptor,
                     "expectations", "pre-dispatch expectations changed during solve")
         same_sources(report["source_sha256"], source_map(ROOT), "sources after solves")
-        imported_source_check()
+        require(report["loaded_source_identity"] == loaded_source_check(
+            ROOT, report["source_sha256"]), "loaded source", "production callable identity changed")
         report.update(verdict="CPU_SMOKE_PASS" if cpu_smoke else NUMERICAL_PASS,
                       numerical_verdict="PASS")
     except Exception as error:
@@ -918,7 +1179,8 @@ def compare_summary(saved, actual, coordinate):
                 coordinate + "/" + key, "saved metric differs from recomputation")
 
 
-def replay_case(root, item, device, *, expected_model=None):
+def replay_case(root, item, device, *, expected_model=None, current_root=None):
+    loaded_source_check(ROOT if current_root is None else current_root)
     saved = parse(read(bound(root, item)), item["path"])
     case = saved["case"]
     require(case in CASES and saved["device"] == device and saved["dtype"] == "torch.float64",
@@ -1143,6 +1405,7 @@ def validate_result(result_path, expected_sha256, current_root, *, allow_cpu_smo
     require(isinstance(sources, dict) and sources, "sources", "empty source membership")
     same_sources(sources, source_map(root / "source"), "frozen source snapshot")
     same_sources(sources, source_map(current_root), "current source")
+    loaded = loaded_source_check(current_root, sources)
     require((expectations is None) == (expectations_sha256 is None),
             "expectations", "path and caller pin must be supplied together")
     require(cpu or expectations is not None, "expectations",
@@ -1176,15 +1439,19 @@ def validate_result(result_path, expected_sha256, current_root, *, allow_cpu_smo
     for name in cases:
         require(saved["cases"][name]["path"] == name + ".json", name, "case sidecar substitution")
         outcome = replay_case(root, saved["cases"][name], device,
-                              expected_model=expected["cases"][name] if expected is not None else None)
+                              expected_model=expected["cases"][name] if expected is not None else None,
+                              current_root=current_root)
         require(outcome["case"] == name, name, "selected case identity mismatch")
         outcomes.append(outcome)
+    require(loaded == loaded_source_check(current_root, sources),
+            "loaded source", "replay callable identity changed")
     return {"verdict": "CPU_SMOKE_REPLAY_PASS" if cpu else NUMERICAL_PASS,
             "numerical_verdict": "PASS", "execution_verdict": "UNVERIFIED",
             "expectations": trusted,
             "scope": saved["scope"], "device": device, "cases": outcomes,
             "case_count": len(outcomes), "source_count": len(sources), "hardware": hw,
             "result_sha256": expected_sha256,
+            "loaded_source_identity": loaded,
             "qualification": "selected synthetic numerical replay; not exact proof, performance, "
                              "commercial parity, native conic/MIP or remote attestation"}
 
