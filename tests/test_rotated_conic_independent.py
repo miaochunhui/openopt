@@ -217,6 +217,36 @@ def test_soc_default_matches_independent_lorentz_projection(dtype, value):
     assert_coordinates(project_cones(original, (SOC(len(value)),)), original_projection(original, rotated=False))
 
 
+@pytest.mark.parametrize("value", [
+    [-1., -1., math.sqrt(2)],
+    [-2. ** 500, -2. ** 500, 2. ** 500, 2. ** 500, 1.],
+])
+def test_risk_polar_early_return_cannot_erase_exact_positive_projection(value):
+    original = torch.tensor(value, dtype=torch.float64)
+    expected = original_projection(original)
+    assert expected[0] > 0 and expected[1] > 0
+    assert_coordinates(project_cones(original, (RSOC(len(value)),)), expected)
+
+
+@pytest.mark.parametrize("value,atol,rtol", [
+    ([1., 1., 2.], .25, .25), ([1., 1., 2.], .25, .5),
+    ([1., 1., 2.], .25, .375),
+    ([1., 1., 2.], .25, math.nextafter(.375, 0.)),
+    ([1., 1., 2.], .25, math.nextafter(.375, 1.)),
+    ([1., 2., 2.], 1e-12, 0.), ([1.3e308] * 4, 1e-12, 0.),
+    ([1e300, 1e300, 1e300, 1e-100], 1e-12, 0.),
+    ([1e-100, 1e300, 1e100], 1e-101, .25),
+])
+def test_candidate_original_radial_tolerance_matches_exact_rational(value, atol, rtol):
+    from fractions import Fraction
+
+    a, b, *tail = [Fraction.from_float(float(x)) for x in value]
+    required = sum(x * x for x in tail) / (2 * max(a, b))
+    limit = Fraction.from_float(atol) + Fraction.from_float(rtol) * max(abs(min(a, b)), required)
+    expected = max(required - min(a, b), 0) <= limit
+    assert check_cone_feasibility(value, (RSOC(len(value)),), atol=atol, rtol=rtol).passed is expected
+
+
 def main():
     """Bounded batches with exact source inventory and terminal JUnit counts."""
     import argparse
