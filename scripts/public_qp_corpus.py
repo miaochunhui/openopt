@@ -178,9 +178,12 @@ def audit_records(raw: bytes, max_dense_bytes: int = DEFAULT_MAX_DENSE_BYTES) ->
             seen.add(header)
             section = header
             if header == "NAME":
-                if name is not None or len(tokens) != 2 or len(seen) != 1:
+                name_record = re.fullmatch(
+                    r"NAME\s+(\S+)(?:\s+SIZE:\s*N=\d+,\s*M=\d+,\s*NZ=\d+)?\s*", line,
+                )
+                if name is not None or name_record is None or len(seen) != 1:
                     raise ValueError(f"{coordinate}: NAME requires one name at start")
-                name = tokens[1]
+                name = name_record.group(1)
             elif name is None:
                 raise ValueError(f"{coordinate}: missing NAME")
             elif header in ("OBJSENSE", "OBJNAME") and len(tokens) == 2:
