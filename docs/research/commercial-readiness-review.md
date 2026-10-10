@@ -2,7 +2,8 @@
 
 ## Verdict And Scope
 
-Review cut: 2026-10-10, live collection 10:03-10:09 UTC. Independent
+Review cut: 2026-10-10, initial collection 10:03-10:09 UTC; infra publication
+boundary correction collected at 10:11 UTC (18:11 UTC+08). Independent
 worktree starts at `3792a86f9f5658642c5e250053a48d77c6425643`.
 Only this document is changed. No SDK installation/import/license checkout,
 credential inspection/change, new public/commercial qualification solve, cluster operation,
@@ -82,6 +83,9 @@ without solving. This review did not create or run coordinated mutations,
 and does not allege alteration of the pinned real result.
 Fix should compare the complete requested/effective configuration and reject
 missing/extra fields, independently of the candidate's mathematical verdict.
+Coordinator assigned the settings-contract implementation to Darwin after
+reading this finding. This is assignment, not verified repair or acceptance;
+this document seat does not modify the experiment or overlap that write set.
 
 ### P2: Runtime Identity And Budget Are Insufficient For General Claims
 
@@ -118,15 +122,46 @@ Two LPs contain no real public QP/conic/MIP or licensed commercial coverage.
 Strict infinite-bound sign, componentwise complementarity, LP dual range and
 signed gap must remain unchanged; small wrong-sign duals are not clipped.
 
-### P2: Shared Publication Faces Remain Coordinator-Owned
+### P1: Infra Shared Publication Faces Are Dirty; No Publication Writes
 
-Live `git status --short` at 10:06-10:07 UTC found both `/data/dev/openopt`
-and `/data/dev/openopt-wt-release4-20261010-publication` clean. No active
-shared-file collision was observed; cleanliness is not exclusive ownership
-or permission to publish. Generated `docs/design*.html`,
-`docs/benchmark-report*.html`, report generators, publication plan/source
-registry/index and infra `publish-all.sh` chain remain shared/coordinator
-write faces. This seat neither stages nor edits them.
+Correction to initial commit `6d2158a`: the 10:06-10:07 UTC inspection checked
+only `/data/dev/openopt` and its publication worktree. Their clean state
+does not establish that the infra publication chain has no active write
+collision. The earlier "No active shared-file collision was observed"
+conclusion is withdrawn as incompletely scoped.
+
+Fresh read-only infra inspection at **2026-10-10T18:11:10+08:00**
+(**2026-10-10T10:11:10+00:00**) returned all three paths as ` M`
+(unstaged worktree modifications). Infra canonical root is `/data/dev/infra`,
+accessed through `/home/mch/dev_ln/infra`, inspected HEAD
+`58f478eebcb7094815e88f61b177c97561e53e8b`:
+
+| Infra shared path | Git status | Worktree SHA256 observed during this correction |
+| --- | --- | --- |
+| docs/external/index.html | ` M` | `8492e287836a19540042720caed7e58f4ed8fa6524c694371eef8492b6e0f63d` |
+| ops/docs-site/scripts/gen-index-page-n8.py | ` M` | `c4e3526171e996ae84fa80f609b6c306829392dda0ff661eb49938266a790f63` |
+| ops/docs-site/sources.tsv | ` M` | `c2f0a883d2717fad4fbd558064fef165d8cc43eb92fa3485c5862d2dc81e6c5d` |
+
+The observed changes are other sessions' assets; ownership/content intent
+was not inferred from dirtiness. This round explicitly forbids publication
+writes, renderer/index/source-registry updates, staging, rollback, cleanup
+or executing the publication chain. Independent Openopt worktrees do not
+isolate these infra resources. **PUBLICATION_WRITE_GATE=BLOCKED_SHARED_DIRTY**,
+not evidence of an already published result or this seat causing a collision.
+The hashes are point-in-time coordinates, not a claim that active files are
+frozen. Status is reproducible read-only as infra, from `/data/dev/infra`:
+
+```text
+git status --short -- docs/external/index.html ops/docs-site/scripts/gen-index-page-n8.py ops/docs-site/sources.tsv
+```
+
+Generated Openopt `docs/design*.html`, `docs/benchmark-report*.html`, report
+generators, publication plans and infra `publish-all.sh` also remain shared/
+coordinator write faces. Before a later authorized publication, the main
+coordinator must resolve the existing owners' changes without overwriting
+them, recheck the actual infra write faces and serialize the approved chain.
+Cleanliness alone does not supply that authorization. This seat neither
+stages nor edits any of those files.
 
 `docs/research/publication.md:3` distinguishes PREPARED from PUBLISHED;
 the publication tool at `scripts/prepare_publication.py:411` retains online
@@ -161,6 +196,14 @@ Its read-only `--check-result` returned acceptance PASS,
 qualification/verdict UNVERIFIED, with identical counts. No execution flag
 or authorization digest was supplied. This is a synthetic QP discovery,
 not a solved commercial baseline on either public LP.
+
+Coordinator additionally reported `sdk-3l0yzykj` at 2026-10-10 10:10:25 UTC
+with four SDKs not discovered and zero solves. This is explicitly a coordinator
+update, not this seat's independently reread artifact or a new licensed run.
+No duplicate SDK probe or further external source fetch is performed for this
+correction; the independently pinned discovery/count evidence above remains
+the review's reproducible anchor. Missing authorization never implies free
+publication, redistribution or permission to install/use a baseline.
 
 Independent real robustness replay at
 `2026-10-10T10:05:45.950549+00:00`:
@@ -262,3 +305,12 @@ snapshot/provenance, CPU example and source consistency PASS. Subsequent
 edits only clarify this document and record that receipt. Reviewed code/tests
 remain identical to base `3792a86`. Document credential-pattern scan returned
 no matches; final path-scoped diff/commit must contain only this review.
+
+Publication-boundary correction CPU smoke finished
+`2026-10-10T10:13:45.900069+00:00`:
+`/hf3fs-jd/data/tmp/openopt-release-20261010/commercial-readiness-review/boundary-correction-smoke/smoke-hduspp7j/verification.json`,
+SHA256 `08d31b10be93c1d659f7772404e19e77d159f1ab16d909947ce3d032cf6a85d6`.
+80 passed, four explicit CUDA skips, zero failures/errors, source consistency
+PASS. Only this receipt paragraph was subsequently added; no code/test change.
+Infra's three dirty publication paths were read again before commit and
+remained modified. No publication, duplicate SDK probe or download was run.
