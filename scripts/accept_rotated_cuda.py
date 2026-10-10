@@ -72,6 +72,16 @@ def exact(a, b):
         b, sort_keys=True, allow_nan=False)
 
 
+def integer(value, expected):
+    """JSON booleans and integral floats are not evidence counters or schemas."""
+    return type(value) is int and value == expected
+
+
+def image_digest(value):
+    return type(value) is str and re.fullmatch(
+        r"[^\s@]+@sha256:[0-9a-f]{64}", value) is not None
+
+
 def sha(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
@@ -261,7 +271,7 @@ def check_recorded(evidence, replay, label):
     fields = {"schema_version", "kind", "passed", "checks", "metrics", "thresholds",
               "unavailable", "qualification"}
     require(isinstance(evidence, dict) and set(evidence) == fields
-            and evidence["schema_version"] == 1
+            and integer(evidence["schema_version"], 1)
             and evidence["kind"] == "conic_candidate_optimality", f"{label}: evidence schema")
     require(exact(evidence["checks"], replay["checks"])
             and evidence["passed"] is replay["passed"], f"{label}: original check verdict mismatch")
@@ -335,7 +345,7 @@ def replay_sidecar(saved):
     require(saved.get("test_identity") in IDENTITIES, "unknown exact identity")
     kind, case = IDENTITIES[saved["test_identity"]]
     extra = {"original_model": "analytic", "projection": "projection", "original_rejection": "negative"}[kind]
-    require(set(saved) == BASE_FIELDS | {extra} and saved["schema_version"] == 1
+    require(set(saved) == BASE_FIELDS | {extra} and integer(saved["schema_version"], 1)
             and saved["family"] == "rotated_conic_cuda" and saved["verdict"] == "PASS",
             "exact schema1 required")
     require(saved["case_kind"] == kind and saved["case_id"] == case, "identity/case mismatch")
@@ -392,7 +402,7 @@ def replay_sidecar(saved):
         item = cone_saved[name]
         require(set(item) == {"schema_version", "kind", "passed", "checks", "metrics",
                              "thresholds", "unavailable", "qualification"}
-                and item["schema_version"] == 1
+                and integer(item["schema_version"], 1)
                 and item["kind"] == ("dual_cone_feasibility" if name == "dual" else "cone_feasibility")
                 and exact(item["checks"], checks) and item["passed"] is all(checks.values())
                 and set(item["metrics"]) == set(item["thresholds"]) == set(checks),
@@ -454,7 +464,7 @@ def replay_sidecar(saved):
             oracle = p["oracle"]
             require(set(oracle) == {"algorithm", "precision", "expected", "atol", "rtol", "passed"}
                     and oracle["algorithm"] == "bounded_decimal_analytic_rsoc_v1"
-                    and oracle["precision"] == 800 and exact(oracle["atol"], 0.)
+                    and integer(oracle["precision"], 800) and exact(oracle["atol"], 0.)
                     and exact(oracle["rtol"], rel) and oracle["passed"] is True,
                     "recorded oracle contract")
             replay["projection"] = projection_gate(p["input"], p["output"], dtype, case)
@@ -566,14 +576,14 @@ def canonical_spec(spec, *, pod=False):
     for key, expected in (("dnsPolicy", "ClusterFirst"), ("schedulerName", "default-scheduler"),
                           ("terminationGracePeriodSeconds", 30)):
         if key in result:
-            require(result.pop(key) == expected, f"unexpected API default: {key}")
+            require(exact(result.pop(key), expected), f"unexpected API default: {key}")
     if "serviceAccount" in result:
         require(result.pop("serviceAccount") == result.get("serviceAccountName"), "serviceAccount alias")
     if pod:
         result.pop("nodeName")
         for key, value in (("enableServiceLinks", True), ("preemptionPolicy", "Never"), ("priority", 500)):
             if key in result:
-                require(result.pop(key) == value, f"unexpected Pod default: {key}")
+                require(exact(result.pop(key), value), f"unexpected Pod default: {key}")
         if "tolerations" in result:
             require(exact(result.pop("tolerations"), [
                 {"effect": "NoExecute", "key": "node.kubernetes.io/not-ready",
@@ -604,7 +614,8 @@ def canonical_spec(spec, *, pod=False):
             require(len(injected) == 1 and set(injected[0]) == {"name", "projected"},
                     "default API projected volume")
             projected = injected[0]["projected"]
-            require(set(projected) == {"defaultMode", "sources"} and projected["defaultMode"] == 420,
+            require(set(projected) == {"defaultMode", "sources"}
+                    and integer(projected["defaultMode"], 420),
                     "default API volume mode")
             sources = projected["sources"]
             require(isinstance(sources, list) and len(sources) == 3
@@ -635,13 +646,18 @@ def archive_execution(run_root, run, result_path, result, submitted, status, pod
                str(archived_case), "--target", PRODUCER, "--expression", "cuda_rotated"]
     environment = expected_environment(snapshot, archived_case)
     job, pods = status["job"], status["pods"]["items"]
+    require(all(resource.get("apiVersion") == "batch/v1" and resource.get("kind") == "Job"
+                for resource in (submitted, job)), "submitted/actual Job resource identity")
     require(len(pods) == 1 and job["metadata"]["name"] == descriptor["job"]
             and submitted["metadata"]["name"] == descriptor["job"]
             and job["metadata"]["namespace"] == submitted["metadata"]["namespace"] == run["namespace"],
             "sole Job/Pod identity")
     pod = pods[0]
+    require(pod.get("apiVersion") == "v1" and pod.get("kind") == "Pod",
+            "actual Pod resource identity")
     owners = pod["metadata"]["ownerReferences"]
     require(len(owners) == 1 and owners[0]["kind"] == "Job"
+            and owners[0].get("apiVersion") == "batch/v1"
             and owners[0]["uid"] == job["metadata"]["uid"]
             and owners[0]["name"] == descriptor["job"] and owners[0]["controller"] is True
             and pod["metadata"]["namespace"] == run["namespace"] and bool(pod["metadata"]["uid"]),
@@ -662,19 +678,22 @@ def archive_execution(run_root, run, result_path, result, submitted, status, pod
     for spec in specs[1:]:
         for key in ("image", "securityContext"):
             require(exact(spec["containers"][0][key], baseline[key]), f"actual container {key} mismatch")
-    require(submitted["spec"]["backoffLimit"] == job["spec"]["backoffLimit"] == 0
-            and job["spec"]["parallelism"] == job["spec"]["completions"] == 1
-            and job["status"]["succeeded"] == 1 and not job["status"].get("failed")
-            and not job["status"].get("active") and any(
+    require(all(integer(resource["spec"]["backoffLimit"], 0) for resource in (submitted, job))
+            and all(integer(submitted["spec"].get(key, 1), 1)
+                    and integer(job["spec"][key], 1) for key in ("parallelism", "completions"))
+            and integer(job["status"]["succeeded"], 1)
+            and all(integer(job["status"].get(key, 0), 0) for key in ("failed", "active"))
+            and any(
                 c["type"] == "Complete" and c["status"] == "True" for c in job["status"]["conditions"]),
             "Job not exactly completed once")
     states = pod["status"]["containerStatuses"]
     require(pod["status"]["phase"] == "Succeeded" and len(states) == 1, "Pod not succeeded")
     state = states[0]
     terminated = state["state"]["terminated"]
-    require(state["name"] == "benchmark" and state["restartCount"] == 0 and state["lastState"] == {}
-            and terminated["exitCode"] == 0 and terminated["reason"] == "Completed"
-            and "@sha256:" in state["imageID"], "container failure/restart/image digest")
+    require(state["name"] == "benchmark" and integer(state["restartCount"], 0)
+            and state["lastState"] == {} and integer(terminated["exitCode"], 0)
+            and terminated["reason"] == "Completed" and image_digest(state["imageID"]),
+            "container failure/restart/image digest")
     require(result["hardware"]["node"] == pod["spec"]["nodeName"], "result/Pod node mismatch")
     start, finish = timestamp(result["started_at"]), timestamp(result["finished_at"])
     require(timestamp(terminated["startedAt"]) <= start < finish
@@ -730,7 +749,8 @@ def junit_sidecars(path, result_root):
 
 
 def audit(manifest, source_root=ROOT):
-    require(set(manifest) == {"schema_version", "run_root", "files"} and manifest["schema_version"] == 1
+    require(set(manifest) == {"schema_version", "run_root", "files"}
+            and integer(manifest["schema_version"], 1)
             and set(manifest["files"]) == PIN_NAMES, "complete caller pin manifest")
     root = Path(manifest["run_root"]).resolve(strict=True)
     files = {name: pinned(root, binding) for name, binding in manifest["files"].items()}
@@ -746,9 +766,9 @@ def audit(manifest, source_root=ROOT):
     require(files["outer_result"] == root / "case-0/result.json"
             and files["outer_result"].read_bytes() == result_path.read_bytes(), "inner/outer result bytes")
     run, result = load(files["run"]), load(result_path)
-    require(result["verdict"] == "PASS" and result["returncode"] == 0
+    require(result["verdict"] == "PASS" and integer(result["returncode"], 0)
             and result["targets"] == [PRODUCER] and result["selection"] == "cuda_rotated"
-            and result["tests"] == {"tests": 13, "failures": 0, "errors": 0, "skipped": 0},
+            and exact(result["tests"], {"tests": 13, "failures": 0, "errors": 0, "skipped": 0}),
             "exact fixed13 result execution")
     selected, bindings = junit_sidecars(files["junit"], result_path.parent)
     sidecars = [load(path) for path in selected.values()]
@@ -786,7 +806,7 @@ def audit(manifest, source_root=ROOT):
             and all(type(runtime[key]) is str and runtime[key] for key in
                     ("python", "implementation", "executable", "numpy", "torch", "compiled_cuda"))
             and runtime["cuda_available"] is True and runtime["cuda_execution"] is True
-            and runtime["capability"] == [12, 0]
+            and exact(runtime["capability"], [12, 0])
             and runtime["gpu_name"] == result["hardware"]["gpu"] == "NVIDIA RTX PRO 4500 Blackwell"
             and runtime["torch"] == result["hardware"]["torch"]
             and runtime["compiled_cuda"] == result["hardware"]["cuda"]
@@ -797,11 +817,12 @@ def audit(manifest, source_root=ROOT):
                 timestamp(result["started_at"]) <= timestamp(saved["checked_at"])
                 <= timestamp(result["finished_at"]) for saved in sidecars), "runtime/time per case mismatch")
     telemetry = load(files["telemetry"])
-    require(type(telemetry) is list and len(telemetry) == result["telemetry_samples"] > 0,
+    require(type(telemetry) is list and integer(result["telemetry_samples"], len(telemetry))
+            and len(telemetry) > 0,
             "actual telemetry count mismatch")
     previous_time, previous_cpu, gpu_uuid = -1., -1, None
     for sample in telemetry:
-        require(sample["rc"] == 0 and sample["error"] is None
+        require(integer(sample["rc"], 0) and sample["error"] is None
                 and type(sample["cpu"]["usage_usec"]) is int and sample["cpu"]["usage_usec"] >= previous_cpu
                 and sample["monotonic_s"] > previous_time
                 and timestamp(result["started_at"]) <= timestamp(sample["at"])
@@ -863,7 +884,7 @@ def main(argv=None):
         manifest = load(args.pins)
         if args.mode == "numeric-replay":
             require(set(manifest) == {"schema_version", "result_root", "junit"}
-                    and manifest["schema_version"] == 1, "numeric-only pin schema")
+                    and integer(manifest["schema_version"], 1), "numeric-only pin schema")
             root = Path(manifest["result_root"]).resolve(strict=True)
             selected, _ = junit_sidecars(pinned(root, manifest["junit"]), root)
             results, failures = [], []

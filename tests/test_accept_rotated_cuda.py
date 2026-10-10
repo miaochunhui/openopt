@@ -278,7 +278,8 @@ def fixture_archive(tmp_path):
         "securityContext": {"allowPrivilegeEscalation": False}}],
         "restartPolicy": "Never", "runtimeClassName": "nvidia",
         "nodeSelector": {"nvidia.com/gpu.product": "NVIDIA-RTX-PRO-4500-Blackwell"}}
-    job = {"metadata": {"name": name, "namespace": "synthetic"},
+    job = {"apiVersion": "batch/v1", "kind": "Job",
+           "metadata": {"name": name, "namespace": "synthetic"},
            "spec": {"template": {"spec": spec}, "backoffLimit": 0}}
     write(root / "job-0.json", job)
     actual_job = deepcopy(job)
@@ -287,8 +288,9 @@ def fixture_archive(tmp_path):
     actual_job["status"] = {"succeeded": 1, "startTime": "2026-10-10T12:00:00Z",
                             "completionTime": "2026-10-10T12:00:11Z",
                             "conditions": [{"type": "Complete", "status": "True"}]}
-    pod = {"metadata": {"name": "synthetic-pod", "uid": "synthetic-pod-uid", "namespace": "synthetic",
-                        "ownerReferences": [{"kind": "Job", "name": name,
+    pod = {"apiVersion": "v1", "kind": "Pod",
+           "metadata": {"name": "synthetic-pod", "uid": "synthetic-pod-uid", "namespace": "synthetic",
+                        "ownerReferences": [{"apiVersion": "batch/v1", "kind": "Job", "name": name,
                                              "uid": "synthetic-job-uid", "controller": True}]},
            "spec": deepcopy(spec), "status": {"phase": "Succeeded", "containerStatuses": [{
                "name": "benchmark", "restartCount": 0, "lastState": {},
@@ -297,7 +299,8 @@ def fixture_archive(tmp_path):
                                        "startedAt": "2026-10-10T12:00:00Z",
                                        "finishedAt": "2026-10-10T12:00:10Z"}}}]}}
     pod["spec"]["nodeName"] = "synthetic-node"
-    write(root / f"{name}-status.json", {"job": actual_job, "pods": {"items": [pod]}})
+    write(root / f"{name}-status.json", {
+        "job": actual_job, "pods": {"apiVersion": "v1", "kind": "List", "items": [pod]}})
     (root / "synthetic-pod.log").write_text(log)
     run = {"namespace": "synthetic", "source_sha": commit, "source_hashes": hashes,
            "source_identity": {"commit": commit, "tree": tree, "clean": True, "sha256": hashes},
@@ -325,6 +328,151 @@ def test_synthetic_archive_positive_is_not_cuda_evidence(tmp_path):
     assert result["runtime"]["python"] == "synthetic"
     assert result["commercial"] == result["performance"] == "UNVERIFIED"
     assert result["old_proof_authority"] is False
+
+
+@pytest.mark.parametrize("mutation,reason", [
+    ("owner-apiVersion", "owner UID"),
+    ("job-kind", "resource identity"),
+    ("image-digest", "image digest"),
+    ("exit-bool", "image digest"),
+    ("restart-bool", "image digest"),
+    ("succeeded-bool", "completed once"),
+    ("backoff-bool", "completed once"),
+    ("parallelism-bool", "completed once"),
+    ("completion-bool", "completed once"),
+    ("result-bool", "fixed13 result"),
+])
+def test_original_falseaccepts_coordinated_repin_reject(tmp_path, mutation, reason):
+    """Original ten archive reds, with caller pins updated, not pin-mismatch tests."""
+    _, source, pins = fixture_archive(tmp_path)
+    assert auditor.audit(pins, source)["verdict"] == "PASS"
+    status = auditor.load(pins["files"]["status"]["path"])
+    state = status["pods"]["items"][0]["status"]["containerStatuses"][0]
+    if mutation == "owner-apiVersion":
+        status["pods"]["items"][0]["metadata"]["ownerReferences"][0]["apiVersion"] = "foreign/v9"
+    elif mutation == "job-kind":
+        status["job"]["kind"] = "Deployment"
+    elif mutation == "image-digest":
+        state["imageID"] = "foreign@sha256:not-a-digest"
+    elif mutation == "exit-bool":
+        state["state"]["terminated"]["exitCode"] = False
+    elif mutation == "restart-bool":
+        state["restartCount"] = False
+    elif mutation == "succeeded-bool":
+        status["job"]["status"]["succeeded"] = True
+    elif mutation in ("backoff-bool", "parallelism-bool", "completion-bool"):
+        key = {"backoff-bool": "backoffLimit", "parallelism-bool": "parallelism",
+               "completion-bool": "completions"}[mutation]
+        status["job"]["spec"][key] = False if key == "backoffLimit" else True
+    else:
+        for name in ("result", "outer_result"):
+            result = auditor.load(pins["files"][name]["path"])
+            result["returncode"] = False
+            result["tests"]["failures"] = False
+            write(Path(pins["files"][name]["path"]), result)
+            repin(pins, name)
+    write(Path(pins["files"]["status"]["path"]), status)
+    repin(pins, "status")
+    write(tmp_path / "mutated-pins.json", pins)
+    with pytest.raises(ValueError, match=reason) as rejected:
+        auditor.audit(pins, source)
+    write(tmp_path / "rejection.json", {
+        "mutation": mutation, "accepted": False, "reason": str(rejected.value),
+        "auditor_sha256": auditor.sha(auditor.__file__),
+        "fixture": "synthetic CPU control; not CUDA origin qualification"})
+
+
+@pytest.mark.parametrize("location", ["sidecar", "evidence", "analytic", "cone"])
+def test_boolean_schema_rejects_without_reinterpreting_coordinates(location):
+    saved = sidecar(next(i for i in auditor.IDENTITIES if "[rotated_lp-float64]" in i))
+    assert auditor.replay_sidecar(saved)["passed"] is True
+    target = {"sidecar": saved, "evidence": saved["evidence"],
+              "analytic": saved["analytic"]["evidence"],
+              "cone": saved["cone_evidence"]["dual"]}[location]
+    target["schema_version"] = True
+    with pytest.raises(ValueError, match="schema"):
+        auditor.replay_sidecar(saved)
+
+
+@pytest.mark.parametrize("value,expected,accepted", [
+    (0, 0, True), (1, 1, True), (13, 13, True),
+    (False, 0, False), (True, 1, False), (0., 0, False), (1., 1, False),
+    ("0", 0, False), (None, 0, False),
+])
+def test_integer_contract_has_no_json_aliases(value, expected, accepted):
+    assert auditor.integer(value, expected) is accepted
+
+
+@pytest.mark.parametrize("value,accepted", [
+    ("synthetic@sha256:" + "0" * 64, True),
+    ("docker-pullable://registry/repository@sha256:" + "a" * 64, True),
+    ("foreign@sha256:not-a-digest", False),
+    ("foreign@sha256:" + "a" * 63, False),
+    ("foreign@sha256:" + "a" * 65, False),
+    ("foreign@sha256:" + "A" * 64, False),
+    ("foreign@sha256:" + "a" * 64 + "\n", False),
+    ("foreign image@sha256:" + "a" * 64, False),
+    ("@sha256:" + "a" * 64, False),
+    (True, False),
+])
+def test_image_identity_requires_complete_digest(value, accepted):
+    assert auditor.image_digest(value) is accepted
+
+
+@pytest.fixture(scope="module")
+def execution_archive(tmp_path_factory):
+    """Shared read-only metadata input; each mutation receives deep copies."""
+    root, _, pins = fixture_archive(tmp_path_factory.mktemp("execution-types"))
+    return (
+        root, auditor.load(pins["files"]["run"]["path"]),
+        Path(pins["files"]["result"]["path"]), auditor.load(pins["files"]["result"]["path"]),
+        auditor.load(pins["files"]["submitted_job"]["path"]),
+        auditor.load(pins["files"]["status"]["path"]),
+        Path(pins["files"]["pod_log"]["path"]).read_text(),
+    )
+
+
+@pytest.mark.parametrize("resource,field", [
+    (resource, field) for resource in ("submitted", "job", "pod")
+    for field in ("apiVersion", "kind")
+])
+def test_resource_identity_fields_reject_foreign_or_missing(execution_archive, resource, field):
+    root, run, path, result, submitted, status, log = execution_archive
+    assert auditor.archive_execution(root, run, path, result, submitted, status, log)
+    for missing in (False, True):
+        submitted_copy, status_copy = deepcopy(submitted), deepcopy(status)
+        target = {"submitted": submitted_copy, "job": status_copy["job"],
+                  "pod": status_copy["pods"]["items"][0]}[resource]
+        if missing:
+            del target[field]
+        else:
+            target[field] = "foreign/v9" if field == "apiVersion" else "Deployment"
+        with pytest.raises(ValueError, match="resource identity"):
+            auditor.archive_execution(root, run, path, result, submitted_copy, status_copy, log)
+
+
+@pytest.mark.parametrize("field", [
+    "backoffLimit", "parallelism", "completions", "succeeded", "failed", "active",
+    "restartCount", "exitCode",
+])
+def test_archive_counters_reject_bool_and_float(execution_archive, field):
+    root, run, path, result, submitted, status, log = execution_archive
+    expected = 1 if field in ("parallelism", "completions", "succeeded") else 0
+    for value in (bool(expected), float(expected)):
+        submitted_copy, status_copy = deepcopy(submitted), deepcopy(status)
+        state = status_copy["pods"]["items"][0]["status"]["containerStatuses"][0]
+        if field in ("backoffLimit", "parallelism", "completions"):
+            target = status_copy["job"]["spec"]
+            submitted_copy["spec"][field] = value
+        elif field in ("succeeded", "failed", "active"):
+            target = status_copy["job"]["status"]
+        elif field == "restartCount":
+            target = state
+        else:
+            target = state["state"]["terminated"]
+        target[field] = value
+        with pytest.raises(ValueError, match="completed once|failure/restart"):
+            auditor.archive_execution(root, run, path, result, submitted_copy, status_copy, log)
 
 
 @pytest.mark.parametrize("field,value", [("workingDir", "/foreign"), ("envFrom", []), ("args", [])])

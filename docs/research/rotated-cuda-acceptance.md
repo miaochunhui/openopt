@@ -164,3 +164,58 @@ Neither command uses an old proof PASS as an input criterion.
 Commercial performance, adversarial runtime attestation, general conic scope,
 76 extremes, transfer-inclusive speedup, multi-GPU, licensed baselines and
 full release qualification remain UNVERIFIED.
+
+## Fixed13 Identity And Type Repair
+
+Repair base 75b54762e9fd37e334f9f34064bd7436c55c1250; the three-file scope
+remains unchanged. The independent ead32bdd suite and its original
+43-pass/11-fail receipt are retained, not edited or used as a developer
+qualification run. Main's separate reviewer must replay those unchanged
+54 tests against the eventual repair freeze.
+
+Submitted and actual resources must be batch/v1 Job and the actual Pod must
+be v1 Pod. Its sole controller owner must name batch/v1 Job with the same
+UID/name. ImageID must match a nonempty whitespace-free image prefix plus
+exactly @sha256: and 64 lowercase hexadecimal digits. Runtime-qualified
+prefixes such as docker-pullable:// remain legal. This syntactic digest
+check is not a signature check, registry validation or remote attestation.
+No new Pod-list top-level metadata is required of the existing portable
+fixture. All actual per-resource identities remain mandatory.
+
+Schemas, Job retry/completion/parallelism/success/failure/active counters,
+container exit/restart, result returncode/test counts, telemetry counts/rc,
+runtime capability and enumerated numeric API defaults distinguish JSON
+integers from booleans and integral floats. Missing submitted Job parallelism
+and completions retain the existing Kubernetes defaults of integer one;
+missing terminal failed/active retain integer zero. Present malformed fields
+do not receive these defaults. No command, model, oracle, source binding,
+tolerance, negative baseline or fixed13 denominator was changed.
+
+Owner red controls against the original gate:
+/hf3fs-jd/data/tmp/openopt-release-20261010/fixed13-type-repair/
+red-owner-v1/tests-_nheyvr8/verification.json and pytest.xml.
+Actual terminal: 14 failed, zero skips, 39.46 seconds. Ten complete synthetic
+archives were audited and caller-repinned after mutation, covering owner
+apiVersion, Job kind, digest, exit/restart/succeeded/retry/parallelism/
+completion booleans and coordinated inner/outer result booleans. The other
+four reds were sidecar/evidence/analytic/cone boolean schemas. These include
+the independent original eleven failure classes plus nested schema aliases.
+The additional owner tests retain the same rejection expectations and write
+machine-readable rejection.json for each coordinated archive mutation.
+Synthetic archives are CPU controls, not actual CUDA or origin evidence.
+
+Validation outputs use fresh directories under the same fixed13-type-repair
+prefix. Development/frozen verification.json requires actual test counts and
+source_consistency PASS; directory names alone are never verdicts. Historical
+seal/accept re-read the original caller-pinned real13 archive described above,
+using the repaired clean auditor, not new GPU execution. Final receipt paths
+and the clean commit are returned to main for independent review.
+
+development-full-v1/tests-2ncyd_kx/verification.json finished at
+2026-10-10T13:25:48.322093+00:00: PASS, 87 tests, zero failures/errors/skips,
+pytest wall 95.10 seconds, source_consistency PASS. Source clean=false:
+this is stationary development evidence, not the committed freeze.
+Both explicit historical opt-ins ran, including complete real13 archive
+and thirteen numerical sidecars. The ten synthetic coordinated rejections
+each retain mutated-pins.json and rejection.json beneath pytest-tmp.
+scan-v1/scan.json recorded zero literal/shape hits across the three files.
