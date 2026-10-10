@@ -737,6 +737,7 @@ def test_foreign_module_metadata_cannot_hide_actual_code(produced, tmp_path, mon
     "fresh", "changed_file", "foreign_preload", "foreign_qp", "foreign_operators", "foreign_scaling",
     "checker_positional_defaults", "checker_keyword_defaults", "helper_keyword_defaults",
     "evidence_defaults", "evidence_constructor", "evidence_constructor_code",
+    "sys_float_info",
 ])
 def test_loaded_source_fresh_process(mode, tmp_path):
     """Execute this checked-in test file, not inline code or artifact snapshot code."""
@@ -744,6 +745,15 @@ def test_loaded_source_fresh_process(mode, tmp_path):
     shutil.copytree(ROOT / "src", root / "src")
     (root / "scripts").mkdir()
     shutil.copyfile(ROOT / proof.RUNNER, root / proof.RUNNER)
+    if mode == "sys_float_info":
+        path = root / "src/openopt/certificates.py"
+        data = path.read_bytes()
+        assert data.count(b"\nimport math\n") == 1
+        path.write_bytes(data.replace(b"\nimport math\n", b"\nimport math\nimport sys\n") + (
+            b"\n_FLOAT_EPS = sys.float_info.epsilon\n"
+            b"\ndef _runtime_float_probe(*, floor=sys.float_info.min):\n"
+            b"    return (_FLOAT_EPS, floor, sys.float_info.max)\n"
+        ))
     output = tmp_path / "fresh-process.json"
     command = [
         sys.executable, "-B", str(Path(__file__).resolve()), "--loaded-source-child",
@@ -763,6 +773,9 @@ def test_loaded_source_fresh_process(mode, tmp_path):
         assert {"openopt.certificates.check_primal_infeasibility",
                 "openopt.certificates.check_unbounded_direction",
                 "openopt.qp.QPConfig.validate"} <= set(identity["callables"])
+    elif mode == "sys_float_info":
+        assert result["negative_count"] == 4 and len(result["rejections"]) == 4
+        assert result["unchanged_source_map"] is True
     else:
         assert "loaded source" in result["error"]
 
@@ -992,7 +1005,42 @@ def loaded_source_child(mode, root, artifact, output):
     spec = importlib.util.spec_from_file_location("fresh_trusted_producer", root / proof.RUNNER)
     runner = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(runner)
-    if mode == "fresh":
+    if mode == "sys_float_info":
+        expected = runner.source_map(root)
+        identity = runner.loaded_source_check(root, expected)
+        import openopt.certificates as certificates
+        from types import SimpleNamespace
+
+        probe = certificates._runtime_float_probe
+        code = probe.__code__
+        assert certificates.sys is sys and certificates._FLOAT_EPS == sys.float_info.epsilon
+        assert probe() == (sys.float_info.epsilon, sys.float_info.min, sys.float_info.max)
+        errors = {}
+        for mutation in ("sys_alias", "global_epsilon", "float_default", "probe_code"):
+            with pytest.MonkeyPatch.context() as patch:
+                if mutation == "sys_alias":
+                    patch.setattr(certificates, "sys", SimpleNamespace(float_info=sys.float_info))
+                elif mutation == "global_epsilon":
+                    patch.setattr(certificates, "_FLOAT_EPS", sys.float_info.epsilon * 2)
+                elif mutation == "float_default":
+                    patch.setattr(probe, "__kwdefaults__", {"floor": sys.float_info.min * 2})
+                else:
+                    patch.setattr(probe, "__code__", code.replace(co_consts=(None, "forged")))
+                assert runner.source_map(root) == expected
+                try:
+                    runner.loaded_source_check(root, expected)
+                except runner.ProofError as error:
+                    errors[mutation] = str(error)
+                else:
+                    raise AssertionError(f"sys.float_info mutation accepted: {mutation}")
+            assert runner.loaded_source_check(root, expected) == identity
+            assert probe.__code__ is code
+            assert probe() == (sys.float_info.epsilon, sys.float_info.min, sys.float_info.max)
+        value = {"verdict": "PASS", "mode": mode, "negative_count": len(errors),
+                 "rejections": errors, "unchanged_source_map": True,
+                 "loaded_source_identity": identity,
+                 "qualification": "synthetic trusted-source sys compatibility, not Nash integration"}
+    elif mode == "fresh":
         assert not any(name == "openopt" or name.startswith("openopt.") for name in sys.modules)
         expected = runner.source_map(root)
         identity = runner.loaded_source_check(root, expected)

@@ -140,3 +140,31 @@ integration or independent Herschel review is claimed by this commit.
 The main agent must integrate the commit, freeze its final current tree,
 revalidate source-origin in a fresh process and conduct the separate actual
 GPU/outer acceptance. Old snapshots cannot be relabeled as final-source runs.
+
+## Sys Compatibility Follow-Up
+
+The separately committed follow-up to `2cb3020` permits an actual trusted
+`sys` import/alias. Source defaults and referenced global constants may read
+only enumerated numeric fields of the trusted `sys.float_info` record; no
+arbitrary AST attribute, expression or call is evaluated. Direct references
+inside checker functions remain covered by code identity and the `sys` alias
+check. Mutation inside the trusted runtime itself remains outside the guard's
+claimed scope.
+
+No changing Nash checker tree was imported. A fresh-process test adds an
+explicit synthetic trusted checker declaration using `sys.float_info.epsilon`,
+`min` and `max` to the external test source copy before import and source pin.
+This is a compatibility fixture, never the evidence snapshot. One process
+checks the positive declaration and four actual mutations (module alias,
+global epsilon, keyword default and probe code), with unchanged source-map
+and successful restoration after each mutation. It runs no solver.
+
+`sys-compat-before-red/tests-o76w5cfc` preserved the real incompatibility:
+one failed test, `unsupported loaded source dependency import`.
+`sys-compat-after-green/tests-9u2_s9tr` records 16 passed, zero skips,
+10.12 s, including the four rejection controls in the sys fixture.
+Clean-commit follow-up validation is external under `sys-compat-clean-targeted/`
+and `sys-compat-clean-smoke/`; read the actual report source commit, clean
+status, byte hashes and terminal counts rather than assuming a PASS.
+This follow-up does not establish final Nash integration, a whole-file timing
+below three minutes, independent P1 closure or formal GPU qualification.

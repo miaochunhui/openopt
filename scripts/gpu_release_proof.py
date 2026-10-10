@@ -257,9 +257,19 @@ def loaded_source_check(current_root, expected_sources=None):
 
     def default_value(node, module):
         if isinstance(node, ast.Attribute):
-            require(ast.unparse(node) == "torch.float64", module.__name__,
+            expression = ast.unparse(node)
+            if expression == "torch.float64":
+                return module.torch.float64
+            float_fields = (
+                "epsilon", "min", "max", "dig", "mant_dig", "radix", "rounds",
+                "min_exp", "max_exp", "min_10_exp", "max_10_exp",
+            )
+            require(expression in {f"sys.float_info.{field}" for field in float_fields},
+                    module.__name__,
                     "unsupported loaded source default expression")
-            return module.torch.float64
+            # Resolve only this trusted immutable runtime record, never arbitrary
+            # AST attributes/calls or a potentially replaced checker module alias.
+            return getattr(sys.float_info, node.attr)
         return ast.literal_eval(node)
 
     def same_default(actual, wanted):
@@ -349,9 +359,9 @@ def loaded_source_check(current_root, expected_sources=None):
         for declaration in syntax.body:
             if isinstance(declaration, ast.Import):
                 for alias in declaration.names:
-                    require(alias.name in ("math", "numpy", "torch"), name,
+                    require(alias.name in ("math", "numpy", "torch", "sys"), name,
                             "unsupported loaded source dependency import")
-                    trusted = {"math": math, "numpy": np}.get(alias.name)
+                    trusted = {"math": math, "numpy": np, "sys": sys}.get(alias.name)
                     if trusted is None:
                         trusted = importlib.import_module("torch")
                     require(getattr(module, alias.asname or alias.name, None) is trusted
