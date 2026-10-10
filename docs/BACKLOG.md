@@ -105,8 +105,33 @@ entry. These are not promoted to DONE.
 
 ## Release4 Current Stop Gates
 
-The newest operational source/evidence is the 22:55 +08:00 section of
+The newest operational source/evidence is the 23:35 +08:00 section of
 `handoff/release4-20261010.md`; older bullets below are historical snapshots.
+Main0bd236e offline gate45 passed with zero skips; real known-evidence check
+remains INCOMPLETE/29 missing/release_complete=false. PSD independent128
+clean replay passes for bounded projection only, not CUDA/general SDP.
+Git repaired-owner unchanged35 replay is 20 pass/15 fail due to two new
+read-only graph queries refused by the observer. Narrow observation repair
+and original-content parity are required; no Git signoff or new push.
+Current live FAIL has the new COO failed Pod unattributed, despite four Ready
+and zero active/cordoned; precise diagnosis/recovery binding is still required.
+Real current operator CUDA53 failed: 44 pass/nine COO-device failures,
+zero skip, exit one and no restart. Preserve original Placement/thresholds;
+device-local structural repair, independent review and new one-card execution
+are required before expansion. Original13 sidecar was corrupted by an audit
+fixture; old47 acceptance is withdrawn and new57 admission is BLOCKED.
+No restoration, repin or retroactive acceptance has occurred. The separate
+permission incident also remains open.
+
+Git owner repair is clean eb3b23a, following seven original independent failures.
+Latest owner21 and smoke80/four local CUDA skips pass, but unchanged35 independent
+clean review and full current outgoing-object scan are pending. No new push.
+Offline release-insufficiency independent55 replay passed with
+release_complete=false; it cannot qualify absent capability or commercial data.
+Separate PSD/exp/power primitives and generated Openopt project catalog are
+under isolated review, not whole solvers or online/public acceptance.
+
+The following 22:55 evidence is historical, not a current all-source signoff:
 Clean main73613fc passed same-source smoke80/four local CUDA skips,
 report148/zero skips, renderer independent38/31 negatives/zero false accepts,
 HSD author110/one local CUDA skip plus original96/zero skips, bounded reader
