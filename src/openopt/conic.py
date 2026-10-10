@@ -243,6 +243,41 @@ def _evidence(
     )
 
 
+def _rotated_required_head(
+    first: float, second: float, tail: np.ndarray, atol: float, rtol: float,
+) -> tuple[float, bool]:
+    """Compare original binary64 products in a bounded dyadic accumulator.
+
+    The unit is the smallest binary64 subnormal. Squared input integers need
+    at most 4198 bits plus log2(tail size); this is not an optimizer certificate.
+    """
+    def integer(value):
+        numerator, denominator = float(value).as_integer_ratio()
+        return numerator << (1074 - (denominator.bit_length() - 1))
+
+    a, b = integer(first), integer(second)
+    squared = sum(integer(value) ** 2 for value in tail)
+    large = max(a, b)
+    small = min(a, b)
+    if large > 0:
+        unit = 1 << 1074
+        radial_pass = (
+            (squared - 2 * large * small) * unit
+            <= 2 * large * integer(atol) * unit
+            + integer(rtol) * max(2 * large * abs(small), squared)
+        )
+        try:
+            required = squared / ((2 * large) << 1074)
+        except OverflowError as error:
+            raise ValueError("RSOC required head is not representable in binary64") from error
+    else:
+        required = _norm(tail)
+        radial_pass = required - min(first, second) <= (
+            atol + rtol * max(abs(min(first, second)), required)
+        )
+    return required, radial_pass
+
+
 def _cone_check(
     value: np.ndarray, cones: tuple[Cone, ...], dual: bool, atol: float, rtol: float,
 ) -> NumericalEvidence:
@@ -261,26 +296,11 @@ def _cone_check(
             limits = atol + rtol * np.abs(block)
         elif isinstance(cone, RotatedSecondOrderCone):
             first, second = float(block[0]), float(block[1])
-            tail_scale = _norm(block[2:])
-            small, large = min(first, second), max(first, second)
-            required = tail_scale
-            if large > 0 and tail_scale:
-                # r^2/(2*large), without squared overflow or a subtractive SOC gap.
-                scale_mantissa, scale_exponent = math.frexp(tail_scale)
-                normalized_radius = _scalar(
-                    np.hypot.reduce(block[2:] / tail_scale), f"{name} RSOC scaled norm",
-                )
-                mantissa, norm_exponent = math.frexp(scale_mantissa * normalized_radius)
-                exponent = scale_exponent + norm_exponent
-                head_mantissa, head_exponent = math.frexp(large)
-                required = _scalar(math.ldexp(
-                    mantissa * mantissa / (2.0 * head_mantissa),
-                    2 * exponent - head_exponent,
-                ), f"{name} RSOC required head")
-            elif large > 0:
-                required = 0.0
+            small = min(first, second)
+            required, radial_pass = _rotated_required_head(first, second, block[2:], atol, rtol)
             violation = np.array([
-                max(-first, 0.0), max(-second, 0.0), max(required - small, 0.0),
+                max(-first, 0.0), max(-second, 0.0),
+                max(required - small, 0.0),
             ])
             limits = np.array([
                 atol + rtol * abs(first), atol + rtol * abs(second),
@@ -290,7 +310,11 @@ def _cone_check(
             tail = _scalar(np.hypot.reduce(block[1:]), f"{name} SOC norm")
             violation = np.array([max(tail - block[0], 0.0)])
             limits = np.array([atol + rtol * max(abs(block[0]), tail)])
-        checks[name] = bool(np.all(violation <= limits))
+        checks[name] = (
+            bool(np.all(violation[:2] <= limits[:2])) and radial_pass
+            if isinstance(cone, RotatedSecondOrderCone)
+            else bool(np.all(violation <= limits))
+        )
         metrics[name] = _norm(violation)
         thresholds[name] = _norm(limits)
     # An empty product is R^0, but callers must explicitly supply a size-0 vector.

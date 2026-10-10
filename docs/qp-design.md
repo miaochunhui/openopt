@@ -73,11 +73,16 @@ prototype for zero/nonnegative/SOC/RSOC products, with explicitly requested
 device/dtype and independent original cone/KKT/range/gap acceptance.
 The RSOC convention is `(a,b,w): a,b>=0, 2ab>=||w||^2`. The native Euclidean
 projection uses a scaled orthogonal Lorentz transform, retains interior values
-exactly, rationalizes near-polar projection weights, and reconstructs the small
-boundary head from the original tail with exponent-split arithmetic.
-Original feasibility checks each head's sign separately and computes
-`||w||^2/(2*max(a,b))` by exponent splitting: neither opposite-head scale nor
-subtractive transformed coordinates may conceal an original violation.
+exactly, compensates the original signed-product difference near the polar
+boundary, and retains the weight as a mantissa/exponent pair until each final
+coordinate. Float32 projection uses device-local float64 intermediates; it does
+not transfer projection work to the CPU. Original feasibility checks each
+head's sign separately and compares the required-head inequality and unchanged
+absolute/relative tolerance with bounded dyadic integer products from the
+original binary64 inputs. Norm square-root roundoff cannot invent a boundary
+deficit; neither opposite-head scale nor transformed coordinates may conceal
+an original violation. This limited exact input comparison is not a conic
+optimality certificate or arbitrary-precision solver.
 Unavailable/nonrepresentable arithmetic fails loudly. The explicit Clarabel
 CPU reference transforms the corresponding A/b rows and restores both s/z;
 all candidate checks run in original coordinates. CPU tests do not establish

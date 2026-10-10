@@ -55,10 +55,14 @@ def _cones(cones: object, rows: int) -> tuple[Cone, ...]:
 
 
 def _rotated_projection(block: torch.Tensor) -> None:
-    """Scale only the SOC calculation; recover its small boundary head stably."""
-    tail = block[2:].clone()
+    """Keep the projection weight as mantissa/exponent until each output."""
+    working = block if block.dtype == torch.float64 else block.to(torch.float64)
+    tail = working[2:].clone()
     tail_scale = tail.abs().max()
     has_tail = bool(tail_scale > 0)
+    if not has_tail:
+        block[:2].clamp_(min=0)
+        return
     radius_mantissa, radius_exponent = torch.frexp(tail_scale)
     if has_tail:
         normalized_tail_radius = torch.linalg.vector_norm(tail / tail_scale)
@@ -67,12 +71,11 @@ def _rotated_projection(block: torch.Tensor) -> None:
         )
         radius_exponent = radius_exponent + norm_exponent
     _finite(radius_mantissa, "RSOC tail radius mantissa")
-    first, second = block[0].clone(), block[1].clone()
+    first, second = working[0].clone(), working[1].clone()
 
     def restore_exponent(mantissa, exponent):
         # Some torch runtimes materialize 2**exponent before multiplication.
-        limit = 1023 if block.dtype == torch.float64 else 127
-        floor = -1022 if block.dtype == torch.float64 else -126
+        limit, floor = 1023, -1022
         initial = exponent.clamp(min=floor, max=limit)
         return torch.ldexp(torch.ldexp(mantissa, initial), exponent - initial)
 
@@ -100,8 +103,9 @@ def _rotated_projection(block: torch.Tensor) -> None:
     if inside(-first, -second):
         block.zero_()
         return
-    scale = block.abs().max()
-    normalized = block / scale
+    scale = working.abs().max()
+    scale_mantissa, scale_exponent = torch.frexp(scale)
+    normalized = working / scale
     inverse_root_two = 1.0 / math.sqrt(2.0)
     head = inverse_root_two * normalized[0] + inverse_root_two * normalized[1]
     difference = inverse_root_two * normalized[0] - inverse_root_two * normalized[1]
@@ -111,26 +115,63 @@ def _rotated_projection(block: torch.Tensor) -> None:
     if not bool(transformed_radius > 0):
         raise RuntimeError("native conic unresolved RSOC projection radius")
     if bool(head < 0):
-        # Rationalize R+head; the direct half-sum erases near-polar solutions.
-        normalized_radius = torch.linalg.vector_norm(normalized[2:])
-        numerator = normalized_radius ** 2 - 2 * normalized[0] * normalized[1]
-        weight = numerator / (
-            2 * transformed_radius * (transformed_radius - head)
+        # Compensated products retain the small difference near the polar cone.
+        def product_parts(left, right):
+            product = left * right
+            split = 134217729.0
+            expanded = split * left
+            left_high = expanded - (expanded - left)
+            left_low = left - left_high
+            expanded = split * right
+            right_high = expanded - (expanded - right)
+            right_low = right - right_high
+            error = (((left_high * right_high - product)
+                      + left_high * right_low) + left_low * right_high) + left_low * right_low
+            return product, error
+
+        tail_mantissas, tail_exponents = torch.frexp(tail)
+        a_mantissa, a_exponent = torch.frexp(first)
+        b_mantissa, b_exponent = torch.frexp(second)
+        tail_high, tail_low = product_parts(tail_mantissas, tail_mantissas)
+        head_high, head_low = product_parts(a_mantissa, b_mantissa)
+        exponents = torch.cat((2 * tail_exponents, (a_exponent + b_exponent + 1).reshape(1)))
+        highs = torch.cat((tail_high, -head_high.reshape(1)))
+        lows = torch.cat((tail_low, -head_low.reshape(1)))
+        nonzero = (highs != 0) | (lows != 0)
+        exponent = exponents[nonzero].max()
+        highs = restore_exponent(highs, exponents - exponent)
+        lows = restore_exponent(lows, exponents - exponent)
+        total = torch.zeros_like(first)
+        correction = torch.zeros_like(first)
+        for term in torch.cat((highs, lows)):
+            updated = total + term
+            recovered = updated - total
+            correction = correction + ((total - (updated - recovered)) + (term - recovered))
+            total = updated
+        numerator = total + correction
+        if not bool(numerator > 0):
+            raise RuntimeError("native conic unresolved RSOC signed-product difference")
+        weight_mantissa, weight_exponent = torch.frexp(
+            numerator / (2 * transformed_radius * (transformed_radius - head))
+            / (scale_mantissa * scale_mantissa),
         )
+        weight_exponent = weight_exponent + exponent - 2 * scale_exponent
     else:
         weight = 0.5 + 0.5 * head / transformed_radius
-    if not bool(weight > 0):
-        raise RuntimeError("native conic unresolved RSOC projection weight")
-    projected_head = weight * transformed_radius
-    large = (inverse_root_two * projected_head
-             + inverse_root_two * torch.abs(weight * difference)) * scale
-    _finite(large, "RSOC projected large head")
-    projected_tail = weight * tail
-    small = torch.zeros_like(large)
-    if has_tail and bool(weight > 0):
-        if not bool(large > 0):
-            raise RuntimeError("native conic unresolved RSOC projected head")
         weight_mantissa, weight_exponent = torch.frexp(weight)
+    if not bool(weight_mantissa > 0):
+        raise RuntimeError("native conic unresolved RSOC projection weight")
+    large = restore_exponent(
+        weight_mantissa * inverse_root_two * (transformed_radius + difference.abs())
+        * scale_mantissa, weight_exponent + scale_exponent,
+    )
+    _finite(large, "RSOC projected large head")
+    tail_mantissas, tail_exponents = torch.frexp(tail)
+    projected_tail = restore_exponent(
+        weight_mantissa * tail_mantissas, weight_exponent + tail_exponents,
+    )
+    small = torch.zeros_like(large)
+    if bool(large > 0):
         large_mantissa, large_exponent = torch.frexp(large)
         small = restore_exponent(
             (weight_mantissa * radius_mantissa) ** 2 / large_mantissa,

@@ -13,9 +13,17 @@ PyTorch device. It is Euclidean projection, not an unweighted projection
 through a nonorthogonal rescaling. No third-party solver or device fallback
 is introduced. Native calculations scale the Lorentz transformation, preserve
 interior inputs bitwise, rationalize near-polar weights and reconstruct the
-small boundary head without cancellation. Original feasibility independently
-checks each head sign, then evaluates the required small head from the stable
-tail norm using exponent-split `r^2/(2*large)`. Opposite-head scaling must not
+small boundary head without cancellation. Signed-product error compensation
+retains the near-polar difference. The weight remains a mantissa/exponent pair
+until each coordinate is restored, so weight underflow does not erase a
+representable output. A zero tail projects both heads independently.
+Float32 uses float64 intermediates on the requested device, not CPU projection.
+Original feasibility independently checks each head sign, then compares
+`S-2*M*m <= 2*M*atol + rtol*max(2*M*abs(m),S)` using bounded dyadic integers
+from the binary64 inputs, where `S=sum(w_i^2)`, `M=max(a,b)` and `m=min(a,b)`.
+The tolerance contract is unchanged. This exact input-inequality comparison
+does not certify optimality or make the solver arbitrary precision.
+Opposite-head scaling must not
 hide a negative coordinate, and subtractive Lorentz radii must not hide a
 small original deficit. No overflowing ab or w^2 is formed. Inputs, original
 slack, dual membership, block complementarity,
@@ -72,3 +80,20 @@ is `rotated-conic-independent-extreme-repair-v3/tests-mqzjw3en` (276 passed,
 19 CUDA skips, 18.87s), with source-consistency PASS. These are development
 bytes, not clean-commit or actual GPU execution receipts. The eleven
 extreme-coordinate negative/analytic cases remain in the default unit suite.
+
+## New Independent Counterexamples
+
+Frozen independent test commit `74f5583` added 64 tests without changing the
+production files or previous oracle. Its independent run and the owner's
+`owner-rsoc-independent-red-v1/tests-xnyw1thl` both retain 54 passes/10 failures.
+The failures cover tiny representable heads or tails lost by weight underflow,
+near-polar signed-product cancellation, checker normalization underflow, and
+an invented deficit at the exact huge boundary `[1.3e308]*4`.
+No independent test or tolerance was relaxed.
+
+The first owner repair
+`owner-rsoc-exponent-green-v1/tests-1exryl_p/verification.json` records 340
+passes/19 explicit CUDA skips, 20.70s, source-consistency PASS. This is a dirty
+development receipt before the final exact tolerance comparison; it is not
+clean-source acceptance, independent signoff or GPU qualification. The final
+comparison, clean committed rerun and independent review remain separate gates.
