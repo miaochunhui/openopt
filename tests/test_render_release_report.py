@@ -647,13 +647,15 @@ def test_optional_public_qualification_no_invented_run(inputs, false_pass):
         assert b'data-scalar="public_attempted">0' in files["benchmark-report-v4.html"]
 
 
-def scan_submission_with_existing_gate(paths=None):
+def scan_submission_with_existing_gate(paths=None, source_root=None):
     scanner = Path("/data/dev/infra/ops/dsh/scan-secrets-precommit.py")
     assert scanner.is_file(), "required local precommit scanner missing"
     check = subprocess.run([sys.executable, "-B", str(scanner), "--selftest"],
                            capture_output=True, text=True, check=False)
     assert check.returncode == 0 and "verdict=PASS" in check.stdout, "secret scanner selftest failed"
     command = [sys.executable, "-B", str(scanner), "--no-grep"]
+    source_root = report.ROOT if source_root is None else Path(source_root).resolve()
+    assert source_root.is_dir(), "explicit source root must exist"
     paths = paths or (
         "scripts/render_release_report.py", "tests/test_render_release_report.py",
         "docs/research/release-report.md",
@@ -661,11 +663,11 @@ def scan_submission_with_existing_gate(paths=None):
     assert len(paths) == len(set(paths)) and paths, "require unique explicit source paths"
     for name in paths:
         relative = Path(name)
-        target = report.ROOT / relative
+        target = source_root / relative
         assert (not relative.is_absolute() and ".." not in relative.parts
                 and target.is_file() and not target.is_symlink()
-                and target.resolve().is_relative_to(report.ROOT.resolve()))
-        command.extend(["--path", str(report.ROOT / name)])
+                and target.resolve().is_relative_to(source_root.resolve()))
+        command.extend(["--path", str(target)])
     result = subprocess.run(command, capture_output=True, text=True, check=False)
     assert result.returncode == 0, "local credential-literal gate failed; output withheld"
     verdict = next(line for line in result.stdout.splitlines() if line.startswith("SECRET_SCAN:"))
@@ -683,5 +685,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Safe explicit-file submission scan")
     parser.add_argument("--scan-submission", required=True, action="store_true")
     parser.add_argument("--path", action="append")
+    parser.add_argument("--source-root", type=Path)
     args = parser.parse_args()
-    scan_submission_with_existing_gate(args.path)
+    scan_submission_with_existing_gate(args.path, args.source_root)
