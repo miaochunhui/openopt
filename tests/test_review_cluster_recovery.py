@@ -7,6 +7,8 @@ does not execute CUDA tests and never changes original artifacts or cluster.
 import copy
 import json
 from pathlib import Path
+import sys
+from types import ModuleType
 from xml.etree import ElementTree as ET
 
 import pytest
@@ -17,6 +19,11 @@ REPORT = Path("/hf3fs-jd/data/tmp/openopt-release-20261010/failure-recovery-real
 REPORT_PIN = "cd911cf2cbe4f1488511157b02cb8c81c33b6ad740ea5f6437915bf4dbbb6610"
 LIVE = Path("/hf3fs-jd/data/tmp/openopt-release-20261010/live-recovery-v1/live-095407908933.json")
 LIVE_PIN = "09bb2842415c903046258ecff9f26f59a4bfdc21fb3fd50fcd8dd9ed16deb6a1"
+HISTORICAL_COMMIT = "e618b68c5209794c8cb1ec4cef727e7e13ef1ada"
+HISTORICAL_PIN = "784eba817bea9d2dfe48288827bfb4392068a564a01f6fba6cd65e4fb86b4bbc"
+ANCHORS = {"historical_commit": HISTORICAL_COMMIT, "historical_sha256": HISTORICAL_PIN}
+CLI_ANCHORS = ["--historical-commit", HISTORICAL_COMMIT,
+               "--historical-verifier-sha256", HISTORICAL_PIN]
 
 
 def xml(failed):
@@ -26,7 +33,7 @@ def xml(failed):
     for classname, name in audit.EXPECTED:
         case = ET.SubElement(suite, "testcase", classname=classname, name=name)
         if failed:
-            ET.SubElement(case, "failure").text = f"FileNotFoundError: {audit.recovery.DOC}"
+            ET.SubElement(case, "failure").text = f"FileNotFoundError: {audit.DOC}"
     return root
 
 
@@ -70,7 +77,7 @@ def test_coordinated_or_malformed_junit_cannot_fake_complete_selection(mutation)
     elif mutation == "wrong_cause":
         suite[0][0].text = "numerical failure"
     elif mutation == "duplicate_failure":
-        ET.SubElement(suite[0], "failure").text = f"FileNotFoundError {audit.recovery.DOC}"
+        ET.SubElement(suite[0], "failure").text = f"FileNotFoundError {audit.DOC}"
     raw = ET.tostring(root)
     if mutation == "doctype":
         raw = b"<!DOCTYPE testsuites>" + raw
@@ -78,14 +85,74 @@ def test_coordinated_or_malformed_junit_cannot_fake_complete_selection(mutation)
         audit.strict_junit(raw, True)
 
 
-def test_upstream_junit_accepts_coordinated_nonselected_names_but_review_rejects():
+def test_committed_old_junit_accepts_fake_names_independently_of_current_production(monkeypatch):
+    poisoned = ModuleType("scripts.verify_cluster_recovery")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("independent review must never call current production recovery")
+
+    poisoned.junit = poisoned.verify = poisoned.build = forbidden
+    monkeypatch.setitem(sys.modules, "scripts.verify_cluster_recovery", poisoned)
+    historical = audit.load_historical_recovery(HISTORICAL_COMMIT, HISTORICAL_PIN)
+    assert historical is not poisoned
+    assert historical.historical_source["commit"] == HISTORICAL_COMMIT
+    assert historical.historical_source["sha256"][audit.HISTORICAL_VERIFIER] == HISTORICAL_PIN
+    assert historical.__file__ == f"git:{HISTORICAL_COMMIT}:{audit.HISTORICAL_VERIFIER}"
+    assert historical.junit.__code__.co_filename == historical.__file__
     failed, succeeded = xml(True), xml(False)
     for root in (failed, succeeded):
         for index, case in enumerate(root.iter("testcase")):
             case.set("name", f"fake{index}")
-    assert audit.recovery.junit(ET.tostring(failed), True) == audit.recovery.junit(ET.tostring(succeeded), False)
+    assert historical.junit(ET.tostring(failed), True) == historical.junit(ET.tostring(succeeded), False)
     with pytest.raises(ValueError, match="exact expected selection"):
         audit.strict_junit(ET.tostring(succeeded), False)
+
+
+@pytest.mark.parametrize("commit,pin", [
+    ("HEAD", HISTORICAL_PIN), ("refs/heads/main", HISTORICAL_PIN),
+    ("e618b68", HISTORICAL_PIN), ("0" * 40, HISTORICAL_PIN),
+    (HISTORICAL_COMMIT, "0" * 64), (HISTORICAL_COMMIT, HISTORICAL_PIN.upper()),
+])
+def test_historical_toy_commit_or_mutable_ref_not_approved(commit, pin):
+    with pytest.raises(ValueError, match="caller historical commit/hash"):
+        audit.load_historical_recovery(commit, pin)
+
+
+def test_changed_git_blob_not_executed_even_with_caller_anchor(monkeypatch):
+    real_git = audit.git
+    called = []
+
+    def fake_git(*args):
+        called.append(args)
+        if args == ("show", f"{HISTORICAL_COMMIT}:{audit.HISTORICAL_VERIFIER}"):
+            return b"raise RuntimeError('untrusted code must never execute')\n"
+        return real_git(*args)
+
+    monkeypatch.setattr(audit, "git", fake_git)
+    with pytest.raises(ValueError, match="approved historical Git source mismatch"):
+        audit.load_historical_recovery(HISTORICAL_COMMIT, HISTORICAL_PIN)
+    assert called
+
+
+def test_reviewed_historical_source_does_not_require_old_current_checkout(monkeypatch, tmp_path):
+    monkeypatch.setattr(audit, "ROOT", tmp_path)
+    for relative in audit.REVIEWED:
+        path = tmp_path / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"current production P2 fixed independently\n")
+    # Bind Git lookup to the real trusted repository, not the dummy checkout.
+    import subprocess
+
+    repository = Path(audit.__file__).resolve().parents[1]
+
+    def committed_git(*args):
+        result = subprocess.run(["git", *args], cwd=repository, capture_output=True, check=True)
+        return result.stdout
+
+    monkeypatch.setattr(audit, "git", committed_git)
+    source = audit.reviewed_source(HISTORICAL_COMMIT, HISTORICAL_PIN)
+    assert source["current_checkout_equality_required"] is False
+    assert source["sha256"] == audit.REVIEWED
 
 
 @pytest.mark.parametrize("mutation", [
@@ -167,7 +234,7 @@ def real_counterexamples(tmp_path_factory):
     assert audit.descriptor(REPORT)["sha256"] == REPORT_PIN
     assert audit.descriptor(LIVE)["sha256"] == LIVE_PIN
     directory = tmp_path_factory.mktemp("real-recovery-counterexamples")
-    result = audit.counterexamples(REPORT, REPORT_PIN, LIVE, LIVE_PIN, directory)
+    result = audit.counterexamples(REPORT, REPORT_PIN, LIVE, LIVE_PIN, directory, **ANCHORS)
     audit.write_json(directory / "test-counterexamples.json", result)
     assert audit.descriptor(REPORT)["sha256"] == REPORT_PIN
     assert audit.descriptor(LIVE)["sha256"] == LIVE_PIN
@@ -182,6 +249,8 @@ def test_real_e618b68_recovery_and_unchanged_copy_pass_without_numerical_claim(r
     assert original["old_failure"] == "PRESERVED_FAIL"
     assert original["numerical_cuda_qualification"] == "NOT_GRANTED"
     assert original["commercial_qualification"] == original["publication"] == "UNVERIFIED"
+    assert original["production_verifier_used"] is original["historical_verifier_executed"] is False
+    assert result["historical_source"]["commit"] == HISTORICAL_COMMIT
     positive = result["cases"][0]
     assert positive["mutation"] == "unchanged_copy"
     assert positive["upstream_e618b68"] == positive["independent_review"] == "ACCEPTED"
@@ -198,11 +267,70 @@ def test_real_resealed_coordinated_negative_controls_rejected(real_counterexampl
     assert audit.descriptor(row["live"]["path"]) == row["live"]
 
 
+def test_real_canonical_replay_does_not_execute_historical_or_production_verifier(monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("canonical review cannot execute the historical or production verifier")
+
+    monkeypatch.setattr(audit, "load_historical_recovery", forbidden)
+    poisoned = ModuleType("scripts.verify_cluster_recovery")
+    poisoned.build = poisoned.verify = poisoned.junit = forbidden
+    monkeypatch.setitem(sys.modules, "scripts.verify_cluster_recovery", poisoned)
+    result = audit.review(REPORT, REPORT_PIN, LIVE, LIVE_PIN, **ANCHORS)
+    assert result["verdict"] == "RECOVERY_REVIEW_PASS"
+    assert result["production_verifier_used"] is result["historical_verifier_executed"] is False
+
+
+@pytest.mark.parametrize("mutation", [
+    "unchanged_copy", "replace_selection", "contradict_immutable_result",
+    "contradict_job_template", "wrong_runner", "inflate_telemetry",
+])
+def test_repaired_production_replays_actual_copies_without_old_gate_dependency(
+        real_counterexamples, mutation):
+    from scripts import verify_cluster_recovery as current
+
+    row = next(item for item in real_counterexamples["cases"] if item["mutation"] == mutation)
+    report = audit.pinned(row["report"]["path"], row["report"]["sha256"])
+    if mutation == "unchanged_copy":
+        rebuilt = current.build(report["failed_run"], report["recovered_run"])
+        assert rebuilt["schema_version"] == 2
+        assert rebuilt["verdict"] == "RECOVERY_VERIFIED"
+        assert rebuilt["failed"]["executed_sha256"] == rebuilt["recovered"]["executed_sha256"]
+    else:
+        with pytest.raises(ValueError):
+            current.build(report["failed_run"], report["recovered_run"])
+    assert audit.descriptor(row["report"]["path"]) == row["report"]
+    assert row["historical_source"]["commit"] == HISTORICAL_COMMIT
+    assert row["historical_source"]["sha256"][audit.HISTORICAL_VERIFIER] == HISTORICAL_PIN
+
+
+@pytest.mark.parametrize("mutation", ["summary_uid", "summary_count", "summary_type",
+                                     "empty_inputs", "extra_field", "promote_scope"])
+def test_resealed_report_cannot_change_canonical_summary_or_input_inventory(tmp_path, mutation):
+    report = audit.pinned(REPORT, REPORT_PIN)
+    if mutation == "summary_uid":
+        report["failed"]["job_uid"] = "fabricated"
+    elif mutation == "summary_count":
+        report["recovered"]["cases"] = []
+    elif mutation == "summary_type":
+        report["failed"]["exit_code"] = True
+    elif mutation == "empty_inputs":
+        report["inputs"] = []
+    elif mutation == "extra_field":
+        report["certified"] = True
+    else:
+        report["scope"] = "certified commercial CUDA qualification"
+    path = tmp_path / "resealed-report.json"
+    audit.write_json(path, report)
+    with pytest.raises(ValueError, match="canonical|scope"):
+        audit.review(path, audit.descriptor(path)["sha256"], LIVE, LIVE_PIN, **ANCHORS)
+
+
 def test_cli_failure_preserves_first_cause_and_external_log(tmp_path):
     output = tmp_path / "failed-cli"
     rc = audit.main([
         "review", "--report", str(REPORT), "--report-sha256", "0" * 64,
         "--live", str(LIVE), "--live-sha256", LIVE_PIN, "--artifact-dir", str(output),
+        *CLI_ANCHORS,
     ])
     assert rc == 1
     failure = json.loads((output / "failure.json").read_bytes())
@@ -214,4 +342,5 @@ def test_cli_failure_preserves_first_cause_and_external_log(tmp_path):
         audit.main([
             "review", "--report", str(REPORT), "--report-sha256", REPORT_PIN,
             "--live", str(LIVE), "--live-sha256", LIVE_PIN, "--artifact-dir", str(output),
+            *CLI_ANCHORS,
         ])
