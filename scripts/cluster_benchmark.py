@@ -20,6 +20,73 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def proof_cases() -> tuple[str, ...]:
+    if __package__:
+        from .gpu_release_proof import CASES
+    else:
+        from gpu_release_proof import CASES
+    return CASES
+
+
+def submission_units(args: argparse.Namespace) -> list[tuple[int, str | None]]:
+    """One independently fail-able case per one-card proof Job."""
+    if args.stage == "release-proof":
+        cases = args.proof_case
+        if not cases or len(cases) > 3 or len(set(cases)) != len(cases):
+            raise ValueError("release proof requires one to three distinct explicit cases")
+        if not set(cases) <= set(proof_cases()):
+            raise ValueError("unknown release proof case")
+        if args.target or args.expression:
+            raise ValueError("release proof cannot mix test targets or expressions")
+        return [(0, case) for case in cases]
+    if getattr(args, "proof_case", []):
+        raise ValueError("proof cases require the release-proof stage")
+    if not 1 <= len(args.sizes) <= 3:
+        raise ValueError("any launch is limited to one to three cards")
+    if args.stage in ("probe", "smoke", "regression") and len(args.sizes) != 1:
+        raise ValueError("probe/smoke/regression require one card")
+    if args.stage == "campaign" and args.campaign_mode == "correctness" and len(args.sizes) != 1:
+        raise ValueError("campaign correctness is a one-card gate")
+    if args.stage == "release-regression" and (len(args.sizes) != 1 or not args.target):
+        raise ValueError("release regression requires one card and explicit test targets")
+    return [(size, None) for size in args.sizes]
+
+
+def worker_command(
+    args: argparse.Namespace, source: Path, output: Path, size: int, proof_case: str | None,
+) -> list[str]:
+    script = {
+        "probe": "gpu_probe.py", "regression": "cluster_regression.py",
+        "smoke": "benchmark_general_qp.py", "ladder": "benchmark_general_qp.py",
+        "campaign": "gpu_qp_campaign.py",
+        "comparison": "benchmark_solver_comparison.py",
+        "release-regression": "gpu_release_check.py",
+        "release-proof": "gpu_release_proof.py",
+    }[args.stage]
+    result = ["python3", str(source / "scripts" / script)]
+    if args.stage == "release-proof":
+        if proof_case not in proof_cases():
+            raise ValueError("explicit release proof case required")
+        return result + [
+            "run", "--artifact-dir", str(output), "--device", "cuda:0", "--case", proof_case,
+        ]
+    result += ["--artifact-dir", str(output)]
+    if args.stage in ("smoke", "ladder"):
+        result += ["--size", str(size), "--repeats", str(args.repeats)]
+    if args.stage == "campaign":
+        result += ["--size", str(size), "--repeats", str(args.repeats),
+                   "--mode", args.campaign_mode]
+    if args.stage == "comparison":
+        result += ["--size", str(size), "--repeats", str(args.repeats),
+                   "--devices", "cpu", "cuda:0"]
+    if args.stage == "release-regression":
+        for target in args.target:
+            result += ["--target", target]
+        if args.expression:
+            result += ["--expression", args.expression]
+    return result
+
+
 def command(args: list[str]) -> str:
     result = subprocess.run(args, text=True, capture_output=True, check=False)
     if result.returncode:
@@ -69,8 +136,10 @@ def submit(args: argparse.Namespace) -> None:
         for pod in active["items"] if pod["status"]["phase"] in ("Pending", "Running")
         for container in pod["spec"]["containers"]
     )
-    if active_cards + len(args.sizes) > 3:
-        raise RuntimeError(f"three-card cap exceeded: active={active_cards} requested={len(args.sizes)}")
+    requested = len(args.proof_case) if getattr(args, "stage", "") == "release-proof" else len(args.sizes)
+    if active_cards + requested > 3:
+        raise RuntimeError(f"three-card cap exceeded: active={active_cards} requested={requested}")
+    units = submission_units(args)
     validate_performance_prerequisite(args)
     if args.stage == "ladder":
         if args.prerequisite is None:
@@ -88,37 +157,29 @@ def submit(args: argparse.Namespace) -> None:
     run = Path(tempfile.mkdtemp(prefix=args.stage + "-", dir=root))
     source = run / "source"
     source.mkdir()
+    identity = None
+    if args.stage in ("release-proof", "release-regression"):
+        if __package__:
+            from .verify import source_snapshot, check_source_consistency
+        else:
+            from verify import source_snapshot, check_source_consistency
+        identity = source_snapshot(ROOT)
+        if not identity["clean"]:
+            raise ValueError("release GPU submissions require clean committed source")
     hashes = snapshot(source)
+    if identity is not None:
+        consistency = check_source_consistency(identity, source_snapshot(ROOT))
+        if consistency["verdict"] != "PASS":
+            raise ValueError(f"source changed during release snapshot: {consistency}")
+        if any(identity["sha256"].get(name) != digest for name, digest in hashes.items()):
+            raise ValueError("release snapshot bytes differ from frozen source identity")
     outputs = []
-    script = {
-        "probe": "gpu_probe.py", "regression": "cluster_regression.py",
-        "smoke": "benchmark_general_qp.py", "ladder": "benchmark_general_qp.py",
-        "campaign": "gpu_qp_campaign.py",
-        "comparison": "benchmark_solver_comparison.py",
-        "release-regression": "gpu_release_check.py",
-    }[args.stage]
-    for index, size in enumerate(args.sizes):
+    for index, (size, proof_case) in enumerate(units):
         output = run / f"case-{index}"
         output.mkdir()
         name = f"openopt-{args.stage}-{run.name.split('-')[-1].replace('_', '')}-{index}"
         labels = {"repo": "openopt", "owner": "infra-openopt", "purpose": args.stage}
-        main_command = [
-            "python3", str(source / "scripts" / script),
-            "--artifact-dir", str(output),
-        ]
-        if args.stage in ("smoke", "ladder"):
-            main_command += ["--size", str(size), "--repeats", str(args.repeats)]
-        if args.stage == "campaign":
-            main_command += ["--size", str(size), "--repeats", str(args.repeats),
-                             "--mode", args.campaign_mode]
-        if args.stage == "comparison":
-            main_command += ["--size", str(size), "--repeats", str(args.repeats),
-                             "--devices", "cpu", "cuda:0"]
-        if args.stage == "release-regression":
-            for target in args.target:
-                main_command += ["--target", target]
-            if args.expression:
-                main_command += ["--expression", args.expression]
+        main_command = worker_command(args, source, output, size, proof_case)
         env = [
             {"name": "PYTHONPATH", "value": str(source / "src")},
             {"name": "PYTHONDONTWRITEBYTECODE", "value": "1"},
@@ -168,11 +229,15 @@ def submit(args: argparse.Namespace) -> None:
         manifest_path = run / f"job-{index}.json"
         dump(manifest_path, manifest)
         outputs.append({"job": name, "size": size, "output": str(output), "manifest": str(manifest_path)})
+        if proof_case is not None:
+            outputs[-1]["proof_case"] = proof_case
     record = {
         "started_at": datetime.now(timezone.utc).isoformat(), "namespace": args.namespace,
         "stage": args.stage, "source_sha": command(["git", "-C", str(ROOT), "rev-parse", "HEAD"]).strip(),
         "source_hashes": hashes, "jobs": outputs, "state": "PREPARED",
     }
+    if identity is not None:
+        record["source_identity"] = identity
     dump(run / "run.json", record)
     try:
         for item in outputs:
@@ -208,9 +273,12 @@ def collect(run: Path) -> None:
                 logs = command(["kubectl", "-n", namespace, "logs", name])
                 (run / f"{name}.log").write_text(logs)
         if state == "PASS":
-            path = Path(item["output"]) / "result.json"
-            if not path.is_file() or json.loads(path.read_text()).get("verdict") != "PASS":
+            path = collected_result(record, item)
+            if path is None:
                 state = "FAIL_ARTIFACT"
+            else:
+                item["result_path"] = str(path)
+                item["result_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
         states.append(state)
         print(f"OPENOPT_JOB job={item['job']} state={state} output={item['output']}", flush=True)
     record["collected_at"] = datetime.now(timezone.utc).isoformat()
@@ -218,6 +286,29 @@ def collect(run: Path) -> None:
     dump(run / "collection.json", record)
     if any(state.startswith("FAIL") for state in states):
         raise RuntimeError(f"cluster failure; evidence={run}")
+
+
+def collected_result(record: dict, item: dict) -> Path | None:
+    root = Path(item["output"])
+    if record["stage"] == "release-proof":
+        paths = sorted(root.glob("cuda-proof-*/result.json"))
+        if len(paths) != 1:
+            return None
+        path = paths[0]
+    else:
+        path = root / "result.json"
+    if not path.is_file() or path.is_symlink() or not path.resolve().is_relative_to(root.resolve()):
+        return None
+    value = json.loads(path.read_text())
+    if value.get("verdict") != "PASS":
+        return None
+    if record["stage"] == "release-proof" and (
+        value.get("returncode") != 0 or value.get("device") != "cuda:0"
+        or value.get("requested_cases") != [item["proof_case"]]
+        or set(value.get("cases", {})) != {item["proof_case"]}
+    ):
+        return None
+    return path
 
 
 def validate_performance_prerequisite(args: argparse.Namespace) -> None:
@@ -258,7 +349,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
     launch = sub.add_parser("submit")
-    launch.add_argument("--stage", choices=("probe", "smoke", "ladder", "regression", "campaign", "comparison", "release-regression"), required=True)
+    launch.add_argument("--stage", choices=("probe", "smoke", "ladder", "regression", "campaign", "comparison", "release-regression", "release-proof"), required=True)
     launch.add_argument("--campaign-mode", choices=("correctness", "adaptive", "batch", "operators"), default="correctness")
     launch.add_argument("--artifact-root", type=Path, required=True)
     launch.add_argument("--namespace", required=True)
@@ -272,6 +363,7 @@ def main() -> int:
     launch.add_argument("--cpu", type=int, default=4)
     launch.add_argument("--target", action="append", default=[])
     launch.add_argument("--expression", default="")
+    launch.add_argument("--proof-case", action="append", default=[])
     launch.add_argument("--prerequisite", type=Path)
     launch.add_argument("--acceptance-bundle", type=Path)
     launch.add_argument("--acceptance-sha256")
@@ -279,12 +371,6 @@ def main() -> int:
     read.add_argument("run", type=Path)
     args = parser.parse_args()
     if args.action == "submit":
-        if not 1 <= len(args.sizes) <= 3 or (args.stage in ("probe", "smoke", "regression") and len(args.sizes) != 1):
-            parser.error("probe/smoke require one card; any launch is limited to three")
-        if args.stage == "campaign" and args.campaign_mode == "correctness" and len(args.sizes) != 1:
-            parser.error("campaign correctness is a one-card gate")
-        if args.stage == "release-regression" and (len(args.sizes) != 1 or not args.target):
-            parser.error("release regression requires one card and explicit test targets")
         submit(args)
     else:
         collect(args.run)
