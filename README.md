@@ -84,8 +84,20 @@ operators with checked CG, residual-balanced rho and independent numerical
 evidence checks. They are opt-in and remain experimental.
 See [the v3 measured report](docs/benchmark-report-v3.html) for scoped batch
 benefit, negative results, independent acceptance and remaining commercial gaps.
-There is no universal `openopt.minimize`, conic/MIP backend, or solver-generated
-infeasible/unbounded certificate. See [the exact boundary](docs/qp-design.md).
+Optional bounded Ruiz scaling restores original coordinates before independent
+acceptance. Jacobi-preconditioned CG and generated numerical infeasibility or
+recession directions are opt-in; objective-gap termination is independently
+checked. Batch solves explicitly reject unsupported termination options.
+
+Conic zero/nonnegative/SOC contracts have an explicitly selected Clarabel CPU
+reference backend. MILP has an explicitly selected HiGHS CPU reference backend
+with independent incumbent checks. These are not native GPU conic/MIP engines;
+MIQP and other cone classes remain unsupported. Explicit CUDA requests never
+route to these CPU references. Commercial LP/QP adapters require an authorized
+installed solver and frozen-model replay; discovery alone is not qualification.
+There is no universal `openopt.minimize`. See
+[the exact boundary](docs/qp-design.md) and
+[release completion gates](docs/release-contract.md).
 GPU acceleration is not automatically preferable: small problems measured
 slower on GPU. Explicit requests never silently fall back.
 

@@ -95,6 +95,7 @@ def submit(args: argparse.Namespace) -> None:
         "smoke": "benchmark_general_qp.py", "ladder": "benchmark_general_qp.py",
         "campaign": "gpu_qp_campaign.py",
         "comparison": "benchmark_solver_comparison.py",
+        "release-regression": "gpu_release_check.py",
     }[args.stage]
     for index, size in enumerate(args.sizes):
         output = run / f"case-{index}"
@@ -113,6 +114,11 @@ def submit(args: argparse.Namespace) -> None:
         if args.stage == "comparison":
             main_command += ["--size", str(size), "--repeats", str(args.repeats),
                              "--devices", "cpu", "cuda:0"]
+        if args.stage == "release-regression":
+            for target in args.target:
+                main_command += ["--target", target]
+            if args.expression:
+                main_command += ["--expression", args.expression]
         env = [
             {"name": "PYTHONPATH", "value": str(source / "src")},
             {"name": "PYTHONDONTWRITEBYTECODE", "value": "1"},
@@ -252,7 +258,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
     launch = sub.add_parser("submit")
-    launch.add_argument("--stage", choices=("probe", "smoke", "ladder", "regression", "campaign", "comparison"), required=True)
+    launch.add_argument("--stage", choices=("probe", "smoke", "ladder", "regression", "campaign", "comparison", "release-regression"), required=True)
     launch.add_argument("--campaign-mode", choices=("correctness", "adaptive", "batch", "operators"), default="correctness")
     launch.add_argument("--artifact-root", type=Path, required=True)
     launch.add_argument("--namespace", required=True)
@@ -264,6 +270,8 @@ def main() -> int:
     launch.add_argument("--sizes", type=int, nargs="+", default=[64])
     launch.add_argument("--repeats", type=int, default=5)
     launch.add_argument("--cpu", type=int, default=4)
+    launch.add_argument("--target", action="append", default=[])
+    launch.add_argument("--expression", default="")
     launch.add_argument("--prerequisite", type=Path)
     launch.add_argument("--acceptance-bundle", type=Path)
     launch.add_argument("--acceptance-sha256")
@@ -275,6 +283,8 @@ def main() -> int:
             parser.error("probe/smoke require one card; any launch is limited to three")
         if args.stage == "campaign" and args.campaign_mode == "correctness" and len(args.sizes) != 1:
             parser.error("campaign correctness is a one-card gate")
+        if args.stage == "release-regression" and (len(args.sizes) != 1 or not args.target):
+            parser.error("release regression requires one card and explicit test targets")
         submit(args)
     else:
         collect(args.run)

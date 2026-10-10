@@ -27,29 +27,50 @@ objective now fail explicitly rather than allowing an overflow false success.
 
 `solved` requires primal feasibility, stationarity and normal-cone residuals
 below absolute/relative tolerances. It is an approximate numerical status, not
-an exact certificate. `max_iterations` does not distinguish infeasible from
-unbounded; no such certificate is advertised. No presolve, scaling, sparse
-backend, conic scope, MIP solver, universal `minimize`, or automatic GPU routing
-is implemented by the dense default path.
+an exact certificate. The unchanged default `max_iterations` does not distinguish
+infeasible from unbounded. Opt-in `dual_gap_termination=True` adds independent
+original-model dual-range/gap checks. Opt-in `direction_termination=True` derives
+directions from ADMM checkpoints and independently checks them; unbounded status
+also requires a saved feasible base. Unverified directions remain unknown.
+No full presolve, native GPU conic/MIP engine, MIQP, universal `minimize`, or
+automatic GPU routing is implemented by the dense default path.
 
 ## Optional Research Paths
 
 `openopt.batch` provides same-shape stacked dense QPs with batched factor/solve,
 per-item status, metrics and real checked iteration counts. Finished items freeze
 while others continue. Cold includes stacking/validation/transfers; prepared
-excludes setup. This path explicitly rejects adaptive rho instead of ignoring it.
+excludes setup. This path explicitly rejects adaptive rho, dual-gap termination
+and direction termination instead of ignoring unsupported options.
 
 `openopt.operators` provides dense/COO/CSR and borrowed matrix-free operators,
 with CG true-residual acceptance. It never densifies sparse matrices or forms
 the dense Gram system. The caller must declare `assume_psd=True`; probes do not
-certify convexity. The path is experimental, unpreconditioned and slower on the
-measured small sparse case. It is not a default routing replacement.
+certify convexity. Opt-in Jacobi PCG checks the true residual and preserves
+COO/CSR sparsity; matrix-free preconditioning requires an explicit SPD inverse
+action. Fewer CG iterations alone are not an end-to-end speed claim.
+The historical small sparse case was slower. This is not a default replacement.
+
+`openopt.scaling` applies opt-in bounded reversible Ruiz/cost scaling. Solutions
+and multipliers are restored, then checked against the unscaled original model.
+It does not replace original tolerances or silently fix a failed qualification.
 
 `openopt.certificates` independently checks supplied original-coordinate
 candidates, numerical dual range/gap, Farkas directions and recession rays.
-It does not generate directions or change solver termination status. Singular
-spectral uncertainty remains unavailable. Approximate numerical evidence is
-not an exact proof or a rigorous certified bound.
+The dense solver can now opt into these checks for generated checkpoint
+directions and termination. Singular spectral uncertainty remains unavailable.
+Approximate numerical evidence is not an exact proof or rigorous certified bound.
+
+`openopt.conic` defines zero, nonnegative and second-order cones, with independent
+cone/KKT/complementarity/gap checks and an explicitly selected Clarabel CPU
+reference. `openopt.integer` defines MILP bounds/integrality, an explicit HiGHS
+CPU reference and independent incumbent/gap checks. MIQP is rejected; neither
+module silently falls back from CUDA or constitutes a native GPU solver.
+
+The restricted MPS/QPS importer freezes original bytes, model arrays, objective
+sense/offset and bounds. Unsupported constructs are rejected rather than
+silently dropped. Acquisition and public-model qualification are separate
+gates; parser tests do not establish representative industrial coverage.
 
 `openopt.corpus` supplies eight reproducible synthetic QP/LP stress families,
 including singular, redundant, infeasible and unbounded models. These are not
@@ -110,9 +131,10 @@ GPU results lacked replay sidecars/statuses; these are preserved but rejected
 by independent acceptance, and corrected producers generated new evidence.
 
 One seeded dense problem per size is not a representative optimization corpus.
-Broad ill-conditioning/degeneracy coverage, solver-generated certificates,
-diverse sparse structure, parameter robustness and commercial runs remain
-unqualified. The measured
+Broad ill-conditioning/degeneracy coverage, general numerical certificate
+qualification, diverse sparse structure, parameter robustness and commercial
+runs remain unqualified. Opt-in implementations do not close those gates.
+The measured
 v3 batch speedup is against this project's sequential GPU execution. The
 earlier v2 speedup was against its four-thread CPU prototype. Neither proves
 commercial superiority. Current CPU comparisons against OSQP/Clarabel are

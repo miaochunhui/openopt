@@ -97,6 +97,8 @@ class PreparedBatchQP:
         config.validate()
         if getattr(config, "adaptive_rho", False):
             raise ValueError("batch QP supports fixed rho only; adaptive_rho must be False")
+        if getattr(config, "dual_gap_termination", False) or getattr(config, "direction_termination", False):
+            raise ValueError("batch QP does not support dual-gap or direction termination")
         if not isinstance(problem, BatchQPProblem):
             raise TypeError("problem must be BatchQPProblem")
         tensors = (problem.P, problem.q, problem.A, problem.l, problem.u)

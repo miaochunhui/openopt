@@ -4,7 +4,10 @@
   foundation. Do not modify infra or optimizer as a side effect of work here.
 - `openopt` is the project/distribution name. Preserve `openpo` compatibility.
   Legacy models are portfolio-specific; `src/openopt/qp.py` is a separate
-  experimental real dense convex QP/LP core, not a complete general optimizer.
+  experimental real convex QP/LP core, not a complete general optimizer.
+  Scaling, preconditioned operators and numerical termination are opt-in.
+  Conic and MILP reference backends are explicitly CPU-only; they do not
+  establish native GPU capability, MIQP support or commercial qualification.
 - Product direction: a general-purpose GPU-accelerated optimizer targeting
   commercial-grade correctness, robustness and performance. Gurobi and CPLEX
   are LP/QP/MIP baselines; MOSEK is a convex/conic baseline. This is a target,
@@ -14,8 +17,8 @@
   regression entry. Neither is a performance-release qualification.
 - Changes to algorithms, solver parameters or benchmark methodology must update
   `docs/qp-design.md` and the generated `docs/design.html` /
-  `docs/benchmark-report.html`. Use `scripts/render_qp_report.py` with external
-  machine-readable evidence; do not manually edit generated HTML.
+  `docs/benchmark-report.html`. Use the applicable versioned report generator
+  with external machine-readable evidence; do not manually edit generated HTML.
 - Compare continuous LP/QP against OSQP and Clarabel. Compare future discrete
   optimization against SCIP and HiGHS, as well as licensed commercial
   baselines where available. Missing commercial evidence is UNVERIFIED,

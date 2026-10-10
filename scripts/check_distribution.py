@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from datetime import datetime, timezone
 from email.parser import BytesParser
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -33,6 +34,24 @@ def validate_wheel_license(wheel: zipfile.ZipFile, expected: bytes) -> None:
         raise ValueError("wheel license payload is absent or differs from LICENSE")
     if not expected.strip():
         raise ValueError("empty source license")
+
+
+def validate_wheel_sources(wheel: zipfile.ZipFile, source: Path) -> int:
+    expected = {
+        path.relative_to(source).as_posix(): path.read_bytes()
+        for path in source.rglob("*.py")
+    }
+    names = wheel.namelist()
+    actual = {
+        name for name in names
+        if name.endswith(".py") and name.startswith(("openpo/", "openopt/"))
+    }
+    if not expected or actual != set(expected) or len(names) != len(set(names)):
+        raise ValueError("wheel source membership is empty, duplicated or mismatched")
+    changed = sorted(name for name, payload in expected.items() if wheel.read(name) != payload)
+    if changed:
+        raise ValueError(f"wheel source bytes differ: {changed}")
+    return len(expected)
 
 
 def installed_probe(target):
@@ -90,6 +109,33 @@ def installed_probe(target):
     operator = openopt.solve_operator_qp(sparse)
     if operator.status != "solved" or not torch.allclose(operator.x, solved.x, atol=1e-6):
         raise ValueError("isolated wheel sparse QP solve failed")
+    jacobi = openopt.solve_operator_qp(
+        sparse, openopt.OperatorQPConfig(cg_preconditioner="jacobi"),
+    )
+    if jacobi.status != "solved" or not torch.allclose(jacobi.x, solved.x, atol=1e-6):
+        raise ValueError("isolated wheel Jacobi QP solve failed")
+    scaled = openopt.solve_scaled_qp(general)
+    if scaled.status != "solved" or not scaled.evidence.passed:
+        raise ValueError("isolated wheel restored-coordinate QP failed")
+    gap = openopt.solve_qp(general, openopt.QPConfig(dual_gap_termination=True))
+    if gap.status != "solved" or not gap.termination_evidence.passed:
+        raise ValueError("isolated wheel independent-gap termination failed")
+    conic = openopt.ConicProblem(
+        general.P, general.q, -general.A, -general.l,
+        (openopt.NonnegativeCone(2),),
+    )
+    conic_result = openopt.solve_conic(
+        conic, openopt.ConicConfig(backend="clarabel_reference"),
+    )
+    if conic_result.status != "reference_solved" or not conic_result.evidence.passed:
+        raise ValueError("isolated wheel conic CPU reference failed")
+    integer = openopt.MILPProblem(
+        q=[-1.0], A=[[1.0]], l=[0.0], u=[1.5],
+        lower=[0.0], upper=[2.0], integrality=[1],
+    )
+    integer_result = openopt.solve_milp(integer, openopt.MILPConfig(backend="highspy"))
+    if integer_result.status != "optimal" or integer_result.incumbent != -1.0:
+        raise ValueError("isolated wheel MILP CPU reference failed")
     print(f"WHEEL_IMPORT verdict=PASS api_objects={len(openpo.__all__)} version={openopt.__version__}")
 
 
@@ -112,6 +158,10 @@ def main():
     env["TMPDIR"] = str(artifacts)
     report = {"verdict": "RUNNING", "at": datetime.now(timezone.utc).isoformat()}
     try:
+        sys.path.insert(0, str(ROOT))
+        from scripts.verify import source_snapshot, check_source_consistency
+
+        report["source"] = source_snapshot()
         with (artifacts / "distribution.log").open("x") as log:
             subprocess.run(
                 [sys.executable, "-m", "pip", "wheel", "--no-deps", "--no-build-isolation",
@@ -123,11 +173,7 @@ def main():
                 raise ValueError(f"expected exactly one wheel: {wheels}")
             with zipfile.ZipFile(wheels[0]) as wheel:
                 validate_wheel_license(wheel, (ROOT / "LICENSE").read_bytes())
-                names = set(wheel.namelist())
-                expected = {path.relative_to(ROOT / "src").as_posix()
-                            for path in (ROOT / "src").rglob("*.py")}
-                if not expected or not expected.issubset(names):
-                    raise ValueError(f"wheel missing modules: {sorted(expected - names)}")
+                modules = validate_wheel_sources(wheel, ROOT / "src")
             subprocess.run(
                 [sys.executable, "-m", "pip", "install", "--no-index", "--no-deps",
                  "--target", str(target), str(wheels[0])], env=env,
@@ -137,8 +183,14 @@ def main():
                 [sys.executable, "-I", str(Path(__file__).resolve()), "--installed", str(target)],
                 cwd=artifacts, env=env, stdout=log, stderr=subprocess.STDOUT, check=True,
             )
+        report["source_consistency"] = check_source_consistency(
+            report["source"], source_snapshot(),
+        )
+        if report["source_consistency"]["verdict"] != "PASS":
+            raise RuntimeError("source changed during wheel acceptance")
         report.update(
-            verdict="PASS", wheel=wheels[0].name, modules=len(expected),
+            verdict="PASS", wheel=wheels[0].name, modules=modules,
+            wheel_sha256=hashlib.sha256(wheels[0].read_bytes()).hexdigest(),
             license_expression="0BSD", license_payload_verified=True,
         )
     except Exception as error:

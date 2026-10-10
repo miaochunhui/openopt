@@ -10,7 +10,7 @@ readme = "README.md"
 license = "0BSD"
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
-dependencies = ["numpy>=2.0", "torch>=2.4"]
+dependencies = ["numpy>=2.0", "torch>=2.4", "scipy>=1.15"]
 
 [project.urls]
 Repository = "https://gitee.com/sdfwefqaa/openopt"
@@ -21,6 +21,8 @@ openpo-shadow-server = "openpo.shadow_server:main"
 
 [project.optional-dependencies]
 cuda = ["triton>=3.0,<4; platform_system == 'Linux'"]
+conic-reference = ["clarabel>=0.10,<1"]
+integer-reference = ["highspy>=1.15,<2"]
 test = ["pytest>=8", "packaging>=24", "scipy>=1.15", "osqp>=1.0,<2", "clarabel>=0.10,<1", "highspy>=1.15,<2"]
 benchmark = [
   "clarabel>=0.10,<1",

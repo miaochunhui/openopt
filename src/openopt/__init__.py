@@ -13,7 +13,19 @@ from .certificates import (
 )
 from .operators import (
     TensorOperator, MatrixFreeOperator, OperatorQPProblem, OperatorQPConfig,
-    prepare_operator_qp, solve_operator_qp,
+    Preconditioner, JacobiPreconditioner, prepare_operator_qp, solve_operator_qp,
+)
+from .scaling import (
+    ScalingConfig, DiagonalScaling, EquilibratedQP, ScaledQPResult,
+    equilibrate_qp, solve_scaled_qp,
+)
+from .conic import (
+    ZeroCone, NonnegativeCone, SecondOrderCone, ConicProblem, ConicConfig,
+    ConicResult, check_cone_feasibility, check_conic_candidate, solve_conic,
+)
+from .integer import (
+    MILPProblem, MILPConfig, MILPResult, MILPValidation, check_milp_candidate,
+    solve_milp, solve_miqp,
 )
 
 __all__ = list(_openpo_all) + [
@@ -21,6 +33,13 @@ __all__ = list(_openpo_all) + [
     "BatchQPProblem", "BatchQPResult", "PreparedBatchQP", "prepare_batch_qp", "solve_batch_qp",
     "NumericalEvidence", "check_qp_candidate", "check_primal_infeasibility", "check_unbounded_direction",
     "TensorOperator", "MatrixFreeOperator", "OperatorQPProblem", "OperatorQPConfig",
+    "Preconditioner", "JacobiPreconditioner",
     "prepare_operator_qp", "solve_operator_qp",
+    "ScalingConfig", "DiagonalScaling", "EquilibratedQP", "ScaledQPResult",
+    "equilibrate_qp", "solve_scaled_qp",
+    "ZeroCone", "NonnegativeCone", "SecondOrderCone", "ConicProblem", "ConicConfig",
+    "ConicResult", "check_cone_feasibility", "check_conic_candidate", "solve_conic",
+    "MILPProblem", "MILPConfig", "MILPResult", "MILPValidation", "check_milp_candidate",
+    "solve_milp", "solve_miqp",
 ]
 __version__ = "0.1.0"

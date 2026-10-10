@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+import hashlib
 import importlib.metadata
 import json
 import os
@@ -29,6 +30,47 @@ DEPENDENCIES = {
     "numpy": "2.0", "torch": "2.4", "pytest": "8",
     "scipy": "1.15", "osqp": "1.0", "clarabel": "0.10", "highspy": "1.15",
 }
+
+
+def source_snapshot(root: Path = ROOT) -> dict[str, object]:
+    """Bind the gate to actual source bytes, including scoped untracked code."""
+    def git(*args: str) -> str:
+        result = subprocess.run(
+            ["git", *args], cwd=root, capture_output=True, text=True, check=False,
+        )
+        if result.returncode:
+            raise RuntimeError(f"source identity Git query failed rc={result.returncode}")
+        return result.stdout
+
+    files = git("ls-files", "--cached", "--others", "--exclude-standard", "-z").split("\0")
+    hashes = {}
+    for name in sorted(set(files) - {""}):
+        path = root / name
+        if not path.resolve().is_relative_to(root.resolve()) or path.is_symlink():
+            raise ValueError(f"source snapshot rejects escaping/symlink path: {name}")
+        if not path.is_file():
+            raise ValueError(f"source snapshot file missing: {name}")
+        hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+    if not hashes:
+        raise ValueError("empty source snapshot is not verification")
+    return {
+        "commit": git("rev-parse", "HEAD").strip(),
+        "tree": git("rev-parse", "HEAD^{tree}").strip(),
+        "clean": not bool(git("status", "--porcelain").strip()),
+        "sha256": hashes,
+    }
+
+
+def check_source_consistency(before: dict, after: dict) -> dict[str, object]:
+    first, last = before["sha256"], after["sha256"]
+    changed = sorted(name for name in first.keys() & last.keys() if first[name] != last[name])
+    missing, extra = sorted(first.keys() - last.keys()), sorted(last.keys() - first.keys())
+    same_commit = before["commit"] == after["commit"] and before["tree"] == after["tree"]
+    return {
+        "verdict": "PASS" if same_commit and not (changed or missing or extra) else "FAIL",
+        "same_commit": same_commit, "changed": changed, "missing": missing, "extra": extra,
+        "files": len(first),
+    }
 
 
 def run_logged(command: list[str], artifact_dir: Path, name: str, env: dict[str, str]) -> None:
@@ -92,6 +134,7 @@ def run(mode: str, artifact_root: Path, require_cuda: bool, targets: list[str] |
         "coverage": "explicit_targets" if targets else mode,
     }
     try:
+        report["source"] = source_snapshot()
         report["dependencies"] = versions()
         run_logged(
             [sys.executable, "scripts/migrate_openpo.py", "--provenance"],
@@ -140,6 +183,11 @@ def run(mode: str, artifact_root: Path, require_cuda: bool, targets: list[str] |
                 [sys.executable, "examples/portfolio_qp.py", "--device", "cuda:0"],
                 artifacts, "example-cuda", env,
             )
+        report["source_consistency"] = check_source_consistency(
+            report["source"], source_snapshot(),
+        )
+        if report["source_consistency"]["verdict"] != "PASS":
+            raise RuntimeError(f"source changed during verification: {report['source_consistency']}")
         report["verdict"] = "PASS"
     except Exception as error:
         report["verdict"] = "FAIL"

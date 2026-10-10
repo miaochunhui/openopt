@@ -29,11 +29,13 @@ The product target and release gates are in `strategy.html`.
    success rate, objective gap, primal/dual residuals, throughput, memory and
    hardware/software versions on identical paired cases. Keep explicit GPU
    requests strict and choose automatic CPU/GPU routing from measurements.
-4. Convex conic scope: define SOCP and further cone contracts before claiming
-   support; qualify against MOSEK and independent open references.
-5. MILP/MIQP scope: specify bounds, integrality, optimality gaps, presolve,
-   branch-and-bound/cuts and termination certificates. Compare licensed
-   Gurobi/CPLEX and SCIP/HiGHS. A fast heuristic is not an exact MIP solver.
+4. Convex conic scope: zero/nonnegative/SOC contracts and the explicit Clarabel
+   CPU reference are implemented. Native GPU algorithms, further cones and
+   representative MOSEK/open-reference qualification remain required.
+5. MILP/MIQP scope: MILP bounds/integrality and the explicit HiGHS CPU reference
+   are implemented with independent incumbent checks. Native GPU search,
+   presolve/cuts and MIQP remain required. Compare licensed Gurobi/CPLEX and
+   SCIP/HiGHS. A fast heuristic is not an exact MIP solver.
 6. Distribution: clean-wheel acceptance and CPU/CUDA CI, followed by separate
    reproducible commercial/GPU qualification. No license server or SDK is
    bundled; commercial benchmark execution requires authorized installations.
@@ -46,16 +48,22 @@ stress corpus are implemented. Independent sealed evidence replay checks
 statuses, all host solutions, parameters, source membership and negative
 controls. These extensions do not close commercial qualification.
 
-Current evidence is linked by the generated v3 report. The earlier v2 experiment
+Bounded reversible Ruiz scaling, Jacobi PCG, opt-in independently checked gap
+and generated checkpoint directions are implemented. The restricted audited
+MPS/QPS importer and authorized commercial LP/QP replay adapters are implemented.
+Real public-model coverage, full GPU proof sidecars and legal commercial runs
+remain separate qualifications. The release contract is `release-contract.md`.
+
+Historical evidence is linked by the generated v3 report. The earlier v2 experiment
 is historical, byte-frozen evidence; its original source is not replaced.
 The actual native subagent limit was six; all eight scoped seats were executed
 with completion/refill, never claimed as eight simultaneous agents.
 
 ## Explicit Non-Claims
 
-- No universal `minimize`, conic/MIP backend or solver-generated
-  infeasibility/unboundedness certificate is implemented. Sparse operators and
-  supplied numerical direction checking are experimental, not exact proof.
+- No universal `minimize`, native GPU conic/MIP engine, MIQP or exact certificate
+  is implemented. Explicit CPU reference backends and numerical checkpoint
+  directions must not be described as those missing capabilities.
 - No universal GPU speedup or production qualification is asserted.
 - No commercial solver parity or world-leading ranking is asserted.
 - The user authorized this experiment's K8s Jobs with at most three 4500 cards.

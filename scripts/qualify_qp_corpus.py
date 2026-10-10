@@ -94,6 +94,11 @@ def run_solver(case: CorpusCase, solver: str, config: QPConfig) -> dict:
         return {
             "status": result.status, "iterations": result.iterations, "x": x, "y": y,
             "reported_objective": result.objective,
+            "primal_certificate": None if result.infeasibility_direction is None
+            else result.infeasibility_direction.cpu().numpy(),
+            "dual_certificate": None if result.unbounded_direction is None
+            else result.unbounded_direction.cpu().numpy(),
+            "feasible_base": None if result.feasible_base is None else result.feasible_base.cpu().numpy(),
             "observed_device": str(result.x.device), "elapsed_s": time.perf_counter() - start,
         }
     if solver == "osqp":
@@ -153,7 +158,7 @@ def run_solver(case: CorpusCase, solver: str, config: QPConfig) -> dict:
 def assess(case: CorpusCase, solver: str, raw: dict, residual_tol: float, gap_tol: float) -> dict:
     expected = case.oracle.expected
     accepted = {
-        "openopt": {"optimal": "solved", "infeasible": None, "unbounded": None},
+        "openopt": {"optimal": "solved", "infeasible": "infeasible", "unbounded": "unbounded"},
         "osqp": {"optimal": "solved", "infeasible": "primal infeasible", "unbounded": "dual infeasible"},
         "clarabel": {"optimal": "Solved", "infeasible": "PrimalInfeasible", "unbounded": "DualInfeasible"},
     }
@@ -164,11 +169,14 @@ def assess(case: CorpusCase, solver: str, raw: dict, residual_tol: float, gap_to
     if expected == "optimal" or solver == "openopt":
         candidate = quality(case, raw["x"], raw["y"], residual_tol, gap_tol)
     if status_ok and expected == "infeasible":
-        certificate = check_infeasibility(case, raw["primal_certificate"], residual_tol)
+        if raw.get("primal_certificate") is not None:
+            certificate = check_infeasibility(case, raw["primal_certificate"], residual_tol)
     if status_ok and expected == "unbounded":
-        certificate = check_unboundedness(
-            case, raw["dual_certificate"], case.oracle.x, residual_tol,
-        )
+        base = raw.get("feasible_base") if solver == "openopt" else case.oracle.x
+        if raw.get("dual_certificate") is not None and base is not None:
+            certificate = check_unboundedness(
+                case, raw["dual_certificate"], base, residual_tol,
+            )
     measured = candidate if expected == "optimal" else certificate
     passed = status_ok and measured is not None and measured["verdict"] == "PASS"
     reason = None
@@ -340,6 +348,9 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--eps-rel", type=float, default=1e-7)
     result.add_argument("--residual-tol", type=float, default=5e-6)
     result.add_argument("--gap-tol", type=float, default=1e-6)
+    result.add_argument("--adaptive-rho", action="store_true")
+    result.add_argument("--dual-gap-termination", action="store_true")
+    result.add_argument("--direction-termination", action="store_true")
     result.add_argument(
         "--diagnose-osqp", type=Path,
         help="read failed OSQP infeasible rows from a retained run; separate one-variable probe",
@@ -380,6 +391,8 @@ def main(argv: list[str] | None = None) -> int:
             config = QPConfig(
                 device=args.device, max_iterations=args.max_iterations,
                 eps_abs=args.eps_abs, eps_rel=args.eps_rel,
+                adaptive_rho=args.adaptive_rho, dual_gap_termination=args.dual_gap_termination,
+                direction_termination=args.direction_termination,
             )
             config.validate()
             if not all(np.isfinite(v) and v > 0 for v in (args.residual_tol, args.gap_tol)):
@@ -461,7 +474,7 @@ def main(argv: list[str] | None = None) -> int:
                             raise RuntimeError("explicit openopt device placement mismatch")
                     np.savez(folder / f"{solver}-vectors.npz", **{
                         name: np.asarray(raw[name]) for name in
-                        ("x", "y", "primal_certificate", "dual_certificate")
+                        ("x", "y", "primal_certificate", "dual_certificate", "feasible_base")
                         if name in raw and raw[name] is not None
                     })
                     write_json(folder / f"{solver}.json", row)
