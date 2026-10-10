@@ -158,25 +158,74 @@ Each counterexample records the actual historical source descriptor. Thus
 the old fake-name acceptance assertion remains a historical finding even
 after the current production gate rejects it.
 
-These are **non-hermetic research tests**, not portable source-only unit tests.
-`tests/test_review_cluster_recovery.py` reads the caller-pinned original report,
-live snapshot, both full frozen run directories and all their source/log/XML/
-result/telemetry sidecars. The module-scoped counterexample fixture copies
-real 3FS evidence into the verifier's external TMPDIR, excluding only pytest
-temporary/cache trees. Tests do not download fixtures or silently skip absent
-evidence. A full `scripts/verify.py tests` or container regression that collects
-this file therefore needs the historical 3FS tree at the recorded absolute
-paths, readable originals and a writable new external artifact/TMPDIR.
+The historical campaign tests are **non-hermetic and explicit opt-in**, not
+portable source-only unit tests. Set
+`OPENOPT_RUN_RECOVERY_EVIDENCE_TESTS=1` to enable them; unset/empty/`0` skips
+them with a reason declaring historical evidence NOT RUN and no campaign
+qualification. Other values fail loudly rather than silently disabling them.
+Default synthetic controls use self-contained report/live inputs and pytest
+temporary storage. They neither load old Git objects nor read real report/live.
+A default-mode guard rejects accidental historical reads/Git calls; tests
+prove missing opted-in report/live/Git dependencies fail before fixture copying
+or historical code execution.
+
+When opted in, the module-scoped `real_evidence` fixture first independently
+validates caller report/live hashes and committed snapshot source membership
+through canonical `review`, before any copied fixture or old-module execution.
+The unchanged campaign tests then read both full frozen run directories and
+all their source/log/XML/result/telemetry sidecars. The counterexample fixture
+copies real 3FS evidence into external TMPDIR, excluding only pytest
+temporary/cache trees. It does not download or synthesize historical evidence.
+Missing/corrupt opted-in evidence is a test failure, not a skip. Real-mode tests
+require readable historical paths and writable new external artifact/TMPDIR.
 
 The checkout also needs read-only `git` and the actual trusted repository
 objects for e618b68, `6c3dbef9e687278410fc074679e699210b3d75cc` and
 `e566b0b8163f099a29a0d554fa3b87ad15e4fb67`, including their trees/blobs.
 A worktree's `.git` file alone is insufficient if its common Git directory
 is absent in the container. A source-only/ZIP/shallow snapshot without those
-objects cannot reproduce this research suite; missing mounts/objects fail
-loud rather than count as full CPU regression success. The smoke selection
-does not collect this research test. Container coverage and mounts remain the
-coordinator's explicit responsibility; this seat submits no containers.
+objects can run the default synthetic tests but cannot reproduce the opted-in
+campaign suite; missing mounts/objects in opt-in mode fail loudly. Default skips
+do not establish campaign coverage or historical recovery qualification.
+The smoke selection does not collect this research test. Opt-in container
+coverage and mounts remain the coordinator's responsibility; this seat submits
+no containers.
+
+Portable test entry (no real artifacts or old Git objects required):
+
+```text
+python -m pytest -q -ra tests/test_review_cluster_recovery.py tests/test_verify_cluster_recovery.py
+```
+
+Approved historical campaign entry (existing environment, no installation):
+
+```bash
+sudo -n -u infra env OPENOPT_RUN_RECOVERY_EVIDENCE_TESTS=1 CUDA_VISIBLE_DEVICES=-1 PYTHONDONTWRITEBYTECODE=1 /hf3fs-jd/data/tmp/openopt-validation-env/bin/python -B scripts/verify.py tests --target tests/test_review_cluster_recovery.py --target tests/test_verify_cluster_recovery.py --artifact-dir /hf3fs-jd/data/tmp/openopt-release-20261010/recovery-review-integration/opt-in-tests
+```
+
+The environment flag controls tests only: it neither weakens nor silently
+disables the explicit audit CLI. CLI caller report/live pins and full historical
+commit/hash are still mandatory; bad caller bytes fail before Git lookup.
+Final default/opt-in counts are separate handoff receipts; do not sum overlapping
+synthetic checks or count default campaign skips as historical acceptance.
+
+Portable follow-up acceptance under the integration evidence root:
+
+| Mode | Passed | Skipped | Actual receipt |
+| --- | --- | --- | --- |
+| Default, flag unset | 93 | 23 explicit historical research skips | portable-default-v1/tests-n3bxc_tx/verification.json |
+| Explicit opt-in, flag exactly 1 | 116 | 0 | portable-opt-in-v1/tests-j5z_29ob/verification.json |
+| CPU smoke | 80 | 4 CUDA-unavailable skips | portable-smoke-v1/smoke-5vlx5quq/verification.json |
+
+All three receipts have zero failures/errors and source consistency PASS.
+The opt-in receipt retains the unchanged copied positive and all seven rejected
+coordinated negatives in
+`portable-opt-in-v1/tests-j5z_29ob/pytest-tmp/real-recovery-counterexamples0/test-counterexamples.json`.
+Both original report/live hashes remained equal to the caller pins above.
+This paragraph was added after those runs; tested code/tests were unchanged.
+Default checks are portable synthetic correctness, not a historical campaign
+or commercial/CUDA qualification. No full-project regression, new GPU solve,
+cluster submission or installation was performed by this follow-up.
 
 This integration does not upgrade the original failure/live evidence,
 commercial qualification, numerical CUDA status or current cluster health.

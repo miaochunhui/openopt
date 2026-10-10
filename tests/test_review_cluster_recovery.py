@@ -1,11 +1,13 @@
-"""Independent packaging audit controls, including real disk-evidence replay.
+"""Portable audit controls plus explicitly opted-in historical evidence replay.
 
-The real fixtures are copied to the verifier's external TMPDIR. CPU inspection
-does not execute CUDA tests and never changes original artifacts or cluster.
+OPENOPT_RUN_RECOVERY_EVIDENCE_TESTS=1 enables the real 3FS/Git campaign tests.
+Default skips are not campaign qualification. Missing opted-in dependencies
+fail loudly before fixture copying or historical code loading.
 """
 
 import copy
 import json
+import os
 from pathlib import Path
 import sys
 from types import ModuleType
@@ -24,6 +26,135 @@ HISTORICAL_PIN = "784eba817bea9d2dfe48288827bfb4392068a564a01f6fba6cd65e4fb86b4b
 ANCHORS = {"historical_commit": HISTORICAL_COMMIT, "historical_sha256": HISTORICAL_PIN}
 CLI_ANCHORS = ["--historical-commit", HISTORICAL_COMMIT,
                "--historical-verifier-sha256", HISTORICAL_PIN]
+EVIDENCE_ENV = "OPENOPT_RUN_RECOVERY_EVIDENCE_TESTS"
+EVIDENCE_SKIP = (
+    "historical recovery evidence NOT RUN; set OPENOPT_RUN_RECOVERY_EVIDENCE_TESTS=1 "
+    "with approved 3FS artifacts and Git objects; no campaign qualification"
+)
+
+
+def require_evidence_opt_in():
+    value = os.environ.get(EVIDENCE_ENV)
+    if value in (None, "", "0"):
+        pytest.skip(EVIDENCE_SKIP)
+    if value != "1":
+        pytest.fail(f"{EVIDENCE_ENV} must be exactly 1, 0 or unset", pytrace=False)
+
+
+@pytest.fixture(scope="module")
+def real_evidence():
+    require_evidence_opt_in()
+    # Validate caller report/live pins and every committed snapshot before any
+    # copied fixture or authenticated historical-module execution is attempted.
+    original = audit.review(REPORT, REPORT_PIN, LIVE, LIVE_PIN, **ANCHORS)
+    assert original["verdict"] == "RECOVERY_REVIEW_PASS"
+    assert original["reviewed_source"]["commit"] == HISTORICAL_COMMIT
+    assert original["production_verifier_used"] is original["historical_verifier_executed"] is False
+    return original
+
+
+@pytest.fixture
+def local_storage(tmp_path, monkeypatch):
+    # Only portable unit inputs use the pytest sandbox; the real gate's 3FS
+    # policy is unchanged and no historical fixture uses this monkeypatch.
+    monkeypatch.setattr(audit, "SHARED", tmp_path.resolve())
+    return tmp_path
+
+
+@pytest.fixture
+def summary_fixture(local_storage):
+    report_path = local_storage / "synthetic-report.json"
+    report = {
+        "owner": "infra-openopt", "cause": "refinement snapshot missing research document",
+        "failed": {"job": "synthetic-failed", "exit_code": 1,
+                   "finished_at": "2026-10-10T09:36:53Z"},
+        "recovered": {"finished_at": "2026-10-10T09:40:00Z"},
+    }
+    audit.write_json(report_path, report)
+    pin = audit.descriptor(report_path)["sha256"]
+    live = {
+        "verdict": "PASS", "apiserver_ready": True, "ready": {"h3c2": "True"},
+        "active": [], "cordoned": [], "read_at": "2026-10-10T09:54:07+00:00",
+        "recovery_reports": [{"path": str(report_path), "sha256": pin}],
+        "retained_failures": [{
+            "job": "synthetic-failed", "owner": report["owner"], "cause": report["cause"],
+            "containers": [{"restart_count": 0, "termination": {
+                "exitCode": 1, "finishedAt": report["failed"]["finished_at"],
+            }}],
+        }],
+    }
+    return report, live, report_path, pin
+
+
+@pytest.mark.parametrize("value", [None, "", "0"])
+def test_default_evidence_fixture_skips_before_any_historical_io(monkeypatch, value):
+    if value is None:
+        monkeypatch.delenv(EVIDENCE_ENV, raising=False)
+    else:
+        monkeypatch.setenv(EVIDENCE_ENV, value)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("disabled evidence fixture must not read historical inputs")
+
+    monkeypatch.setattr(audit, "review", forbidden)
+    with pytest.raises(pytest.skip.Exception, match="no campaign qualification"):
+        real_evidence.__wrapped__()
+
+
+@pytest.mark.parametrize("value", ["true", "yes", "2"])
+def test_invalid_evidence_opt_in_fails_not_silent_skip(monkeypatch, value):
+    monkeypatch.setenv(EVIDENCE_ENV, value)
+    with pytest.raises(pytest.fail.Exception, match="must be exactly"):
+        require_evidence_opt_in()
+
+
+@pytest.mark.parametrize("missing", ["report", "live", "git"])
+def test_opted_in_missing_dependencies_fail_before_copy_or_code_execution(
+        local_storage, monkeypatch, missing):
+    report, live = local_storage / "report.json", local_storage / "live.json"
+    for path in (report, live):
+        path.write_bytes(b'{"synthetic":true}\n')
+    monkeypatch.setattr(sys.modules[__name__], "REPORT", report)
+    monkeypatch.setattr(sys.modules[__name__], "LIVE", live)
+    monkeypatch.setattr(sys.modules[__name__], "REPORT_PIN", audit.descriptor(report)["sha256"])
+    monkeypatch.setattr(sys.modules[__name__], "LIVE_PIN", audit.descriptor(live)["sha256"])
+    monkeypatch.setenv(EVIDENCE_ENV, "1")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("unvalidated evidence cannot be copied or executed")
+
+    def missing_git(*args):
+        raise ValueError("read-only Git source lookup failed")
+
+    monkeypatch.setattr(audit, "clone_fixture", forbidden)
+    monkeypatch.setattr(audit, "load_historical_recovery", forbidden)
+    monkeypatch.setattr(audit, "git", missing_git)
+    if missing == "report":
+        monkeypatch.setattr(sys.modules[__name__], "REPORT", local_storage / "absent-report.json")
+    elif missing == "live":
+        monkeypatch.setattr(sys.modules[__name__], "LIVE", local_storage / "absent-live.json")
+    with pytest.raises(ValueError, match=(
+            "Git source lookup failed" if missing == "git" else "external evidence missing")):
+        real_evidence.__wrapped__()
+
+
+@pytest.fixture(autouse=True)
+def no_default_historical_io(monkeypatch):
+    if os.environ.get(EVIDENCE_ENV) == "1":
+        return
+    original_read = audit.read
+    historical_paths = (REPORT, LIVE, REPORT.resolve(), LIVE.resolve())
+
+    def portable_read(path):
+        if Path(path) in historical_paths:
+            pytest.fail("default research tests must not read historical campaign evidence")
+        return original_read(path)
+
+    def forbidden_git(*args):
+        pytest.fail("default research tests must not require historical Git objects")
+
+    monkeypatch.setattr(audit, "read", portable_read)
+    monkeypatch.setattr(audit, "git", forbidden_git)
 
 
 def xml(failed):
@@ -85,7 +216,8 @@ def test_coordinated_or_malformed_junit_cannot_fake_complete_selection(mutation)
         audit.strict_junit(raw, True)
 
 
-def test_committed_old_junit_accepts_fake_names_independently_of_current_production(monkeypatch):
+def test_committed_old_junit_accepts_fake_names_independently_of_current_production(
+        real_evidence, monkeypatch):
     poisoned = ModuleType("scripts.verify_cluster_recovery")
 
     def forbidden(*args, **kwargs):
@@ -119,14 +251,15 @@ def test_historical_toy_commit_or_mutable_ref_not_approved(commit, pin):
 
 
 def test_changed_git_blob_not_executed_even_with_caller_anchor(monkeypatch):
-    real_git = audit.git
     called = []
 
     def fake_git(*args):
         called.append(args)
+        if args == ("rev-parse", "--verify", f"{HISTORICAL_COMMIT}^{{commit}}"):
+            return HISTORICAL_COMMIT.encode() + b"\n"
         if args == ("show", f"{HISTORICAL_COMMIT}:{audit.HISTORICAL_VERIFIER}"):
             return b"raise RuntimeError('untrusted code must never execute')\n"
-        return real_git(*args)
+        pytest.fail(f"unexpected Git query in synthetic negative: {args}")
 
     monkeypatch.setattr(audit, "git", fake_git)
     with pytest.raises(ValueError, match="approved historical Git source mismatch"):
@@ -134,7 +267,8 @@ def test_changed_git_blob_not_executed_even_with_caller_anchor(monkeypatch):
     assert called
 
 
-def test_reviewed_historical_source_does_not_require_old_current_checkout(monkeypatch, tmp_path):
+def test_reviewed_historical_source_does_not_require_old_current_checkout(
+        real_evidence, monkeypatch, tmp_path):
     monkeypatch.setattr(audit, "ROOT", tmp_path)
     for relative in audit.REVIEWED:
         path = tmp_path / relative
@@ -160,9 +294,8 @@ def test_reviewed_historical_source_does_not_require_old_current_checkout(monkey
     "restart", "changed_finished", "wrong_report_pin", "predates_recovery",
     "active", "not_ready", "no_ready", "apiserver",
 ])
-def test_live_summary_rejects_coordinated_false_preserve_or_health(mutation):
-    report = audit.pinned(REPORT, REPORT_PIN)
-    live = audit.pinned(LIVE, LIVE_PIN)
+def test_live_summary_rejects_coordinated_false_preserve_or_health(summary_fixture, mutation):
+    report, live, report_path, pin = summary_fixture
     row = next(item for item in live["retained_failures"] if item["owner"] == "infra-openopt")
     if mutation == "erase_failed":
         live["retained_failures"].remove(row)
@@ -189,48 +322,55 @@ def test_live_summary_rejects_coordinated_false_preserve_or_health(mutation):
     elif mutation == "apiserver":
         live["apiserver_ready"] = False
     with pytest.raises(ValueError):
-        audit.check_live(live, report, REPORT, REPORT_PIN)
+        audit.check_live(live, report, report_path, pin)
 
 
-def test_live_missing_uid_is_unverified_not_filled_from_old_status():
-    result = audit.check_live(audit.pinned(LIVE, LIVE_PIN), audit.pinned(REPORT, REPORT_PIN),
-                              REPORT, REPORT_PIN)
+def test_live_missing_uid_is_unverified_not_filled_from_old_status(summary_fixture):
+    report, live, report_path, pin = summary_fixture
+    result = audit.check_live(live, report, report_path, pin)
     assert result["summary"] == "CONSISTENT"
     assert result["pod_job_uid_binding"] == "UNVERIFIED"
     assert result["current_cluster_health"] == "NOT_READ"
 
 
 @pytest.mark.parametrize("pin", ["", "0" * 64, "F" * 64, "0" * 63, True])
-def test_caller_pin_required_and_exact(pin):
+def test_caller_pin_required_and_exact(local_storage, pin):
+    path = local_storage / "pinned.json"
+    path.write_bytes(b'{"synthetic":true}\n')
     with pytest.raises(ValueError):
-        audit.pinned(REPORT, pin)
+        audit.pinned(path, pin)
 
 
-def test_mount_alias_normalization_and_traversal_refused():
-    assert audit.external(REPORT) == audit.external(REPORT.resolve())
+def test_mount_alias_normalization_and_traversal_refused(monkeypatch):
+    alias = Path("/hf3fs-jd")
+    path = alias / "data/tmp/nonexistent-synthetic-recovery.json"
+    monkeypatch.setattr(audit, "SHARED", alias.resolve() / "data/tmp")
+    assert audit.external(path, exists=False) == alias.resolve() / "data/tmp" / path.name
     with pytest.raises(ValueError):
         audit.external(Path("/hf3fs-jd/data/tmp/a/../b"), exists=False)
     with pytest.raises(ValueError):
         audit.external(Path("/data/dev/openopt"))
 
 
-def test_symlink_input_is_rejected(tmp_path):
-    path = tmp_path / "linked.json"
-    path.symlink_to(REPORT)
+def test_symlink_input_is_rejected(local_storage):
+    original = local_storage / "synthetic.json"
+    original.write_bytes(b'{"synthetic":true}\n')
+    path = local_storage / "linked.json"
+    path.symlink_to(original)
     with pytest.raises(ValueError, match="symlink"):
         audit.read(path)
 
 
-def test_json_duplicates_and_nonfinite_are_not_defaulted(tmp_path):
+def test_json_duplicates_and_nonfinite_are_not_defaulted(local_storage):
     for index, raw in enumerate((b'{"a":1,"a":2}', b'{"a":NaN}', b"[]")):
-        path = tmp_path / f"bad{index}.json"
+        path = local_storage / f"bad{index}.json"
         path.write_bytes(raw)
         with pytest.raises(ValueError):
             audit.pinned(path, audit.digest(raw))
 
 
 @pytest.fixture(scope="module")
-def real_counterexamples(tmp_path_factory):
+def real_counterexamples(real_evidence, tmp_path_factory):
     assert audit.descriptor(REPORT)["sha256"] == REPORT_PIN
     assert audit.descriptor(LIVE)["sha256"] == LIVE_PIN
     directory = tmp_path_factory.mktemp("real-recovery-counterexamples")
@@ -267,7 +407,8 @@ def test_real_resealed_coordinated_negative_controls_rejected(real_counterexampl
     assert audit.descriptor(row["live"]["path"]) == row["live"]
 
 
-def test_real_canonical_replay_does_not_execute_historical_or_production_verifier(monkeypatch):
+def test_real_canonical_replay_does_not_execute_historical_or_production_verifier(
+        real_evidence, monkeypatch):
     def forbidden(*args, **kwargs):
         pytest.fail("canonical review cannot execute the historical or production verifier")
 
@@ -305,7 +446,8 @@ def test_repaired_production_replays_actual_copies_without_old_gate_dependency(
 
 @pytest.mark.parametrize("mutation", ["summary_uid", "summary_count", "summary_type",
                                      "empty_inputs", "extra_field", "promote_scope"])
-def test_resealed_report_cannot_change_canonical_summary_or_input_inventory(tmp_path, mutation):
+def test_resealed_report_cannot_change_canonical_summary_or_input_inventory(
+        real_evidence, tmp_path, mutation):
     report = audit.pinned(REPORT, REPORT_PIN)
     if mutation == "summary_uid":
         report["failed"]["job_uid"] = "fabricated"
@@ -325,11 +467,21 @@ def test_resealed_report_cannot_change_canonical_summary_or_input_inventory(tmp_
         audit.review(path, audit.descriptor(path)["sha256"], LIVE, LIVE_PIN, **ANCHORS)
 
 
-def test_cli_failure_preserves_first_cause_and_external_log(tmp_path):
-    output = tmp_path / "failed-cli"
+def test_cli_failure_preserves_first_cause_and_external_log(local_storage, monkeypatch):
+    report = local_storage / "report.json"
+    live = local_storage / "live.json"
+    report.write_bytes(b'{"synthetic":true}\n')
+    live.write_bytes(b'{"synthetic":true}\n')
+    output = local_storage / "failed-cli"
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("bad caller pin must fail before historical Git lookup")
+
+    monkeypatch.setattr(audit, "git", forbidden)
     rc = audit.main([
-        "review", "--report", str(REPORT), "--report-sha256", "0" * 64,
-        "--live", str(LIVE), "--live-sha256", LIVE_PIN, "--artifact-dir", str(output),
+        "review", "--report", str(report), "--report-sha256", "0" * 64,
+        "--live", str(live), "--live-sha256", audit.descriptor(live)["sha256"],
+        "--artifact-dir", str(output),
         *CLI_ANCHORS,
     ])
     assert rc == 1
@@ -340,7 +492,9 @@ def test_cli_failure_preserves_first_cause_and_external_log(tmp_path):
     assert not (output / "review.json").exists()
     with pytest.raises(FileExistsError):
         audit.main([
-            "review", "--report", str(REPORT), "--report-sha256", REPORT_PIN,
-            "--live", str(LIVE), "--live-sha256", LIVE_PIN, "--artifact-dir", str(output),
+            "review", "--report", str(report),
+            "--report-sha256", audit.descriptor(report)["sha256"],
+            "--live", str(live), "--live-sha256", audit.descriptor(live)["sha256"],
+            "--artifact-dir", str(output),
             *CLI_ANCHORS,
         ])

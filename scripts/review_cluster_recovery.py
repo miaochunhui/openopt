@@ -463,10 +463,10 @@ def check_live(live, report, report_path, report_pin):
 
 def review(report_path, report_pin, live_path, live_pin, *,
            historical_commit, historical_sha256):
-    source = reviewed_source(historical_commit, historical_sha256)
     reviewer_pin = digest(Path(__file__).read_bytes())
     report = pinned(report_path, report_pin)
     live = pinned(live_path, live_pin)
+    source = reviewed_source(historical_commit, historical_sha256)
     require(report.get("verdict") == "RECOVERY_VERIFIED" and report.get("scope") == SCOPE,
             "packaging report scope/qualification changed")
     inputs = [descriptor(report_path), descriptor(live_path)]
