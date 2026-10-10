@@ -74,7 +74,9 @@ device/dtype and independent original cone/KKT/range/gap acceptance.
 The RSOC convention is `(a,b,w): a,b>=0, 2ab>=||w||^2`. The native Euclidean
 projection uses a scaled orthogonal Lorentz transform, retains interior values
 exactly, compensates the original signed-product difference near the polar
-boundary, and retains the weight as a mantissa/exponent pair until each final
+boundary before any inside/polar early return, retains remote exponent levels
+in a device-local floating expansion until larger terms cancel, and retains
+the weight as a mantissa/exponent pair until each final
 coordinate. Float32 projection uses device-local float64 intermediates; it does
 not transfer projection work to the CPU. Original feasibility checks each
 head's sign separately and compares the required-head inequality and unchanged

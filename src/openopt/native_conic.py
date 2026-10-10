@@ -79,28 +79,62 @@ def _rotated_projection(block: torch.Tensor) -> None:
         initial = exponent.clamp(min=floor, max=limit)
         return torch.ldexp(torch.ldexp(mantissa, initial), exponent - initial)
 
-    def inside(a, b):
-        if bool((a < 0) | (b < 0)):
-            return False
-        if not has_tail:
-            return True
-        if not bool((a > 0) & (b > 0)):
-            return False
-        a_mantissa, a_exponent = torch.frexp(a)
-        b_mantissa, b_exponent = torch.frexp(b)
-        sum_exponent = a_exponent + b_exponent
-        half_exponent = torch.div(sum_exponent, 2, rounding_mode="floor")
-        product_root = torch.sqrt(a_mantissa * b_mantissa)
-        if bool(sum_exponent - 2 * half_exponent):
-            product_root = product_root * math.sqrt(2.0)
-        ratio = restore_exponent(
-            radius_mantissa / product_root, radius_exponent - half_exponent,
-        )
-        return bool(ratio <= math.sqrt(2.0))
+    def product_parts(left, right):
+        product = left * right
+        split = 134217729.0
+        expanded = split * left
+        left_high = expanded - (expanded - left)
+        left_low = left - left_high
+        expanded = split * right
+        right_high = expanded - (expanded - right)
+        right_low = right - right_high
+        error = (((left_high * right_high - product)
+                  + left_high * right_low) + left_low * right_high) + left_low * right_low
+        return product, error
 
-    if inside(first, second):
+    tail_mantissas, tail_exponents = torch.frexp(tail)
+    a_mantissa, a_exponent = torch.frexp(first)
+    b_mantissa, b_exponent = torch.frexp(second)
+    tail_high, tail_low = product_parts(tail_mantissas, tail_mantissas)
+    head_high, head_low = product_parts(a_mantissa, b_mantissa)
+    exponents = torch.cat((2 * tail_exponents, (a_exponent + b_exponent + 1).reshape(1)))
+    highs = torch.cat((tail_high, -head_high.reshape(1)))
+    lows = torch.cat((tail_low, -head_low.reshape(1)))
+    expansion = []
+    for term, exponent in zip(torch.cat((highs, lows)), torch.cat((exponents, exponents))):
+        if not bool(term != 0):
+            continue
+        carry, shift = torch.frexp(term)
+        carry_exponent = exponent + shift
+        updated_expansion = []
+        for partial, partial_exponent in expansion:
+            # Keep remote exponent levels separate until larger terms cancel.
+            if bool(torch.abs(carry_exponent - partial_exponent) > 900):
+                if bool(carry_exponent >= partial_exponent):
+                    updated_expansion.append((partial, partial_exponent))
+                else:
+                    updated_expansion.append((carry, carry_exponent))
+                    carry, carry_exponent = partial, partial_exponent
+                continue
+            common = torch.maximum(carry_exponent, partial_exponent)
+            left = restore_exponent(carry, carry_exponent - common)
+            right = restore_exponent(partial, partial_exponent - common)
+            total = left + right
+            recovered = total - left
+            error = (left - (total - recovered)) + (right - recovered)
+            if bool(error != 0):
+                low, shift = torch.frexp(error)
+                updated_expansion.append((low, common + shift))
+            carry, shift = torch.frexp(total)
+            carry_exponent = common + shift
+        if bool(carry != 0):
+            updated_expansion.append((carry, carry_exponent))
+        expansion = updated_expansion
+    numerator = expansion[-1][0] if expansion else torch.zeros_like(first)
+    numerator_exponent = expansion[-1][1] if expansion else torch.zeros_like(a_exponent)
+    if bool((first >= 0) & (second >= 0) & (numerator <= 0)):
         return
-    if inside(-first, -second):
+    if bool((first <= 0) & (second <= 0) & (numerator <= 0)):
         block.zero_()
         return
     scale = working.abs().max()
@@ -115,47 +149,13 @@ def _rotated_projection(block: torch.Tensor) -> None:
     if not bool(transformed_radius > 0):
         raise RuntimeError("native conic unresolved RSOC projection radius")
     if bool(head < 0):
-        # Compensated products retain the small difference near the polar cone.
-        def product_parts(left, right):
-            product = left * right
-            split = 134217729.0
-            expanded = split * left
-            left_high = expanded - (expanded - left)
-            left_low = left - left_high
-            expanded = split * right
-            right_high = expanded - (expanded - right)
-            right_low = right - right_high
-            error = (((left_high * right_high - product)
-                      + left_high * right_low) + left_low * right_high) + left_low * right_low
-            return product, error
-
-        tail_mantissas, tail_exponents = torch.frexp(tail)
-        a_mantissa, a_exponent = torch.frexp(first)
-        b_mantissa, b_exponent = torch.frexp(second)
-        tail_high, tail_low = product_parts(tail_mantissas, tail_mantissas)
-        head_high, head_low = product_parts(a_mantissa, b_mantissa)
-        exponents = torch.cat((2 * tail_exponents, (a_exponent + b_exponent + 1).reshape(1)))
-        highs = torch.cat((tail_high, -head_high.reshape(1)))
-        lows = torch.cat((tail_low, -head_low.reshape(1)))
-        nonzero = (highs != 0) | (lows != 0)
-        exponent = exponents[nonzero].max()
-        highs = restore_exponent(highs, exponents - exponent)
-        lows = restore_exponent(lows, exponents - exponent)
-        total = torch.zeros_like(first)
-        correction = torch.zeros_like(first)
-        for term in torch.cat((highs, lows)):
-            updated = total + term
-            recovered = updated - total
-            correction = correction + ((total - (updated - recovered)) + (term - recovered))
-            total = updated
-        numerator = total + correction
         if not bool(numerator > 0):
             raise RuntimeError("native conic unresolved RSOC signed-product difference")
         weight_mantissa, weight_exponent = torch.frexp(
             numerator / (2 * transformed_radius * (transformed_radius - head))
             / (scale_mantissa * scale_mantissa),
         )
-        weight_exponent = weight_exponent + exponent - 2 * scale_exponent
+        weight_exponent = weight_exponent + numerator_exponent - 2 * scale_exponent
     else:
         weight = 0.5 + 0.5 * head / transformed_radius
         weight_mantissa, weight_exponent = torch.frexp(weight)

@@ -23,6 +23,10 @@ Original feasibility independently checks each head sign, then compares
 from the binary64 inputs, where `S=sum(w_i^2)`, `M=max(a,b)` and `m=min(a,b)`.
 The tolerance contract is unchanged. This exact input-inequality comparison
 does not certify optimality or make the solver arbitrary precision.
+Inside/polar early returns use the compensated original product difference,
+not a rounded norm ratio. A device-local floating expansion retains remote
+exponent levels until larger signed terms cancel; the surviving leading term
+and exponent supply the projection weight.
 Opposite-head scaling must not
 hide a negative coordinate, and subtractive Lorentz radii must not hide a
 small original deficit. No overflowing ab or w^2 is formed. Inputs, original
@@ -97,3 +101,13 @@ passes/19 explicit CUDA skips, 20.70s, source-consistency PASS. This is a dirty
 development receipt before the final exact tolerance comparison; it is not
 clean-source acceptance, independent signoff or GPU qualification. The final
 comparison, clean committed rerun and independent review remain separate gates.
+
+The independent follow-up `f4f0e6f` added two polar early-return counterexamples
+and nine exact rational tolerance checks. The owner reproduced 73 passes/two
+failures in `owner-rsoc-early-polar-red-v1/tests-1ypzainp`: the norm-ratio
+early return erased tiny but representable projections. The floating-expansion
+repair records 351 passes/19 CUDA skips, 20.91s in
+`owner-rsoc-expansion-green-v1/tests-meatdfl4/verification.json`.
+This is a dirty development receipt before this documentation update.
+The original tests and tolerance are unchanged; clean/independent follow-up
+and actual CUDA are still required and no old GPU evidence is promoted.
