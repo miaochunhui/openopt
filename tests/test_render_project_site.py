@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+from xml.etree import ElementTree as ET
 
 import pytest
 
@@ -212,7 +213,15 @@ def init_repo(path):
         assert result.returncode == 0
     (path / "LICENSE").write_text("BSD Zero Clause License\n")
     (path / "AGENTS.md").write_text("Synthetic bounded research; no qualification.\n")
-    result = subprocess.run(["git", "-C", str(path), "add", "--", "LICENSE", "AGENTS.md"],
+    for name in site.RUNTIME_PATHS:
+        target = path / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((site.ROOT / name).read_bytes())
+    controls = path / "tests/test_control.py"
+    controls.parent.mkdir(parents=True, exist_ok=True)
+    controls.write_text("\n".join(f"def test_case_{i}():\n    assert True\n" for i in range(12)))
+    result = subprocess.run(["git", "-C", str(path), "add", "--", "LICENSE", "AGENTS.md", *site.RUNTIME_PATHS,
+                             "tests/test_control.py"],
                             capture_output=True, check=False)
     assert result.returncode == 0
     result = subprocess.run(["git", "-C", str(path), "commit", "-qm", "synthetic source"],
@@ -229,9 +238,52 @@ def synthetic_receipt(repo, commit):
                    "tree": site.git(repo, "rev-parse", "HEAD^{tree}").decode().strip(),
                    "sha256": site.tree_hashes(repo, commit)},
         "source_consistency": {"verdict": "PASS", "same_commit": True,
-                               "changed": [], "missing": [], "extra": [], "files": 2},
+                               "changed": [], "missing": [], "extra": [], "files": len(site.tree_hashes(repo, commit))},
         "tests": {"tests": 12, "failures": 0, "errors": 0, "skipped": 2},
     }
+
+
+def cpu_authority(repo, receipt, name="cpu-smoke"):
+    """Explicit synthetic caller pins; no real receipt is changed or trusted."""
+    raw = json.loads(receipt.read_bytes())
+    root = receipt.parent / (receipt.stem + "-caller")
+    root.mkdir()
+    counts = {"tests": 12, "failures": 0, "errors": 0, "skipped": 2}
+    members = [f"tests.test_control::test_case_{i}" for i in range(12)]
+    xml = ET.Element("testsuites")
+    suite = ET.SubElement(xml, "testsuite", {key: str(value) for key, value in counts.items()})
+    for i, node in enumerate(members):
+        cls, method = node.split("::", 1)
+        case = ET.SubElement(suite, "testcase", classname=cls, name=method)
+        if i >= 10:
+            ET.SubElement(case, "skipped")
+    payloads = {
+        "receipt": (receipt, receipt.read_bytes()),
+        "junit": (root / "pytest.xml", ET.tostring(xml)),
+        "pytest_log": (root / "pytest.log", b"10 passed, 2 skipped in 1.0s\nreturncode=0\n"),
+        "collection": (root / "collection.log", ("\n".join(
+            node.replace("tests.test_control", "tests/test_control.py") for node in members) + "\n").encode()),
+    }
+    files = {}
+    for role, (path, payload) in payloads.items():
+        if role != "receipt":
+            path.write_bytes(payload)
+        files[role] = {"path": str(path), "sha256": safe.sha(payload), "bytes": len(payload)}
+    manifest = {"schema_version": 1, "evidence": {name: {
+        "source_commit": raw["source"]["commit"], "files": files, "membership": members,
+        "pytest_exit_code": 0,
+        "runtime": {"environment": {"CUDA_VISIBLE_DEVICES": "-1"}, "gpu_qualification": "UNVERIFIED"},
+    }}}
+    path = root / "authority.json"
+    payload = safe.encoded(manifest)
+    path.write_bytes(payload)
+    return (path, safe.sha(payload))
+
+
+@pytest.fixture(autouse=True)
+def isolated_authority_root(request, tmp_path, monkeypatch):
+    if request.node.name != "test_external_storage_rejects_local_or_repository_paths":
+        monkeypatch.setattr(safe, "SHARED", tmp_path)
 
 
 @pytest.mark.parametrize("mutation", [
@@ -268,13 +320,14 @@ def test_receipt_extraction_real_git_source_controls(tmp_path, mutation):
     path.write_bytes(payload)
     expected_hash = "f" * 64 if mutation == "hash-pin" else safe.sha(payload)
     expected_commit = "f" * 40 if mutation == "source-pin" else commit
+    authority = cpu_authority(repo, path)
     if mutation == "none":
-        result = site.extract_receipt(repo, "cpu-smoke", path, expected_hash, expected_commit)
+        result = site.extract_receipt(repo, "cpu-smoke", path, expected_hash, expected_commit, authority)
         assert result["passed"] == 10 and result["tests"] == 12
         assert result["kind"] == "reported-owner-cpu-checks"
     else:
         with pytest.raises(safe.Rejected):
-            site.extract_receipt(repo, "cpu-smoke", path, expected_hash, expected_commit)
+            site.extract_receipt(repo, "cpu-smoke", path, expected_hash, expected_commit, authority)
 
 
 def test_collect_and_boundary_pin_without_historical_files(tmp_path):
@@ -284,7 +337,8 @@ def test_collect_and_boundary_pin_without_historical_files(tmp_path):
     receipt = tmp_path / "receipt.json"
     receipt.write_bytes(payload)
     arguments = [("cpu-smoke", receipt, safe.sha(payload), commit)]
-    result = site.collect(repo, commit, sample()["modified_at"], arguments)
+    authority = cpu_authority(repo, receipt)
+    result = site.collect(repo, commit, sample()["modified_at"], arguments, authority=authority)
     record = safe.parse(result, "input")
     assert record["evidence"]["cpu-smoke"]["relation"] == "same-content-source"
     site.check_boundary(record, repo)
@@ -292,7 +346,7 @@ def test_collect_and_boundary_pin_without_historical_files(tmp_path):
     with pytest.raises(safe.Rejected, match="boundary_source_mismatch"):
         site.check_boundary(record, repo)
     with pytest.raises(safe.Rejected, match="duplicate_evidence"):
-        site.collect(repo, commit, sample()["modified_at"], arguments * 2)
+        site.collect(repo, commit, sample()["modified_at"], arguments * 2, authority=authority)
 
 
 def test_external_storage_rejects_local_or_repository_paths(tmp_path):
@@ -336,7 +390,7 @@ def test_failed_cuda_extraction_has_actual_frozen_git_and_three_byte_pins(tmp_pa
                            "synthetic failed readback source"],
                           capture_output=True, check=False).returncode == 0
     commit = site.git(repo, "rev-parse", "HEAD").decode().strip()
-    counts = {"tests": 3, "failures": 1, "errors": 0, "skipped": 0}
+    counts = {"tests": 53, "failures": 51, "errors": 0, "skipped": 0}
     raw = {
         "verdict": "FAIL", "returncode": 1,
         "source_sha256": {name: value for name, value in site.tree_hashes(repo, commit).items()
@@ -358,16 +412,20 @@ def test_failed_cuda_extraction_has_actual_frozen_git_and_three_byte_pins(tmp_pa
         raw["error"] = "ValueError: no actual count summary"
     elif mutation == "target":
         raw["targets"] = ["tests/test_rotated_conic_cuda.py"]
-    names = ["one", "two", "three"] if mutation != "duplicate-case" else ["one"] * 3
-    junit_count = 4 if mutation == "junit-count" else 3
-    xml = (
-        f'<testsuites><testsuite tests="{junit_count}" failures="1" errors="0" skipped="0">'
-        f'<testcase name="test_cuda_collection_entry[{names[0]}]"/>'
-        f'<testcase name="test_cuda_collection_entry[{names[1]}]"><failure/></testcase>'
-        f'<testcase name="test_cuda_collection_entry[{names[2]}]"/>'
-        '</testsuite></testsuites>'
-    ).encode()
-    log = (b"1 failed, 2 passed in 1.0s\nreturncode=1\n"
+    tree = ET.Element("testsuites")
+    attributes = {key: str(value) for key, value in counts.items()}
+    if mutation == "junit-count":
+        attributes["tests"] = "54"
+    suite = ET.SubElement(tree, "testsuite", attributes)
+    for i, identity in enumerate(site.operator_membership()):
+        cls, method = identity.split("::", 1)
+        if mutation == "duplicate-case":
+            method = "test_cuda_collection_entry[one]"
+        case = ET.SubElement(suite, "testcase", classname=cls, name=method)
+        if i < 51:
+            ET.SubElement(case, "failure")
+    xml = ET.tostring(tree)
+    log = (b"51 failed, 2 passed in 1.0s\nreturncode=1\n"
            if mutation != "log-summary" else b"partial dots without terminal summary")
     payloads = [safe.encoded(raw), xml, log]
     arguments = []
@@ -380,7 +438,7 @@ def test_failed_cuda_extraction_has_actual_frozen_git_and_three_byte_pins(tmp_pa
     arguments.append(commit)
     if mutation == "none":
         item = site.extract_cuda_failure(repo, arguments)
-        assert item["passed"] == 2 and item["failures"] == 1
+        assert item["passed"] == 2 and item["failures"] == 51
         assert item["kind"] == "reported-failed-cuda-owner-checks"
         collected = site.collect(repo, commit, sample()["modified_at"], [], arguments)
         assert safe.parse(collected, "input")["evidence"][
@@ -418,6 +476,7 @@ def test_actual_collect_render_check_receipts_and_negative_cli_paths(tmp_path, m
         input_sha256=None, owner_commit=None, content_source_commit=content_commit,
         modified_at=sample()["modified_at"],
         evidence=[("cpu-smoke", original_receipt, safe.sha(payload), content_commit)],
+        authority=cpu_authority(repo, original_receipt),
     )
     collect_artifacts = external / "collect"
     collect_artifacts.mkdir()
@@ -465,6 +524,316 @@ def test_actual_collect_render_check_receipts_and_negative_cli_paths(tmp_path, m
         assert "verdict=FAIL" in (check_artifacts / "execution.log").read_text()
 
 
+@pytest.mark.parametrize("replacement", ["commit", "blob", "tree"])
+def test_repair_raw_object_graph_ignores_real_replacements(tmp_path, replacement):
+    repo = tmp_path / "repo"
+    original = init_repo(repo)
+    expected = site.tree_hashes(repo, original)
+    before = {kind: site.git(repo, "rev-parse", original + suffix).decode().strip()
+              for kind, suffix in (("commit", ""), ("blob", ":AGENTS.md"), ("tree", "^{tree}"))}
+    (repo / "AGENTS.md").write_bytes(b"Untrusted replacement bytes.\n")
+    assert subprocess.run(["git", "-C", str(repo), "add", "--", "AGENTS.md"],
+                          capture_output=True).returncode == 0
+    assert subprocess.run(["git", "-C", str(repo), "commit", "-qm", "replacement"],
+                          capture_output=True).returncode == 0
+    after = {kind: site.git(repo, "rev-parse", "HEAD" + suffix).decode().strip()
+             for kind, suffix in (("commit", ""), ("blob", ":AGENTS.md"), ("tree", "^{tree}"))}
+    assert subprocess.run(["git", "-C", str(repo), "replace", before[replacement], after[replacement]],
+                          capture_output=True).returncode == 0
+    replaced = subprocess.run(["git", "-C", str(repo), "cat-file", "blob", original + ":AGENTS.md"],
+                              capture_output=True)
+    assert replaced.returncode == 0 and safe.sha(replaced.stdout) != expected["AGENTS.md"]
+    assert site.tree_hashes(repo, original) == expected
+    raw = synthetic_receipt(repo, original)
+    raw["source"]["sha256"]["AGENTS.md"] = safe.sha(replaced.stdout)
+    path = tmp_path / "replaced.json"
+    path.write_bytes(safe.encoded(raw))
+    authority = cpu_authority(repo, path)
+    with pytest.raises(safe.Rejected, match="receipt_source_bytes"):
+        site.extract_receipt(repo, "cpu-smoke", path, safe.sha(path.read_bytes()), original, authority)
+
+
+@pytest.mark.parametrize("mutation", ["none", "missing-authority", "authority-pin", "exit", "junit",
+    "runtime", "membership", "bool-junit", "log-failed", "log-skip", "log-exit", "collection",
+    "pinned-old-manifest", "coordinated-count"])
+def test_repair_cpu_actual_bytes_and_caller_authority(tmp_path, mutation):
+    repo = tmp_path / "repo"
+    commit = init_repo(repo)
+    raw = synthetic_receipt(repo, commit)
+    if mutation == "exit":
+        raw["exit_code"] = 1
+    elif mutation in {"junit", "bool-junit"}:
+        raw["junit"] = {"tests": 12, "failures": 0, "errors": False if mutation == "bool-junit" else 1, "skipped": 2}
+    elif mutation == "runtime":
+        raw["runtime"] = {"environment": {"CUDA_VISIBLE_DEVICES": "0"}}
+    elif mutation == "membership":
+        raw["exact_membership"] = False
+    elif mutation == "coordinated-count":
+        raw["tests"].update(tests=999)
+    receipt = tmp_path / "original.json"
+    receipt.write_bytes(safe.encoded(raw))
+    authority = cpu_authority(repo, receipt)
+    manifest = json.loads(authority[0].read_bytes())
+    entry = manifest["evidence"]["cpu-smoke"]
+    if mutation in {"log-failed", "log-skip", "log-exit", "collection", "pinned-old-manifest"}:
+        role = "collection" if mutation == "collection" else "pytest_log"
+        target = Path(entry["files"][role]["path"])
+        payload = {"log-failed": b"10 passed, 1 failed, 2 skipped in 1.0s\nreturncode=0\n",
+                   "log-skip": b"10 passed in 1.0s\nreturncode=0\n",
+                   "log-exit": b"10 passed, 2 skipped in 1.0s\nreturncode=2\n",
+                   "collection": b"tests/unrelated.py::test_one\n",
+                   "pinned-old-manifest": b"12 passed in 1.0s\nreturncode=0\n"}[mutation]
+        target.write_bytes(payload)
+        if mutation != "pinned-old-manifest":
+            entry["files"][role].update(sha256=safe.sha(payload), bytes=len(payload))
+            authority[0].write_bytes(safe.encoded(manifest))
+            authority = (authority[0], safe.sha(authority[0].read_bytes()))
+    if mutation == "authority-pin":
+        authority = (authority[0], "f" * 64)
+    if mutation == "missing-authority":
+        authority = None
+    if mutation == "none":
+        result = site.extract_receipt(repo, "cpu-smoke", receipt, safe.sha(receipt.read_bytes()), commit, authority)
+        assert result["tests"] == 12 and result["passed"] == 10
+        assert result["authority_sha256"] == authority[1]
+    else:
+        with pytest.raises(safe.Rejected):
+            site.extract_receipt(repo, "cpu-smoke", receipt, safe.sha(receipt.read_bytes()), commit, authority)
+
+
+@pytest.mark.parametrize("spelling", ["iso", "space"])
+@pytest.mark.parametrize("prefix", ["2001:db8:", "https://", "//network:", "2001%3Adb8%3A"])
+def test_repair_timestamp_network_adjacent_token_rejected(spelling, prefix):
+    record = sample()
+    value = record["modified_at"] if spelling == "iso" else "2026-10-10 23:20:10 +08:00"
+    with pytest.raises(safe.Rejected, match="network_entry"):
+        site.scan_content((prefix + value).encode(), record, "development")
+
+
+@pytest.mark.parametrize("mutation", ["none", "renamed", "classname", "exit", "conflicting-status",
+    "ambiguous-outcome", "error", "skip", "bool-count", "log-extra-fail", "log-exit"])
+def test_repair_original53_complete_identity_and_outcome(tmp_path, mutation):
+    repo = tmp_path / "repo"
+    init_repo(repo)
+    for name in site.CUDA_FAILURE_SOURCE_FILES:
+        path = repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"# nonexecuted synthetic identity fixture\n")
+    assert subprocess.run(["git", "-C", str(repo), "add", "--", *sorted(site.CUDA_FAILURE_SOURCE_FILES)],
+                          capture_output=True).returncode == 0
+    assert subprocess.run(["git", "-C", str(repo), "commit", "-qm", "fixture"], capture_output=True).returncode == 0
+    commit = site.git(repo, "rev-parse", "HEAD").decode().strip()
+    counts = {"tests": 53, "failures": 9, "errors": 0, "skipped": 0}
+    xml = ET.Element("testsuites")
+    suite = ET.SubElement(xml, "testsuite", {key: str(value) for key, value in counts.items()})
+    for i, node in enumerate(site.operator_membership()):
+        cls, name = node.split("::", 1)
+        case = ET.SubElement(suite, "testcase", classname=cls, name=name)
+        if i < 9:
+            ET.SubElement(case, "failure")
+    raw = {"verdict": "FAIL", "returncode": 1, "source_sha256": {
+        name: pin for name, pin in site.tree_hashes(repo, commit).items() if name in site.CUDA_FAILURE_SOURCE_FILES},
+        "targets": ["tests/test_operator_original_cuda.py::test_cuda_collection_entry"],
+        "selection": "test_cuda_collection_entry", "finished_at": "2026-10-10T14:30:01+00:00",
+        "error": f"ValueError: CUDA tests failed or skipped: {counts}"}
+    cases = list(xml.iter("testcase"))
+    if mutation == "renamed":
+        for i, case in enumerate(cases):
+            case.set("name", f"test_cuda_collection_entry[invented-{i}]")
+    elif mutation == "classname":
+        for case in cases:
+            case.set("classname", "unrelated.module")
+    elif mutation == "exit":
+        raw["returncode"] = 2
+    elif mutation in {"conflicting-status", "bool-count"}:
+        raw["tests"] = dict(counts)
+        raw["tests"]["errors" if mutation == "bool-count" else "failures"] = False if mutation == "bool-count" else 0
+    elif mutation == "ambiguous-outcome":
+        ET.SubElement(cases[0], "skipped")
+    elif mutation in {"error", "skip"}:
+        tag, field = ("error", "errors") if mutation == "error" else ("skipped", "skipped")
+        ET.SubElement(cases[-1], tag)
+        counts[field] = 1
+        suite.set(field, "1")
+        raw["error"] = f"ValueError: CUDA tests failed or skipped: {counts}"
+    log = b"9 failed, 44 passed in 1.0s\nreturncode=1\n"
+    if mutation == "log-extra-fail":
+        log = b"9 failed, 44 passed, 1 error in 1.0s\nreturncode=1\n"
+    elif mutation == "log-exit":
+        log = log.replace(b"returncode=1", b"returncode=2")
+    args = []
+    for name, payload in (("result.json", safe.encoded(raw)), ("pytest.xml", ET.tostring(xml)), ("pytest.log", log)):
+        path = tmp_path / name
+        path.write_bytes(payload)
+        args.extend((path, safe.sha(payload)))
+    args.append(commit)
+    if mutation == "none":
+        result = site.extract_cuda_failure(repo, args)
+        assert result["passed"] == 44 and result["failures"] == 9
+    else:
+        with pytest.raises(safe.Rejected):
+            site.extract_cuda_failure(repo, args)
+
+
+@pytest.mark.parametrize("mutation", ["none", "function", "method", "policy", "disk", "foreign-repo"])
+def test_repair_loaded_renderer_source_binding(tmp_path, monkeypatch, mutation):
+    repo = tmp_path / "repo"
+    init_repo(repo)
+    if mutation == "function":
+        monkeypatch.setattr(site.render, "__code__", site.normalized_time.__code__)
+    elif mutation == "method":
+        code = safe.Rejected.__init__.__code__
+        monkeypatch.setattr(safe.Rejected.__init__, "__code__", code.replace(co_consts=code.co_consts + ("drift",)))
+    elif mutation == "policy":
+        monkeypatch.setattr(site, "CLAIMS", dict(site.CLAIMS, commercial="PASS"))
+    elif mutation in {"disk", "foreign-repo"}:
+        (repo / site.RUNTIME_PATHS[0]).write_bytes(b"# unrelated nonexecuted owner bytes\n")
+    if mutation == "none":
+        assert set(site.loaded_source(repo)) == set(site.RUNTIME_PATHS)
+    else:
+        with pytest.raises(safe.Rejected):
+            site.loaded_source(repo)
+
+
+@pytest.mark.parametrize("mutation", ["none", "missing", "bad-pin", "duplicate", "tamper"])
+def test_repair_explicit_generated_refresh_preserves_create_once(tmp_path, mutation):
+    files = site.render(safe.encoded(sample()))
+    site.write_outputs(tmp_path, files)
+    old = [(name, safe.sha(payload)) for name, payload in files.items()]
+    updated = sample()
+    updated["evidence"]["cpu-smoke"].update(tests=13, passed=11)
+    new = site.render(safe.encoded(updated))
+    if mutation == "missing":
+        old = None
+    elif mutation == "bad-pin":
+        old[0] = (old[0][0], "a" * 64)
+    elif mutation == "duplicate":
+        old[1] = old[0]
+    elif mutation == "tamper":
+        (tmp_path / site.OUTPUTS[0]).write_bytes(b"untrusted old page\n")
+    if mutation == "none":
+        site.refresh_outputs(tmp_path, new, old)
+        site.check_outputs(tmp_path, new)
+        with pytest.raises(safe.Rejected, match="output_already_exists"):
+            site.write_outputs(tmp_path, files)
+    else:
+        before = {name: (tmp_path / name).read_bytes() for name in site.OUTPUTS}
+        with pytest.raises(safe.Rejected):
+            site.refresh_outputs(tmp_path, new, old)
+        assert before == {name: (tmp_path / name).read_bytes() for name in site.OUTPUTS}
+
+
+def read_owner_receipt(path, pin, owner, root):
+    """Read-only exact byte/membership reader. Does not attest execution."""
+    site.digest(pin, "owner_receipt")
+    site.digest(owner, "owner", commit=True)
+    path = site.external(path, root)
+    payload = safe.read(path, "owner_receipt").payload
+    site.require(safe.sha(payload) == pin, "owner_receipt_pin", "reader")
+    report = safe.parse(payload, "owner_receipt")
+    source = site.source_state(root)
+    site.require(source["clean"] is True and source["commit"] == owner and
+                 report["source"] == report["source_after"] == source,
+                 "owner_receipt_source", "reader")
+    site.require(report["owned"] == list(site.OWNED) and report["owned_sha256"] == {
+        name: source["sha256"][name] for name in site.OWNED}, "owner_receipt_owned", "reader")
+    site.require(report["qualification"] == site.CLAIMS and report["publication"] == "NOT_PUBLISHED",
+                 "owner_receipt_ceiling", "reader")
+    site.require(report["pytest_exit_code"] == 0 and type(report["pytest_exit_code"]) is int,
+                 "owner_receipt_exit", "reader")
+    files = {}
+    for name in ("pytest.xml", "pytest.log", "collection.log"):
+        data = safe.read(path.parent / name, "owner_file").payload
+        site.require(report["artifact_sha256"][name] == safe.sha(data), "owner_file_pin", "reader")
+        files[name] = data
+    counts, nodes = site.junit_record(files["pytest.xml"], "owner_junit")
+    members = [node.split("::", 1)[1] for node in nodes]
+    collection = [line.split("::", 1)[1] for line in files["collection.log"].decode().splitlines()
+                  if line.startswith("tests/test_render_project_site.py::")]
+    site.require(all(node.startswith("tests.test_render_project_site::") for node in nodes)
+                 and members == collection == report["membership"] == report["collection_membership"]
+                 and report["exact_membership"] is True and report["counts"] == counts,
+                 "owner_reader_membership", "reader")
+    site.require(counts["failures"] == counts["errors"] == counts["skipped"] == 0,
+                 "owner_reader_not_all_pass", "reader")
+    log = files["pytest.log"].decode()
+    summaries = [line.strip("= ") for line in log.splitlines() if site.re.fullmatch(
+        r"[0-9]+ passed in [0-9]+(?:\.[0-9]+)?s(?: \([^\n]+\))?", line.strip("= "))]
+    site.require(len(summaries) == 1 and summaries[0].startswith(str(counts["tests"]) + " passed in "),
+                 "owner_reader_summary", "reader")
+    env = report["runtime"]["environment"]
+    site.require(env["CUDA_VISIBLE_DEVICES"] == "-1" and all(env[key] == "1" for key in (
+        "OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "PYTHONDONTWRITEBYTECODE",
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD")), "owner_reader_runtime", "reader")
+    site.require(report["source_consistency"] == {"verdict": "PASS", "same_complete_source": True}
+                 and report["verdict"] == "PASS" and type(report["exit_code"]) is int
+                 and report["exit_code"] == 0, "owner_reader_not_pass", "reader")
+    site.normalized_time(report["finished_at"])
+    return {"integrity": "PASS", "acceptance": "PASS", "tests": counts["tests"],
+            "execution": "UNVERIFIED", "receipt_sha256": pin, "owner_commit": owner}
+
+
+@pytest.mark.parametrize("mutation", ["none", "pin", "source", "log", "collection", "junit", "membership", "runtime"])
+def test_owner_reader_is_read_only_and_rejects_rehashed_conflicts(tmp_path, mutation):
+    repo = tmp_path / "repo"
+    init_repo(repo)
+    for name in site.OWNED:
+        path = repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes((site.ROOT / name).read_bytes())
+    assert subprocess.run(["git", "-C", str(repo), "add", "--", *site.OWNED], capture_output=True).returncode == 0
+    assert subprocess.run(["git", "-C", str(repo), "commit", "-qm", "synthetic reader scope"], capture_output=True).returncode == 0
+    source = site.source_state(repo)
+    owner = source["commit"]
+    counts = {"tests": 2, "failures": 0, "errors": 0, "skipped": 0}
+    members = ["test_one", "test_two"]
+    xml = ET.Element("testsuites")
+    suite = ET.SubElement(xml, "testsuite", {key: str(value) for key, value in counts.items()})
+    for node in members:
+        ET.SubElement(suite, "testcase", classname="tests.test_render_project_site", name=node)
+    out = tmp_path / "synthetic-reader"
+    out.mkdir()
+    payloads = {"pytest.xml": ET.tostring(xml), "pytest.log": b"2 passed in 1.0s\n",
+                "collection.log": b"tests/test_render_project_site.py::test_one\ntests/test_render_project_site.py::test_two\n"}
+    for name, payload in payloads.items():
+        (out / name).write_bytes(payload)
+    env = {key: "1" for key in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+                                  "PYTHONDONTWRITEBYTECODE", "PYTEST_DISABLE_PLUGIN_AUTOLOAD")}
+    env["CUDA_VISIBLE_DEVICES"] = "-1"
+    report = {"source": source, "source_after": deepcopy(source), "owned": list(site.OWNED),
+              "owned_sha256": {name: source["sha256"][name] for name in site.OWNED},
+              "qualification": dict(site.CLAIMS), "publication": "NOT_PUBLISHED", "pytest_exit_code": 0,
+              "artifact_sha256": {name: safe.sha(payload) for name, payload in payloads.items()},
+              "membership": members, "collection_membership": members, "counts": counts,
+              "exact_membership": True, "runtime": {"environment": env},
+              "source_consistency": {"verdict": "PASS", "same_complete_source": True},
+              "verdict": "PASS", "exit_code": 0, "finished_at": "2026-10-10T14:30:01+00:00"}
+    if mutation == "source":
+        report["source_after"]["commit"] = "a" * 40
+    elif mutation == "membership":
+        report["membership"] = ["invented", "test_two"]
+    elif mutation == "runtime":
+        report["runtime"]["environment"]["CUDA_VISIBLE_DEVICES"] = "0"
+    elif mutation in {"log", "collection", "junit"}:
+        role = {"log": "pytest.log", "collection": "collection.log", "junit": "pytest.xml"}[mutation]
+        changed = {"log": b"99 passed in 1.0s\n", "collection": b"tests/unrelated.py::invented\n",
+                   "junit": ET.tostring(xml).replace(b"test_two", b"unrelated")}[mutation]
+        (out / role).write_bytes(changed)
+        report["artifact_sha256"][role] = safe.sha(changed)
+    receipt = out / "receipt.json"
+    receipt.write_bytes(safe.encoded(report))
+    pin = "e" * 64 if mutation == "pin" else safe.sha(receipt.read_bytes())
+    before = {path.name: path.read_bytes() for path in out.iterdir()}
+    if mutation == "none":
+        result = read_owner_receipt(receipt, pin, owner, repo)
+        assert result["integrity"] == result["acceptance"] == "PASS"
+        assert result["execution"] == "UNVERIFIED" and result["tests"] == 2
+    else:
+        with pytest.raises(safe.Rejected):
+            read_owner_receipt(receipt, pin, owner, repo)
+    assert before == {path.name: path.read_bytes() for path in out.iterdir()}
+
+
 def main(argv=None):
     """External owner tests/scan receipt; no default historical evidence input."""
     import argparse
@@ -476,11 +845,26 @@ def main(argv=None):
     from xml.etree import ElementTree
 
     parser = argparse.ArgumentParser(description=main.__doc__, allow_abbrev=False)
-    parser.add_argument("--artifact-dir", type=Path, required=True)
+    parser.add_argument("--artifact-dir", type=Path)
+    parser.add_argument("--check-receipt", type=Path)
+    parser.add_argument("--receipt-sha256")
+    parser.add_argument("--owner-commit")
+    parser.add_argument("--scan-shapes", action="store_true")
     parser.add_argument("--scan-only", action="store_true")
     parser.add_argument("--publisher-check", type=Path)
     args = parser.parse_args(argv)
     root = Path(__file__).resolve().parents[1]
+    if args.check_receipt:
+        try:
+            result = read_owner_receipt(args.check_receipt, args.receipt_sha256, args.owner_commit, root)
+        except (safe.Rejected, KeyError, OSError, ValueError, TypeError) as error:
+            code = error.code if isinstance(error, safe.Rejected) else type(error).__name__
+            print(f"PROJECT_SITE_OWNER_READER integrity=FAIL acceptance=BLOCKED first_cause={code}", flush=True)
+            return 1
+        print("PROJECT_SITE_OWNER_READER " + json.dumps(result, sort_keys=True), flush=True)
+        return 0
+    if args.artifact_dir is None:
+        parser.error("--artifact-dir is required for producing new evidence")
     out = site.external(args.artifact_dir, root)
     out.mkdir(parents=True, exist_ok=False)
     before = site.source_state(root)
@@ -490,7 +874,17 @@ def main(argv=None):
         "verdict": "FAIL", "exit_code": 1,
     }
     try:
-        if args.scan_only:
+        if args.scan_shapes:
+            import unicodedata
+            shape = site.re.compile("IDENTIFIED" + r" BY|" + "pass" + r"word[\x22\x27]?\s*[:=]\s*[\x22\x27][^\x22\x27]{6,}", site.re.I)
+            bad = [name for name in site.OWNED if shape.search((root / name).read_text()) or any(
+                (ord(c) < 32 and c not in "\n\r\t") or unicodedata.category(c) == "Cf"
+                for c in (root / name).read_text())]
+            if bad:
+                raise ValueError("named source shape/hidden scan failed")
+            receipt["scan"] = {"shape_hidden": "PASS", "files": list(site.OWNED),
+                               "credential_files_read": False, "literal_coverage": "UNVERIFIED"}
+        elif args.scan_only:
             spec = importlib.util.spec_from_file_location(
                 "site_existing_scan", "/data/dev/infra/ops/dsh/scan-secrets-precommit.py")
             scanner = importlib.util.module_from_spec(spec)
@@ -560,6 +954,8 @@ def main(argv=None):
             receipt.update(counts=counts, membership=membership,
                            collection_membership=expected,
                            exact_membership=(membership == expected))
+            receipt["artifact_sha256"] = {name: safe.sha((out / name).read_bytes())
+                                         for name in ("pytest.xml", "pytest.log", "collection.log")}
             if (process.returncode or counts["failures"] or counts["errors"]
                     or counts["skipped"] or len(membership) != counts["tests"]
                     or membership != expected):
