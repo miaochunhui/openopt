@@ -184,6 +184,27 @@ def load_module(path, name):
     return module
 
 
+@contextmanager
+def verified_source_selection(root, commit):
+    """Load one clean caller-pinned checkout, never artifact snapshot modules."""
+    root = Path(root).resolve()
+    pinned_producer(root, commit)
+    previous = {name: module for name, module in sys.modules.items()
+                if name == "openopt" or name.startswith("openopt.")}
+    search_path = sys.path[:]
+    for name in previous:
+        del sys.modules[name]
+    sys.path.insert(0, str(root / "src"))
+    try:
+        yield
+    finally:
+        for name in tuple(sys.modules):
+            if name == "openopt" or name.startswith("openopt."):
+                del sys.modules[name]
+        sys.modules.update(previous)
+        sys.path[:] = search_path
+
+
 def dispatch_functions(data, proof):
     """Execute only reviewed pure functions, never module/submission entrypoints."""
     tree = ast.parse(data, filename=DISPATCH)
@@ -570,10 +591,12 @@ def run(producer_root, producer_commit, repo, dispatch_commit, artifact_dir):
               "scope": "CPU numerical and producer/dispatch contract review; not CUDA execution",
               "reviewer_sha256": sha(read(Path(__file__))),
               "auditor_sha256": sha(read(ROOT / AUDITOR)), "execution_verdict": "UNVERIFIED"}
+    selection = ExitStack()
     try:
         import torch
         require(os.environ.get("CUDA_VISIBLE_DEVICES") == "-1" and not torch.cuda.is_available(),
                 "CPU scope", "explicit CUDA_VISIBLE_DEVICES=-1 and unavailable CUDA required")
+        selection.enter_context(verified_source_selection(producer_root, producer_commit))
         producer_identity = pinned_producer(producer_root, producer_commit)
         coordinator_identity, dispatch_sources = dispatch_identity(repo, dispatch_commit)
         report.update(producer=producer_identity, dispatch=coordinator_identity)
@@ -636,6 +659,8 @@ def run(producer_root, producer_commit, repo, dispatch_commit, artifact_dir):
         report.update(verdict="FAIL", error=f"{type(error).__name__}: {error}")
         with (output / "failure.log").open("x") as log:
             log.write(traceback.format_exc())
+    finally:
+        selection.close()
     report["finished_at"] = now()
     line = (f"GPU_PROOF_CONTRACT_REVIEW verdict={report['verdict']} at={report['finished_at']} "
             f"report={output / 'review.json'}")
@@ -670,6 +695,12 @@ def replay(bundle_path, digest, producer_root, producer_commit, repo, dispatch_c
             and report["auditor_sha256"] == sha(read(ROOT / AUDITOR))
             == sha(read(output / "reviewed-auditor" / AUDITOR)),
             "review", "failed report or changed reviewer")
+    with verified_source_selection(producer_root, producer_commit):
+        return _replay_selected(bundle, output, report, producer_root, producer_commit,
+                                repo, dispatch_commit)
+
+
+def _replay_selected(bundle, output, report, producer_root, producer_commit, repo, dispatch_commit):
     require(report["producer"] == pinned_producer(producer_root, producer_commit),
             "producer", "source identity mismatch")
     identity, sources = dispatch_identity(repo, dispatch_commit)

@@ -1,18 +1,22 @@
 """CPU-only integrity fixtures, not evidence of CUDA or cluster execution.
 
-Numerical fixtures use analytic solutions (no solve/factory). A committed base
-plus explicitly selected local source bytes form a clean test-only repository.
+Legacy gap fixtures use analytic solutions. Outer-allnine fixtures reuse one
+module-level real CPU production with pre-solve original-model pins. Audits
+never solve or recreate models. A committed base plus explicitly selected local
+source bytes form a clean test-only repository.
 All generated records and
 repositories live in pytest's external artifact directory. Fake Pod/GPU records
 exercise the verifier only and must never be promoted to GPU release evidence.
 """
 
 from copy import deepcopy
+from contextlib import contextmanager
 import importlib.util
 import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tarfile
 import io
 
@@ -24,9 +28,25 @@ ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("proof_run_audit", ROOT / "scripts/accept_gpu_proof_run.py")
 audit = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(audit)
+REVIEW_SPEC = importlib.util.spec_from_file_location(
+    "outer_review_loader", ROOT / "scripts/review_gpu_proof_contract.py")
+review = importlib.util.module_from_spec(REVIEW_SPEC)
+REVIEW_SPEC.loader.exec_module(review)
 REVISION = os.environ.get("OPENOPT_PROOF_TEST_REVISION", "c451dcf")
 UUID = "GPU-12345678-1234-5678-9abc-123456789abc"
 GPU = "NVIDIA RTX PRO 4500 Blackwell"
+ALL_NINE_GROUPS = (
+    ("scaling_basic", "scaling_ill_conditioned", "jacobi_coo"),
+    ("jacobi_csr", "gap_spd", "gap_lp"),
+    ("gap_singular", "infeasible", "unbounded"),
+)
+RAY_MUTATIONS = (
+    "status", "iteration_zero", "iteration_boolean", "iteration_fraction",
+    "iteration_limit", "iteration_interval", "iteration_disagrees",
+    "ray_sign", "ray_zero", "ray_missing", "base", "checkpoint_missing",
+    "checkpoint_current", "checkpoint_delta", "checkpoint_initial",
+    "rho", "selected_summary", "opposite_summary",
+)
 
 
 def git(root, *args):
@@ -52,12 +72,18 @@ def trusted_root(tmp_path_factory):
                 continue
             if not (name.startswith("src/") or name in {
                     audit.PRODUCER, audit.COORDINATOR, "LICENSE",
-                    "docs/research/refinement.md"}):
+                    "docs/research/refinement.md", "tests/test_gpu_release_proof.py",
+                    "docs/research/gpu-release-proof.md"}):
                 continue
             path = root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(stream.extractfile(member).read())
     source = Path(os.environ.get("OPENOPT_PROOF_TEST_SOURCE_ROOT", str(ROOT)))
+    if "OPENOPT_PROOF_TEST_SOURCE_ROOT" in os.environ:
+        assert len(REVISION) == 40 and all(char in "0123456789abcdef" for char in REVISION)
+        selected_identity = audit.current_identity(source)
+        assert selected_identity["clean"] is True
+        assert selected_identity["commit"] == REVISION, "external selector requires pinned clean HEAD"
     if (source / audit.PRODUCER).is_file():
         for path in sorted((source / "src").rglob("*.py")) + [
                 source / audit.PRODUCER, source / audit.COORDINATOR]:
@@ -81,9 +107,8 @@ def trusted_root(tmp_path_factory):
 
 
 @pytest.fixture
-def producer(trusted_root, monkeypatch):
-    digest = audit.sha((trusted_root / audit.PRODUCER).read_bytes())
-    real = audit.trusted_producer(trusted_root, digest)
+def producer(trusted_root, trusted_runtime, frozen_cpu_nine, monkeypatch):
+    real = trusted_runtime
 
     def forbidden(*args, **kwargs):
         raise AssertionError("acceptance attempted a solve, factory, CUDA or cluster action")
@@ -94,17 +119,102 @@ def producer(trusted_root, monkeypatch):
 
     for module, names in (
         (qp, ("solve_qp", "prepare_qp")),
+        (qp.PreparedQP, ("solve",)),
         (operators, ("prepare_operator_qp", "conjugate_gradient")),
+        (operators.PreparedOperatorQP, ("solve",)),
         (scaling, ("solve_scaled_qp",)),
-        (real, ("run_cases", "execute_case", "make_problem", "hardware")),
-        (torch.cuda, ("is_available", "device_count", "get_device_name")),
+        (real, ("run_cases", "execute_case", "make_problem", "hardware", "freeze_sources")),
+        (torch.cuda, ("is_available", "device_count", "get_device_name", "synchronize")),
     ):
         for name in names:
             monkeypatch.setattr(module, name, forbidden)
-    # Keep actual seal/replay intact; prevent importing a second unguarded copy.
+    original_run = subprocess.run
+
+    def git_only(command, *args, **kwargs):
+        assert command and command[0] == "git", "audit attempted non-Git external execution"
+        return original_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", git_only)
     monkeypatch.setattr(audit, "trusted_producer", lambda root, digest: real)
     assert real.seal.__module__ == real.replay.__module__
+    assert real.ROOT == trusted_root
     return real
+
+
+@contextmanager
+def isolated_openopt(root):
+    """Select one real source root, without bypassing loaded-source guards."""
+    previous = {key: value for key, value in sys.modules.items()
+                if key == "openopt" or key.startswith("openopt.")}
+    search_path = sys.path[:]
+    for name in previous:
+        del sys.modules[name]
+    sys.path.insert(0, str(root / "src"))
+    try:
+        yield
+    finally:
+        for name in tuple(sys.modules):
+            if name == "openopt" or name.startswith("openopt."):
+                del sys.modules[name]
+        sys.modules.update(previous)
+        sys.path[:] = search_path
+
+
+@pytest.fixture(scope="module")
+def trusted_runtime(trusted_root):
+    digest = audit.sha((trusted_root / audit.PRODUCER).read_bytes())
+    with isolated_openopt(trusted_root):
+        real = audit.trusted_producer(trusted_root, digest)
+        import openopt.qp as qp
+        import openopt.certificates as certificates
+
+        assert Path(qp.__file__).is_relative_to(trusted_root)
+        assert Path(certificates.__file__).is_relative_to(trusted_root)
+        assert qp.QPConfig.validate.__code__.co_filename == str(trusted_root / "src/openopt/qp.py")
+        assert certificates.check_unbounded_direction.__code__.co_filename == str(
+            trusted_root / "src/openopt/certificates.py")
+        yield real
+
+
+@pytest.fixture(scope="module")
+def frozen_cpu_nine(tmp_path_factory, trusted_root, trusted_runtime):
+    """One genuine CPU run, expectations frozen before the first solve."""
+    proof = trusted_runtime
+    assert os.environ.get("CUDA_VISIBLE_DEVICES") == "-1"
+    parent = tmp_path_factory.mktemp("real-cpu-nine-not-cuda")
+    expected = {"schema_version": 1, "source_sha256": proof.source_map(trusted_root), "cases": {}}
+    for case in proof.CASES:
+        problem = proof.make_problem(case)
+        model = {}
+        for field in proof.FIELDS:
+            tensor = getattr(problem, field)
+            if case.startswith("jacobi_") and field in ("P", "A"):
+                tensor = tensor.to_sparse()
+                if case == "jacobi_csr":
+                    tensor = tensor.to_sparse_csr()
+            model[field] = proof.save_tensor(parent, "expected-" + case + "-" + field, tensor)
+        expected["cases"][case] = {"model": model, "model_sha256": proof.model_hash(model)}
+    expectation_path = parent / "proof-expectations.json"
+    proof.write(expectation_path, expected)
+    expected_pin = audit.sha(expectation_path.read_bytes())
+    result = proof.run_cases(parent / "production", list(proof.CASES), "cpu", cpu_smoke=True,
+                             expectations=expectation_path, expectations_sha256=expected_pin)
+    result_pin = audit.sha(result.read_bytes())
+    assert load(result)["verdict"] == "CPU_SMOKE_PASS"
+    assert load(result)["execution_verdict"] == "UNVERIFIED"
+    assert set(load(result)["cases"]) == set(proof.CASES) == set(sum(ALL_NINE_GROUPS, ()))
+    saved = load(result.parent / "unbounded.json")
+    base = proof.load_tensor(result.parent, saved["vectors"]["feasible_base"], "actual base")
+    x = proof.load_tensor(result.parent, saved["vectors"]["x"], "terminal x")
+    assert np.array_equal(base, x) and base[1] > 2
+    frozen = {"fixture": "REAL_CPU_ONLY; coordinator/Pod/GPU records simulated separately",
+              "result": str(result), "result_sha256": result_pin,
+              "expectations": str(expectation_path), "expectations_sha256": expected_pin,
+              "case_count": 9, "source_sha256": proof.source_map(trusted_root)}
+    put(parent / "cpu-receipt.json", frozen)
+    before = proof.inventory(parent)
+    yield {"root": parent, "result": result, "expected": expected}
+    assert proof.inventory(parent) == before
 
 
 def model_arrays(case):
@@ -124,39 +234,52 @@ def tensor_records(producer, root, case, arrays, label):
             for field, array in zip(producer.FIELDS, arrays)}
 
 
-def fake_result(producer, root, case, sources, model, expectation):
+def fake_result(producer, root, case, sources, model, expectation, cpu=None):
     root.mkdir(parents=True)
     for name in sources:
         target = root / "source" / name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes((producer.ROOT / name).read_bytes())
-    arrays, x = model_arrays(case)
-    actual_model = tensor_records(producer, root, case, arrays, "original")
-    assert producer.model_hash(actual_model) == producer.model_hash(model)
-    resident = deepcopy(actual_model)
-    for record in resident.values():
-        record["device"] = "cuda:0"
-    y = -(arrays[0] @ x + arrays[1])
-    vectors = {}
-    for name, value in (("x", x), ("y", y)):
-        vectors[name] = producer.save_tensor(root, case + "-" + name, torch.from_numpy(value))
-        vectors[name]["device"] = "cuda:0"
-    config, scaling, atol, rtol = producer.policy(case, "cuda:0")
-    checks = producer.original_checks(dict(zip(producer.FIELDS, arrays)), {"x": x, "y": y},
-                                      "solved", atol, rtol)
-    assert checks["passed"] is True
-    saved = {
-        "case": case, "status": "solved", "expected_status": "solved",
-        "dtype": "torch.float64", "device": "cuda:0", "config": producer.config_dict(config),
-        "scaling_config": None, "atol": atol, "rtol": rtol,
-        "model": actual_model, "model_sha256": producer.model_hash(actual_model),
-        "resident_model": resident, "vectors": vectors,
-        "observed": {name: {"device": "cuda:0", "dtype": "torch.float64", "layout": "torch.strided"}
-                     for name in (*producer.FIELDS, "factor", "x", "y")},
-        "extensions": {}, "iterations": 25, "objective": checks["metrics"]["primal_objective"],
-        "independent_original": checks, "numpy_original": checks,
-        "wall_s": .1, "qualification": "SIMULATED CPU fixture only, not GPU evidence",
-    }
+    if cpu is not None:
+        saved = deepcopy(load(cpu["result"].parent / (case + ".json")))
+        copy_raw_descriptors(saved, cpu["result"].parent, root)
+        relabel_runtime(saved)
+        saved["device"] = saved["config"]["device"] = "cuda:0"
+        for record in saved["model"].values():
+            record["device"] = "cpu"
+        for key in ("infeasibility_direction", "unbounded_direction", "feasible_base"):
+            if key in saved["vectors"]:
+                saved["vectors"][key]["device"] = "cpu"
+        saved["qualification"] = "REAL CPU numerical solve; SIMULATED CUDA/coordinator metadata"
+        assert saved["model_sha256"] == producer.model_hash(model)
+    else:
+        arrays, x = model_arrays(case)
+        actual_model = tensor_records(producer, root, case, arrays, "original")
+        assert producer.model_hash(actual_model) == producer.model_hash(model)
+        resident = deepcopy(actual_model)
+        for record in resident.values():
+            record["device"] = "cuda:0"
+        y = -(arrays[0] @ x + arrays[1])
+        vectors = {}
+        for name, value in (("x", x), ("y", y)):
+            vectors[name] = producer.save_tensor(root, case + "-" + name, torch.from_numpy(value))
+            vectors[name]["device"] = "cuda:0"
+        config, scaling, atol, rtol = producer.policy(case, "cuda:0")
+        checks = producer.original_checks(dict(zip(producer.FIELDS, arrays)), {"x": x, "y": y},
+                                          "solved", atol, rtol)
+        assert checks["passed"] is True
+        saved = {
+            "case": case, "status": "solved", "expected_status": "solved",
+            "dtype": "torch.float64", "device": "cuda:0", "config": producer.config_dict(config),
+            "scaling_config": None, "atol": atol, "rtol": rtol,
+            "model": actual_model, "model_sha256": producer.model_hash(actual_model),
+            "resident_model": resident, "vectors": vectors,
+            "observed": {name: {"device": "cuda:0", "dtype": "torch.float64", "layout": "torch.strided"}
+                         for name in (*producer.FIELDS, "factor", "x", "y")},
+            "extensions": {}, "iterations": 25, "objective": checks["metrics"]["primal_objective"],
+            "independent_original": checks, "numpy_original": checks,
+            "wall_s": .1, "qualification": "SIMULATED CPU fixture only, not GPU evidence",
+        }
     put(root / (case + ".json"), saved)
     samples = [
         {"at": f"2026-10-10T08:00:0{i}+00:00", "cpu": {"usage_usec": i + 1},
@@ -235,7 +358,39 @@ def fake_manifest(tree, index, case, expectation):
     return item
 
 
-def fixture_run(tmp_path, trusted_root, producer, cases=("gap_lp",)):
+def copy_raw_descriptors(value, source, target):
+    if isinstance(value, dict):
+        if set(value) == {"path", "sha256", "bytes"}:
+            original = audit.bound(source, value)
+            path = target / value["path"]
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if path.exists():
+                assert path.read_bytes() == original.read_bytes()
+            else:
+                path.write_bytes(original.read_bytes())
+        else:
+            for item in value.values():
+                copy_raw_descriptors(item, source, target)
+    elif isinstance(value, list):
+        for item in value:
+            copy_raw_descriptors(item, source, target)
+
+
+def relabel_runtime(value):
+    """Fixture metadata only; raw numerical bytes are never changed."""
+    if isinstance(value, dict):
+        if "device" in value:
+            value["device"] = "cuda:0"
+        if "observed_device" in value:
+            value["observed_device"] = "cuda:0"
+        for item in value.values():
+            relabel_runtime(item)
+    elif isinstance(value, list):
+        for item in value:
+            relabel_runtime(item)
+
+
+def fixture_run(tmp_path, trusted_root, producer, cases=("gap_lp",), cpu=None):
     tree = tmp_path / "simulated-release-proof"
     tree.mkdir()
     identity = audit.current_identity(trusted_root)
@@ -251,9 +406,14 @@ def fixture_run(tmp_path, trusted_root, producer, cases=("gap_lp",)):
     model_root = tree
     expected = {"schema_version": 1, "source_sha256": producer_sources, "cases": {}}
     for case in cases:
-        arrays, _ = model_arrays(case)
-        records = tensor_records(producer, model_root, case, arrays, "expected")
-        expected["cases"][case] = {"model": records, "model_sha256": producer.model_hash(records)}
+        if cpu is None:
+            arrays, _ = model_arrays(case)
+            records = tensor_records(producer, model_root, case, arrays, "expected")
+            expected["cases"][case] = {"model": records, "model_sha256": producer.model_hash(records)}
+        else:
+            entry = deepcopy(cpu["expected"]["cases"][case])
+            copy_raw_descriptors(entry, cpu["root"], model_root)
+            expected["cases"][case] = entry
     path = tree / "proof-expectations.json"
     put(path, expected)
     expectation = {"path": str(path), "sha256": audit.sha(path.read_bytes()), "bytes": path.stat().st_size}
@@ -262,7 +422,8 @@ def fixture_run(tmp_path, trusted_root, producer, cases=("gap_lp",)):
         item = fake_manifest(tree, index, case, expectation)
         result_path = tree / f"case-{index}/cuda-proof-explicit-simulation/result.json"
         result, completion, digest = fake_result(
-            producer, result_path.parent, case, producer_sources, expected["cases"][case]["model"], expectation)
+            producer, result_path.parent, case, producer_sources, expected["cases"][case]["model"],
+            expectation, cpu=cpu)
         runtime = {"device": "cuda:0", "gpu_uuid": UUID, "gpu_name": GPU, "gpu_count": 1,
                    "node": "fixture-node", "pod": result["hardware"]["pod"]}
         (tree / (runtime["pod"] + ".log")).write_text(
@@ -404,8 +565,9 @@ def test_exact_full_case_denominator(mutation, tmp_path, trusted_root, producer)
 
 def repin_result(tree, producer, saved, result):
     root = tree / "case-0/cuda-proof-explicit-simulation"
-    put(root / "gap_lp.json", saved)
-    result["cases"]["gap_lp"] = producer.descriptor(root, root / "gap_lp.json")
+    case = saved["case"]
+    put(root / (case + ".json"), saved)
+    result["cases"][case] = producer.descriptor(root, root / (case + ".json"))
     put(root / "result.json", result)
     digest = audit.sha((root / "result.json").read_bytes())
     completion = (f"OPENOPT_GPU_PROOF verdict={result['verdict']} at={result['finished_at']} "
@@ -580,3 +742,238 @@ def test_cli_failure_is_logged_and_never_unverified_then_pass(tmp_path, trusted_
     assert report["execution_verdict"] == "UNVERIFIED"
     assert (reports[0].parent / "failure.log").stat().st_size > 0
     assert (reports[0].parent / "execution.log").read_text().rstrip().endswith("returncode=1")
+
+
+# Outer coverage groups share the single real CPU producer fixture above.
+@pytest.mark.parametrize("cases", ALL_NINE_GROUPS, ids=("scaling-coo", "csr-gaps", "singular-rays"))
+def test_outer_allnine_real_cpu_frozen_seal_accept(
+        cases, tmp_path, trusted_root, frozen_cpu_nine, producer):
+    tree, expected_pin = fixture_run(tmp_path, trusted_root, producer, cases, cpu=frozen_cpu_nine)
+    expectation = load(tree / "proof-expectations.json")
+    before = audit.inventory(tree)
+    for case in cases:
+        assert expectation["cases"][case]["model_sha256"] == \
+            frozen_cpu_nine["expected"]["cases"][case]["model_sha256"]
+        root = tree / f"case-{cases.index(case)}/cuda-proof-explicit-simulation"
+        saved = load(root / (case + ".json"))
+        original = load(frozen_cpu_nine["result"].parent / (case + ".json"))
+        assert saved["iterations"] == original["iterations"]
+        assert saved["independent_original"] == original["independent_original"]
+        assert saved["numpy_original"] == original["numpy_original"]
+        assert "SIMULATED" in saved["qualification"]
+    path = tree / "collection.json"
+    bundle, sealed = audit.seal(path, audit.sha(path.read_bytes()), trusted_root,
+                                tmp_path / "sealed", expectations_sha256=expected_pin)
+    bundle_path = tmp_path / "sealed/bundle.json"
+    put(bundle_path, bundle)
+    accepted = audit.accept(bundle_path, audit.sha(bundle_path.read_bytes()), trusted_root,
+                            tmp_path / "accepted", expectations_sha256=expected_pin)
+    assert sealed["case_count"] == accepted["case_count"] == 3
+    assert accepted["requested_cases"] == list(cases)
+    assert accepted["verdict"] == accepted["numerical_verdict"] == "PASS"
+    assert accepted["execution_verdict"] == "PASS"  # Simulated coordinator contract only.
+    for entry in accepted["entries"]:
+        numerical = entry["numerical"]
+        assert numerical["case_count"] == 1 and numerical["verdict"] == producer.NUMERICAL_PASS
+        assert numerical["execution_verdict"] == "UNVERIFIED"
+        assert numerical["cases"][0]["case"] == entry["case"]
+        assert numerical["cases"][0]["passed"] is True
+        assert entry["placement"]["pod"].startswith("fixture-")
+    assert audit.inventory(tree) == before
+    put(tmp_path / "outer-coverage-receipt.json", {
+        "fixture": "REAL_CPU_NUMERICS_FAKE_COORDINATOR; NOT CUDA EXECUTION EVIDENCE",
+        "cases": list(cases), "cpu_result_sha256": audit.sha(frozen_cpu_nine["result"].read_bytes()),
+        "expectations_sha256": expected_pin, "collection_sha256": audit.sha(path.read_bytes()),
+        "outer_contract_verdict": accepted["verdict"], "actual_execution_verdict": "UNVERIFIED",
+    })
+
+
+@pytest.mark.parametrize("cases", [("infeasible",), ("infeasible", "unbounded")], ids=("one", "two"))
+def test_outer_allnine_direction_run_denominators(
+        cases, tmp_path, trusted_root, frozen_cpu_nine, producer):
+    tree, pin = fixture_run(tmp_path, trusted_root, producer, cases, cpu=frozen_cpu_nine)
+    path = tree / "collection.json"
+    outcome, _ = audit.validate(path, audit.sha(path.read_bytes()), trusted_root,
+                                expectations_sha256=pin, numerical_dir=tmp_path / "numerical")
+    assert outcome["case_count"] == len(cases)
+    assert outcome["requested_cases"] == list(cases)
+    assert all(entry["numerical"]["cases"][0]["status"] == entry["case"]
+               for entry in outcome["entries"])
+
+
+def mutate_ray(producer, root, saved, mutation):
+    case = saved["case"]
+    trace = saved["extensions"]["checkpoint"]
+    name = "infeasibility_direction" if case == "infeasible" else "unbounded_direction"
+
+    def vector(group, key, values):
+        group[key] = producer.save_tensor(
+            root, "mutated-" + mutation + "-" + key, torch.from_numpy(np.asarray(values)))
+        group[key]["device"] = "cpu" if group is saved["vectors"] and key not in ("x", "y") else "cuda:0"
+
+    if mutation == "status":
+        saved["status"] = saved["expected_status"] = "unbounded" if case == "infeasible" else "infeasible"
+    elif mutation.startswith("iteration_"):
+        values = {"iteration_zero": 0, "iteration_boolean": True, "iteration_fraction": 25.5,
+                  "iteration_limit": saved["config"]["max_iterations"] + 1, "iteration_interval": 1}
+        if mutation == "iteration_disagrees":
+            trace["iteration"] += 1
+        else:
+            saved["iterations"] = trace["iteration"] = values[mutation]
+    elif mutation in ("ray_sign", "ray_zero"):
+        raw = producer.load_tensor(root, saved["vectors"][name], name)
+        vector(saved["vectors"], name, -raw if mutation == "ray_sign" else np.zeros_like(raw))
+    elif mutation == "ray_missing":
+        del saved["vectors"][name]
+    elif mutation == "base":
+        if case == "unbounded":
+            # Numerically feasible but not the solver's actual terminal base.
+            vector(saved["vectors"], "feasible_base", np.array([0., 2.]))
+        else:
+            vector(saved["vectors"], "feasible_base", np.zeros(saved["model"]["q"]["shape"]))
+    elif mutation == "checkpoint_missing":
+        del saved["extensions"]["checkpoint"]
+    elif mutation in ("checkpoint_current", "checkpoint_delta", "checkpoint_initial"):
+        key = {"checkpoint_current": "current_x", "checkpoint_delta": "dx",
+               "checkpoint_initial": "previous_y"}[mutation]
+        raw = producer.load_tensor(root, trace["tensors"][key], key)
+        vector(trace["tensors"], key, raw + 1)
+    elif mutation == "rho":
+        trace["rho"] *= 2
+    elif mutation == "selected_summary":
+        selected = trace[case + "_evidence"]
+        metric = next(iter(selected["metrics"]))
+        selected["metrics"][metric] += 1
+    else:
+        assert mutation == "opposite_summary"
+        opposite = "unbounded" if case == "infeasible" else "infeasible"
+        trace[opposite + "_evidence"]["passed"] = True
+        trace[opposite + "_evidence"]["checks"] = {
+            key: True for key in trace[opposite + "_evidence"]["checks"]}
+
+
+@pytest.mark.parametrize("case", ("infeasible", "unbounded"))
+@pytest.mark.parametrize("mutation", RAY_MUTATIONS)
+def test_outer_allnine_ray_semantics_resealed_rejected(
+        case, mutation, tmp_path, trusted_root, frozen_cpu_nine, producer):
+    tree, expected_pin = fixture_run(tmp_path, trusted_root, producer, (case,), cpu=frozen_cpu_nine)
+    root = tree / "case-0/cuda-proof-explicit-simulation"
+    saved, result = load(root / (case + ".json")), load(root / "result.json")
+    mutate_ray(producer, root, saved, mutation)
+    root, digest, completion = repin_result(tree, producer, saved, result)
+    pod_log = tree / f"fixture-{case}-pod.log"
+    old_lines = pod_log.read_text().splitlines()
+    pod_log.write_text("\n".join(old_lines[:-1]) + "\n" + completion + "\n")
+    before = audit.inventory(tree)
+    control_result = control(tree, expected_pin, trusted_root)
+    assert len(control_result[3]) == 1  # All independent control pins agree.
+    collection = tree / "collection.json"
+    with pytest.raises(producer.ProofError) as caught:
+        audit.seal(collection, audit.sha(collection.read_bytes()), trusted_root,
+                   tmp_path / "sealed", expectations_sha256=expected_pin)
+    assert case in str(caught.value) or mutation in ("ray_sign", "ray_zero")
+    assert "hash mutation" not in str(caught.value)
+    assert audit.inventory(tree) == before
+    put(tmp_path / "outer-ray-rejection-receipt.json", {
+        "fixture": "REAL_CPU_NUMERICS_FAKE_COORDINATOR; NOT CUDA EXECUTION EVIDENCE",
+        "case": case, "mutation": mutation, "verdict": "REJECTED",
+        "reason": str(caught.value), "result_sha256": digest, "expectations_sha256": expected_pin,
+        "caller_collection_sha256": audit.sha(collection.read_bytes()),
+    })
+
+
+def test_outer_allnine_loaded_foreign_module_rejected_not_guard_bypassed(
+        tmp_path, trusted_root, frozen_cpu_nine, producer, monkeypatch):
+    if not hasattr(producer, "loaded_source_check"):
+        pytest.skip("Mendel loaded-source guard not present in this pinned producer")
+    tree, expected_pin = fixture_run(tmp_path, trusted_root, producer, ("infeasible",), cpu=frozen_cpu_nine)
+    import openopt.certificates as current
+    from types import ModuleType
+    foreign = ModuleType("openopt.certificates")
+    foreign.__dict__.update(current.__dict__)
+    foreign.__file__ = str(tmp_path / "not-trusted-certificates.py")
+    monkeypatch.setitem(sys.modules, "openopt.certificates", foreign)
+    monkeypatch.setattr(sys.modules["openopt"], "certificates", foreign)
+    collection = tree / "collection.json"
+    with pytest.raises(producer.ProofError, match="loaded source"):
+        audit.seal(collection, audit.sha(collection.read_bytes()), trusted_root,
+                   tmp_path / "sealed", expectations_sha256=expected_pin)
+
+
+@pytest.mark.parametrize("exceptional", (False, True), ids=("normal", "exception"))
+def test_review_loader_selects_verified_root_and_restores_cache(
+        exceptional, trusted_root, monkeypatch, tmp_path):
+    from types import ModuleType
+    foreign = ModuleType("openopt")
+    foreign.__file__ = str(tmp_path / "foreign-package.py")
+    monkeypatch.setitem(sys.modules, "openopt", foreign)
+    before = {name: module for name, module in sys.modules.items()
+              if name == "openopt" or name.startswith("openopt.")}
+    search = sys.path[:]
+    commit = audit.current_identity(trusted_root)["commit"]
+
+    def selected():
+        with review.verified_source_selection(trusted_root, commit):
+            import openopt.qp as qp
+            import openopt.certificates as certificates
+            assert Path(qp.__file__) == trusted_root / "src/openopt/qp.py"
+            assert Path(certificates.__file__) == trusted_root / "src/openopt/certificates.py"
+            assert sys.modules["openopt"] is not foreign
+            real = review.load_module(trusted_root / audit.PRODUCER, "loader_selected_proof")
+            if hasattr(real, "loaded_source_check"):
+                identity = real.loaded_source_check(trusted_root)
+                assert identity["root"] == str(trusted_root)
+            if exceptional:
+                raise RuntimeError("selector restoration negative")
+
+    if exceptional:
+        with pytest.raises(RuntimeError, match="selector restoration negative"):
+            selected()
+    else:
+        selected()
+    assert sys.path == search
+    assert {name: module for name, module in sys.modules.items()
+            if name == "openopt" or name.startswith("openopt.")} == before
+
+
+def test_review_loader_wrong_commit_does_not_replace_modules(trusted_root):
+    before = dict(sys.modules)
+    search = sys.path[:]
+    with pytest.raises(review.ReviewError, match="full commit"):
+        with review.verified_source_selection(trusted_root, "not-a-full-commit"):
+            pytest.fail("unverified source must not be selected")
+    assert sys.path == search
+    assert all(sys.modules.get(name) is module for name, module in before.items()
+               if name == "openopt" or name.startswith("openopt."))
+
+
+@pytest.mark.parametrize("mutation", ("wrong_pin", "added", "removed", "changed"))
+def test_review_loader_pins_fail_before_source_selection(mutation, tmp_path, monkeypatch):
+    root = tmp_path / "immutable-review"
+    root.mkdir()
+    put(root / "review.json", {"verdict": "CONTRACT_REVIEW_PASS"})
+    put(root / "original.json", {"fixture": "CPU-only"})
+    bundle = {"schema_version": 1, "evidence_root": str(root),
+              "files": review.inventory(root),
+              "report": review.descriptor(root, root / "review.json")}
+    path = tmp_path / "bundle.json"
+    put(path, bundle)
+    digest = audit.sha(path.read_bytes())
+    reason = "caller pin mismatch" if mutation == "wrong_pin" else "added, removed or changed"
+    if mutation == "wrong_pin":
+        digest = "0" * 64
+    elif mutation == "added":
+        put(root / "added.json", {})
+    elif mutation == "removed":
+        (root / "review.json").unlink()
+    else:
+        (root / "review.json").write_bytes(b"mutated")
+    monkeypatch.setattr(review, "external", lambda value: Path(value))
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid bundle must fail before source selection/import")
+
+    monkeypatch.setattr(review, "pinned_producer", forbidden)
+    monkeypatch.setattr(review, "load_module", forbidden)
+    with pytest.raises(review.ReviewError, match=reason):
+        review.replay(path, digest, tmp_path, "1" * 40, tmp_path, "2" * 40)
