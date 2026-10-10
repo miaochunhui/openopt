@@ -282,6 +282,8 @@ def validate_wheel_sources(wheel: zipfile.ZipFile, source: Path) -> int:
 
 def installed_probe(target, manifest=None):
     target = Path(target).resolve()
+    # -I ignores PYTHONDONTWRITEBYTECODE; do not create unpinned executables.
+    sys.dont_write_bytecode = True
     verified_bytes = validate_installed_bytes(target, manifest) if manifest is not None else None
     if any(name == package or name.startswith(package + ".")
            for name in sys.modules for package in ("openopt", "openpo")):
@@ -509,7 +511,7 @@ def main():
                 stdout=log, stderr=subprocess.STDOUT, check=True,
             )
             subprocess.run(
-                [sys.executable, "-I", str(Path(__file__).resolve()), "--installed", str(target),
+                [sys.executable, "-I", "-B", str(Path(__file__).resolve()), "--installed", str(target),
                  "--source-manifest", str(manifest_path), "--source-manifest-sha256", manifest_pin,
                  "--probe-report", str(probe_path)],
                 cwd=artifacts, env=env, stdout=log, stderr=subprocess.STDOUT, check=True,

@@ -153,6 +153,16 @@ def test_manifest_path_without_pin_still_fails_loud(tmp_path):
     assert "caller SHA256" in result.stderr
 
 
+def test_isolated_legacy_probe_does_not_create_unpinned_bytecode(isolated_bytes):
+    target, _, _, _ = isolated_bytes
+    result = subprocess.run([sys.executable, "-I", str(ROOT / "scripts/check_distribution.py"),
+                             "--installed", str(target)], capture_output=True, text=True, check=False)
+    # Both synthetic packages import, then the deliberately absent API fails.
+    assert result.returncode == 1 and "AttributeError" in result.stderr
+    assert not list(target.rglob("*.pyc"))
+    assert not list(target.rglob("__pycache__"))
+
+
 @pytest.mark.parametrize("kind", ["rsoc_lp", "rsoc_qp"])
 def test_original_model_exact_analytic_kkt(kind):
     model = gate.rotated_models(openopt)[kind]

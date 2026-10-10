@@ -47,6 +47,8 @@ No dependencies, SDKs or GPU packages are installed/downloaded.
 A fresh `python -I` process verifies installed Python set, all exact source
 bytes and installed openopt 0BSD metadata/LICENSE before imports, rejects
 cached checkout imports, and checks every loaded project module path/bytes.
+The coordinator also passes `-B`, and the probe explicitly disables bytecode
+writes because `-I` ignores the corresponding environment variable.
 The same byte check is repeated after numerical acceptance. The numerical
 report includes original models, both observed solutions, independent
 evidence and negative controls. The coordinator binds its report path/hash/
@@ -84,3 +86,10 @@ a header AFTER the METADATA header/body separator; that is body text, not
 a duplicate parsed header. The fixture now inserts the duplicate before the
 separator. No production acceptance criterion or numerical tolerance was
 relaxed. The actual native/reference LP/QP test passed in that first run.
+
+First clean wheel at `clean-wheel/wheel-z8s6v_bx/distribution.json` failed:
+`python -I` ignored PYTHONDONTWRITEBYTECODE, imported packages generated pyc,
+and the unchanged post-import bytecode rejection gate correctly stopped it.
+The fix disables writes explicitly and adds an isolated legacy CLI regression;
+no bytecode is removed from that original failed installation or permitted by
+the acceptance gate. Subsequent acceptance builds a separate new wheel.
