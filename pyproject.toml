@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "openopt"
+version = "0.1.0"
+description = "GPU-accelerated optimization foundation derived from OpenPO"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["numpy>=2.0", "torch>=2.4"]
+
+[project.urls]
+Repository = "https://gitee.com/sdfwefqaa/openopt"
+
+[project.scripts]
+openopt-shadow-server = "openpo.shadow_server:main"
+openpo-shadow-server = "openpo.shadow_server:main"
+
+[project.optional-dependencies]
+cuda = ["triton>=3.0,<4; platform_system == 'Linux'"]
+test = ["pytest>=8", "packaging>=24", "scipy>=1.15", "osqp>=1.0,<2", "clarabel>=0.10,<1", "highspy>=1.15,<2"]
+benchmark = [
+  "clarabel>=0.10,<1",
+  "highspy>=1.15,<2",
+  "osqp>=1.0,<2",
+  "pyscipopt>=5.7,<6",
+  "scipy>=1.15",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "src", "benchmarks"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["openopt*", "openpo*"]

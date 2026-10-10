@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>openopt Foundation Design</title>
+<style>
+:root { color-scheme: light; --ink: #18362f; --paper: #f4f0e6; --accent: #bb4c24; }
+body { margin: 0; background: linear-gradient(140deg, var(--paper), #e6eee6);
+  color: var(--ink); font: 18px/1.6 Georgia, serif; }
+main { max-width: 900px; margin: auto; padding: 48px 24px; }
+h1 { font-size: clamp(2.4rem, 7vw, 4rem); line-height: 1.1; }
+h2 { margin-top: 2rem; border-top: 1px solid #b9c7ba; padding-top: 1rem; }
+code { font: .9em/1.5 monospace; overflow-wrap: anywhere; }
+a { color: var(--accent); }
+</style>
+<main>
+<p>Foundation extraction / 2026-10-10</p>
+<h1>openopt</h1>
+<p>A GPU-accelerated optimization project, starting from the existing OpenPO
+portfolio implementation. This extraction is not a general-purpose optimizer
+release and does not redesign the algorithms.</p>
+<h2>Architecture</h2>
+<p><code>src/openpo</code> owns the unchanged implementation: low-rank factor
+models, projections, batched solvers, linear constraints, exact references,
+portfolio adapters, multi-period research and certification service libraries.
+<code>src/openopt</code> reexports the same public objects, preserving identity
+and compatibility without copying solver logic.</p>
+<h2>Generalization Boundary</h2>
+<p>The current API still names alpha, holdings and portfolio risk. The next
+stage must define a domain-neutral quadratic operator and LP/QP contract, then
+move portfolio semantics behind adapters. A general model must not disguise
+portfolio assumptions with renamed classes.</p>
+<h2>Correctness Before Speed</h2>
+<p>The independent smoke gate and full migrated test suite verify numerical
+behavior and API compatibility. They are not performance gates. Continuous
+reference comparisons remain OSQP/Clarabel; future discrete comparisons must
+use SCIP/HiGHS under equivalent formulations and budgets.</p>
+<p>Provenance validates the imported bytes in the initial Git commit, while
+regression tests validate current code. The exact-snapshot check is a separate
+tool, not a permanent ban on independent algorithm changes. Wheel validation
+checks the module set and solves a synthetic problem from an isolated install.</p>
+<h2>Maintenance And Release</h2>
+<p>Private deployment, proprietary data, credentials, commercial PDFs and
+historical results are excluded. Results and logs stay outside the worktree.
+The rights holder must decide licensing before an open-source release.</p>
+<p>See <a href="benchmark-report.html">verification and benchmark status</a>,
+<a href="MIGRATION.md">migration boundary</a> and
+<a href="BACKLOG.md">development ledger</a>.</p>
+</main>
+</html>

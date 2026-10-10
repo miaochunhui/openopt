@@ -1,0 +1,998 @@
+{
+  "schema_version": 1,
+  "migration_date": "2026-10-10",
+  "source_project": "optimizer",
+  "source_commit": "a0300f07efaf9669e18d236f71c739490d3afe2a",
+  "method": "explicit committed snapshot; no source history imported",
+  "licensing": "NO_LICENSE_DECLARATION_IN_SOURCE; rights-holder decision required",
+  "files": [
+    {
+      "path": "benchmarks/benchmark_cntr_6000.py",
+      "bytes": 32533,
+      "sha256": "de706373f3259e9cbd377912c156c9a29d18dec878d9bf2e15f5ec2133d36e64"
+    },
+    {
+      "path": "benchmarks/benchmark_solver.py",
+      "bytes": 4739,
+      "sha256": "06e3d0ba493aca248637eaedf9889184b9d706183a66aefc7b730d47340960c2"
+    },
+    {
+      "path": "benchmarks/benchmark_trade_style_qp.py",
+      "bytes": 18267,
+      "sha256": "bc45a9bd78d681d5d030f9b8a5bb72b66d6b9d86ca1d2e38f5c70a913a46b298"
+    },
+    {
+      "path": "benchmarks/compare_constrained.py",
+      "bytes": 27661,
+      "sha256": "b1fe586ac5e2c1ac8f6dc1ea6b8b289ee87f7511d7006a96b6ec402a98dd43ad"
+    },
+    {
+      "path": "benchmarks/compare_open_source.py",
+      "bytes": 16565,
+      "sha256": "c29390e3c2c0a2b20316b768c33ee2f5f7a760f58ef046d5b33129da4848b7e0"
+    },
+    {
+      "path": "benchmarks/compare_warm_start.py",
+      "bytes": 23462,
+      "sha256": "cbe62deaf2364af7063058cdbf475881133a74e314a3ddb50e67d8aff32f6a9e"
+    },
+    {
+      "path": "benchmarks/generate_constrained_cases.py",
+      "bytes": 13152,
+      "sha256": "17c5739f8264df4685453a0082fdfcdc7ec9509665987c15d29e6aaa1576e7bd"
+    },
+    {
+      "path": "benchmarks/mpo_t1_benchmark.py",
+      "bytes": 38463,
+      "sha256": "400708a77e9e5545905a1cfff5abea96722f117d2f3e33257317d4c0facd3d49"
+    },
+    {
+      "path": "benchmarks/profile_router.py",
+      "bytes": 28223,
+      "sha256": "9b7245dcbc7ef054e0e55fbc5caa1a849e17aca8ab18ea07410f69da6a4614a3"
+    },
+    {
+      "path": "docs/mpo-t1-SPEC.md",
+      "bytes": 13011,
+      "sha256": "cee13a2c4ce46e2b358282443241e613c3c70326571373eac834721f0f68fe37"
+    },
+    {
+      "path": "docs/mpo-t1-delaycost-design.md",
+      "bytes": 20406,
+      "sha256": "d1f07b99f4bf60029a1f54ad0559a56cd1c621c72cf6287970799e1a4ddee01b"
+    },
+    {
+      "path": "docs/mpo-t1-rollforward-design.md",
+      "bytes": 12579,
+      "sha256": "c1854e020f758bc98fbe31d42ae9c0af53f98a7992b5ebc54840215f1cfa8cde"
+    },
+    {
+      "path": "docs/mpo-t1-shrinkage-design.md",
+      "bytes": 12474,
+      "sha256": "5c357bca84bacd665f24d70df3a9a7edd1cc257196c9c75b4b424c95bc240421"
+    },
+    {
+      "path": "src/openpo/__init__.py",
+      "bytes": 2311,
+      "sha256": "01c4c17f9b0fe4b5acc8fb2634f840ec408d4048e62ca9cea95a1f0ab79d8551"
+    },
+    {
+      "path": "src/openpo/admm_solver.py",
+      "bytes": 26798,
+      "sha256": "4ffa48011ac4719f52e1db79f5948f85b0ed1b12b1776be76d4f0ec19f28a451"
+    },
+    {
+      "path": "src/openpo/barra.py",
+      "bytes": 11028,
+      "sha256": "0d3a9bd97848940d40cc8cf85a61e076db80aeea53f4a7b7ff8238c7ca3c2fbb"
+    },
+    {
+      "path": "src/openpo/barra_io.py",
+      "bytes": 16900,
+      "sha256": "47e44cf23931cbcdbdfd467148544ddbb820673a6ead52b9e6f368da04f66b8c"
+    },
+    {
+      "path": "src/openpo/certification_policy.py",
+      "bytes": 35359,
+      "sha256": "a649c1e16438c23ef51ca6ec07f73efead68dbe33c7d2d2c55bd2d47a5426dab"
+    },
+    {
+      "path": "src/openpo/constrained_solver.py",
+      "bytes": 10707,
+      "sha256": "b9661fddabb377ffc10be23e531aaa8dbcca2e893da0758dd46781bed785099b"
+    },
+    {
+      "path": "src/openpo/constraints.py",
+      "bytes": 7899,
+      "sha256": "24dadbb68a5398cd09b0b9eef1b91ee1407f4957de45469934b4f28b8c416ba6"
+    },
+    {
+      "path": "src/openpo/durable_shadow.py",
+      "bytes": 49663,
+      "sha256": "1808c3d9fdbabc26be87149d739f91c74a5aefbab3c104799dc0cd3cf0cdef4d"
+    },
+    {
+      "path": "src/openpo/exact_solver.py",
+      "bytes": 34320,
+      "sha256": "89ddbe50f11a00861c653318b47e5254f1065cb835caaee45c27875f464a656b"
+    },
+    {
+      "path": "src/openpo/facade.py",
+      "bytes": 30420,
+      "sha256": "3002175e70df8b6ac56edef11a608a9b110b96022166891b45b53e2a955dc175"
+    },
+    {
+      "path": "src/openpo/hardware.py",
+      "bytes": 3404,
+      "sha256": "df4ef99c82f5bd472d4c94ad7d83508463a113e4bdc1793802593ba17681af5f"
+    },
+    {
+      "path": "src/openpo/model.py",
+      "bytes": 4892,
+      "sha256": "7d333a79688f78cc2e49567f38ceee5e2f242d87b05c33407c315d2333fe8f90"
+    },
+    {
+      "path": "src/openpo/mosek_prepared_lp.py",
+      "bytes": 17555,
+      "sha256": "7a3762831f84ed1b53a5023aa4551d5c71d1362d9e021d1b25b434aee5412a96"
+    },
+    {
+      "path": "src/openpo/mpo/__init__.py",
+      "bytes": 225,
+      "sha256": "df134c15154dc721b8b3f7b74fd40abe2f1fa31d6dab59b46f5e90a50db29b2f"
+    },
+    {
+      "path": "src/openpo/mpo/adapters.py",
+      "bytes": 49794,
+      "sha256": "b262d5431ca368a62e6642f8c0dd6739ccee588fad0dc592bc0df022e79e43f5"
+    },
+    {
+      "path": "src/openpo/mpo/backtest.py",
+      "bytes": 20741,
+      "sha256": "01f66cdc0cf115963028797ab09ff13e863a1ef1d9f73521180d289ae7a5e10e"
+    },
+    {
+      "path": "src/openpo/mpo/calendar.py",
+      "bytes": 3176,
+      "sha256": "fdb200cc94b7fa493d143749467636aad1acca446dade5f94146e2bb3d034074"
+    },
+    {
+      "path": "src/openpo/mpo/closed_form.py",
+      "bytes": 4159,
+      "sha256": "4e2cfab4f9eef43b11c04b848683ed5eaa085a1521631161cddb91f0912d024d"
+    },
+    {
+      "path": "src/openpo/mpo/config.py",
+      "bytes": 4247,
+      "sha256": "76c089ec22b014655defbefbbdb0025dcfc29b9fae2fbe4d8be5752d0d19aeb8"
+    },
+    {
+      "path": "src/openpo/mpo/decay.py",
+      "bytes": 9369,
+      "sha256": "d074a35f58de3acba02bd5199fcd64c40176f4019c5474908520ac4e3d7953fe"
+    },
+    {
+      "path": "src/openpo/mpo/delay_cost.py",
+      "bytes": 17264,
+      "sha256": "a52cd456a58c975b0cdfd12e7ce4665e5f278d6c710cdc26982b513154fb7f77"
+    },
+    {
+      "path": "src/openpo/mpo/execution.py",
+      "bytes": 13094,
+      "sha256": "71db9d9e51f45e8252440ab66c4ed0ba245048bf074d2214f17380ff449aa345"
+    },
+    {
+      "path": "src/openpo/mpo/ledger.py",
+      "bytes": 5825,
+      "sha256": "e52b42654deaf237e1471f70b45f4fe7c7e9a48e96620542d9999f0b1b611494"
+    },
+    {
+      "path": "src/openpo/mpo/metrics.py",
+      "bytes": 6125,
+      "sha256": "affc5443c8a30ad77687d8e69a795e678c560d322fb12777173b82323cc50f7a"
+    },
+    {
+      "path": "src/openpo/mpo/qp.py",
+      "bytes": 45245,
+      "sha256": "224b79e884ff605dcafd26fa1abef5b93faca4a06f8f17b0bd90835a598adf7c"
+    },
+    {
+      "path": "src/openpo/mpo/report.py",
+      "bytes": 36045,
+      "sha256": "016d84d2ff714a7bc72e3dbb180c01e26bbd0dc18edcd9a20a797697f8c9527c"
+    },
+    {
+      "path": "src/openpo/mpo/rollforward.py",
+      "bytes": 18369,
+      "sha256": "2c8d75e659a3afd917c69edc4ed2383d02c9cb566bc121c3b0b5b10054dfab5c"
+    },
+    {
+      "path": "src/openpo/mpo/shrinkage.py",
+      "bytes": 26151,
+      "sha256": "f0ce59a4fc97019455425c94c52cd09dd75787086704adbd04b6d9d9461c811c"
+    },
+    {
+      "path": "src/openpo/mpo/simulator.py",
+      "bytes": 23748,
+      "sha256": "1557b1b05848f2c6b11000e4cd39b1e48fb6048a629efd114e9377cf60003a59"
+    },
+    {
+      "path": "src/openpo/mpo/solve.py",
+      "bytes": 10094,
+      "sha256": "a1fa4eccc6816f05b2a52e09b6366c1e5bc5e16e686f18b1dd768f95faba82fd"
+    },
+    {
+      "path": "src/openpo/mpo/stages.py",
+      "bytes": 4938,
+      "sha256": "2967fe93a94bc787a7010ce8c3512e18ccf99b9edc300f74a048ab1818e83fd9"
+    },
+    {
+      "path": "src/openpo/mpo/stats.py",
+      "bytes": 4849,
+      "sha256": "127c6854307099057c715b98aeb9b47d43bba0c29ecfa17e10c2c288ecb4f852"
+    },
+    {
+      "path": "src/openpo/mpo/strategies.py",
+      "bytes": 31832,
+      "sha256": "3dfe3f1503629ba83d6dcd961f7f3905350885b69dfb6bfd3fb57ae6b37fc9b8"
+    },
+    {
+      "path": "src/openpo/mpo/synth.py",
+      "bytes": 33374,
+      "sha256": "37a076b561f19fe7b3b83175a3da2a70348e79f1d46a89cb28b0253e30f5662b"
+    },
+    {
+      "path": "src/openpo/mpo/term_structure.py",
+      "bytes": 17486,
+      "sha256": "ba55a241ab9e744fd9f806bfc506db88dbf986512eae96c692a8ff42886d59ef"
+    },
+    {
+      "path": "src/openpo/mpo/types.py",
+      "bytes": 4898,
+      "sha256": "bbdc1e17b68f5fa98d82f39d36870f2d761ae2c30cf9e189d2a026fd66810301"
+    },
+    {
+      "path": "src/openpo/projection.py",
+      "bytes": 3154,
+      "sha256": "cba50fc960a88396a89a6dc891dbd3ee0db80a3af6af90804a7d382ed420e7c0"
+    },
+    {
+      "path": "src/openpo/router.py",
+      "bytes": 4207,
+      "sha256": "61e608d7447a878ad332822a6213da3947be52f0d6bff81d1abf0ea93cddb9dd"
+    },
+    {
+      "path": "src/openpo/service_time_calibration.py",
+      "bytes": 5325,
+      "sha256": "3a0d74116384eb90f03526e646e0b26491f995fc2e25685784dbf3ec682b13ad"
+    },
+    {
+      "path": "src/openpo/shadow.py",
+      "bytes": 17576,
+      "sha256": "02923c95124ad1813de673b6d9d547c8d62aa8749a66b909081362ce82c29965"
+    },
+    {
+      "path": "src/openpo/shadow_codec.py",
+      "bytes": 15112,
+      "sha256": "aa97511fbdacdcde4ffa454c1f5a2f9a2366ef5f759cdc2fc4380988926a6142"
+    },
+    {
+      "path": "src/openpo/shadow_journal.py",
+      "bytes": 25735,
+      "sha256": "7c6477abd2e8b6d04b6577bb01c676d88bbdcfa31a6f402b4aaa8a8b6447db7b"
+    },
+    {
+      "path": "src/openpo/shadow_server.py",
+      "bytes": 32592,
+      "sha256": "31af67c89cae68ce71d23e193829871bbe589f7511590d98781c05c8170c9696"
+    },
+    {
+      "path": "src/openpo/solver.py",
+      "bytes": 7993,
+      "sha256": "faed070f45128baa0306d681363857c071a71343b2b50ce080b00b2c7ccbb8b4"
+    },
+    {
+      "path": "src/openpo/trade_optimizer.py",
+      "bytes": 18575,
+      "sha256": "66e51f4ec2605e0de610943cddd74f15730069aa93165abb6d78c583a5c21b4a"
+    },
+    {
+      "path": "src/openpo/triton_projection.py",
+      "bytes": 3549,
+      "sha256": "14063db23e5662070d7295dd5ce782ee114f57146f964fe0316c0c4e707caaa9"
+    },
+    {
+      "path": "src/openpo/triton_trade_projection.py",
+      "bytes": 4398,
+      "sha256": "f842db867083c5d9d837ea6d129fe951f06d1225e336962e528834d13c9d221e"
+    },
+    {
+      "path": "tests/helpers/durable_shadow_crash_worker.py",
+      "bytes": 1096,
+      "sha256": "3addf483023e2285ec487cf359a93ad2157ee38f6f562b008910e6bfc2dfcbe3"
+    },
+    {
+      "path": "tests/helpers/durable_shadow_multi_crash_worker.py",
+      "bytes": 1325,
+      "sha256": "602427e9b5dbada68510da18975457a004f3d328191d4a701b7dd03e6374f4ec"
+    },
+    {
+      "path": "tests/mpo/test_adapters.py",
+      "bytes": 32111,
+      "sha256": "d3950080fd425df7772e473b847801bd4690a86fde2238cd2aded924387f9277"
+    },
+    {
+      "path": "tests/mpo/test_backtest_smoke.py",
+      "bytes": 15181,
+      "sha256": "b5a5260cc4a37fa7276f843548dd2881308c0393adbc3150f4c9c358a2df0f53"
+    },
+    {
+      "path": "tests/mpo/test_benchmark_cli.py",
+      "bytes": 49487,
+      "sha256": "ae1fe5da2486bc16f52156c6e597de7c011358f1778855365225ecea1e6ada2d"
+    },
+    {
+      "path": "tests/mpo/test_delay_cost.py",
+      "bytes": 26074,
+      "sha256": "78175109590aa7fd6b2a163d0beade22445be3505aef876bb90bde8ac4ddfe78"
+    },
+    {
+      "path": "tests/mpo/test_delay_cost_wiring.py",
+      "bytes": 31346,
+      "sha256": "87db1ecd71e1290b4671657975038919e31acf819b408738bb9c998a0f31a4fd"
+    },
+    {
+      "path": "tests/mpo/test_execution.py",
+      "bytes": 15989,
+      "sha256": "fdc590652b468e9565737ca82ae297d55ff2d6ffb7d41cf36b08ef82b99bafd9"
+    },
+    {
+      "path": "tests/mpo/test_ledger.py",
+      "bytes": 5107,
+      "sha256": "83a9e6a37a5f12287656cfa06418368bcb0235243db2e41e52a2d835171d824d"
+    },
+    {
+      "path": "tests/mpo/test_qp_analytic.py",
+      "bytes": 21335,
+      "sha256": "9b89632e5f45e06eee94d1dceeffe741ef180355d2483bd13f5a3a3e2841900c"
+    },
+    {
+      "path": "tests/mpo/test_qp_lowrank.py",
+      "bytes": 31558,
+      "sha256": "c19c7580b8dad4266a586ce1c953331361fd7b0f5424febdde551d28f8ff04fe"
+    },
+    {
+      "path": "tests/mpo/test_report.py",
+      "bytes": 21549,
+      "sha256": "11564b32f62876c6fb7f7bf646f25610b46258ec380f41359689405f0507690c"
+    },
+    {
+      "path": "tests/mpo/test_rollforward.py",
+      "bytes": 21531,
+      "sha256": "a1bc87a8f6a9bcd59bf9b74dc75af33fcf0d6791aef617bdc50280727335d29d"
+    },
+    {
+      "path": "tests/mpo/test_shrinkage.py",
+      "bytes": 29830,
+      "sha256": "b813000e8e4083e027824f3997412c88b2b8a2611a3831250fcc951ab72ef65a"
+    },
+    {
+      "path": "tests/mpo/test_simulator.py",
+      "bytes": 33794,
+      "sha256": "b2ef5db99c32c1cf833f71ece3d6a1e1698d1e14f823530a5dda1906c8049540"
+    },
+    {
+      "path": "tests/mpo/test_stages.py",
+      "bytes": 11353,
+      "sha256": "58c4a624b9355e236659e0a87087090ed718bdc8f89630191e69461092434267"
+    },
+    {
+      "path": "tests/mpo/test_synth.py",
+      "bytes": 24684,
+      "sha256": "33ec858ad8476a1073c9e8af7e0b74bc74d80f4041db00f1985483dfe6509284"
+    },
+    {
+      "path": "tests/mpo/test_term_structure.py",
+      "bytes": 31772,
+      "sha256": "a68859162eb39e98d11c5f27b59cba110709b975b11bd3cbd916fbe6a7a048c9"
+    },
+    {
+      "path": "tests/test_admm_solver.py",
+      "bytes": 30038,
+      "sha256": "d17cf69e65f83f1dc939b2de959153222d4c5bba419b69db9636da289b4f1183"
+    },
+    {
+      "path": "tests/test_barra_adapter.py",
+      "bytes": 5414,
+      "sha256": "4a0bd296bd1aa2ab3d05c3e561deb7616d94e38b4cffd5f8d832a6ebd8c84016"
+    },
+    {
+      "path": "tests/test_barra_io.py",
+      "bytes": 12137,
+      "sha256": "654de656733c817cc804125779fd226b35ba492f8057f2564fb8e0a8dd36c83e"
+    },
+    {
+      "path": "tests/test_benchmark_trade_style_qp.py",
+      "bytes": 5309,
+      "sha256": "2b242378811718da9bcbd92dd32704701d456be508dab2a503b9494626a55a3b"
+    },
+    {
+      "path": "tests/test_cardinality_failures.py",
+      "bytes": 1176,
+      "sha256": "7081342fb7a44aac96d07606ebe8ff523cf61a3b59b0460896987c68d94aef3b"
+    },
+    {
+      "path": "tests/test_certification_policy.py",
+      "bytes": 14904,
+      "sha256": "4400dda81d1bc7ed2eeeedcc3dd7fef92278e49bc3e301fac9ddd1ea0c2d1b59"
+    },
+    {
+      "path": "tests/test_constrained_benchmark.py",
+      "bytes": 4435,
+      "sha256": "cf89131c7bfcb525e1ce9d8947045b571145af853feaa70454ca4a46334691d4"
+    },
+    {
+      "path": "tests/test_constrained_cases.py",
+      "bytes": 2846,
+      "sha256": "20ef8010660d5b14e386c22b2baa62b39e342f9beda67dff92f2670898d15aac"
+    },
+    {
+      "path": "tests/test_constrained_solver.py",
+      "bytes": 3991,
+      "sha256": "ecefb1c404ac9f852d6629e6ed974bfc36e1bd60e78f9e7fc582529d1c1f073c"
+    },
+    {
+      "path": "tests/test_constrained_warm_start.py",
+      "bytes": 7261,
+      "sha256": "94960571df1395380ef9ae75f0985ef28932505181779e627921028051c130d4"
+    },
+    {
+      "path": "tests/test_constraints.py",
+      "bytes": 4519,
+      "sha256": "3c8b1f62a8cb7b14a11d5157bdeeefed5433352ea4790057f772028cdb629f6f"
+    },
+    {
+      "path": "tests/test_device_contract.py",
+      "bytes": 3556,
+      "sha256": "82d5d6bc0b1b4a9d4b6371bf5991855c6bf469fc866788c3f8e0d8bf75ec95e1"
+    },
+    {
+      "path": "tests/test_durable_shadow.py",
+      "bytes": 33408,
+      "sha256": "9860ce55c8e305125b6be0ff32c17d24b7b707e4cc48d5f3e67e61be5f6637ae"
+    },
+    {
+      "path": "tests/test_exact_solver.py",
+      "bytes": 31715,
+      "sha256": "1199e509e12fe4c5a8a1f9514117af96fa016c3953fb768a07e28aa14def3ad3"
+    },
+    {
+      "path": "tests/test_facade.py",
+      "bytes": 10800,
+      "sha256": "48ac4599e57372e7a1256360b37de302df2d28f4f2b9be89ccc965060ddb527a"
+    },
+    {
+      "path": "tests/test_hardware.py",
+      "bytes": 1639,
+      "sha256": "64b66a311558f06673dafad1eac32a07686344da2ceb4ea1b5524c0b9354531b"
+    },
+    {
+      "path": "tests/test_mosek_prepared_lp.py",
+      "bytes": 13227,
+      "sha256": "94ecf95f586a96a3e26648358629f8c93357feebc2bcc1e090c4e79a96827429"
+    },
+    {
+      "path": "tests/test_open_source_comparison.py",
+      "bytes": 4565,
+      "sha256": "39da17d1cc31768aa22782c7d4f9079751f4cd0a3ad94952bedbbbdb67e62907"
+    },
+    {
+      "path": "tests/test_projection_adversarial.py",
+      "bytes": 3783,
+      "sha256": "a5d6b85b9599e382f3387f8e03c341ead9ec2e27f410fcadeb23cee450fe4674"
+    },
+    {
+      "path": "tests/test_projection_correction.py",
+      "bytes": 4292,
+      "sha256": "5feb350364430d4646d0e6f651747e135e7c133305892a0985e172dbd220e537"
+    },
+    {
+      "path": "tests/test_public_api.py",
+      "bytes": 1395,
+      "sha256": "23ce6eee135cb69e32ad5fbbf63adbe212d02b7bd9b5167f25a0479c2601213f"
+    },
+    {
+      "path": "tests/test_router.py",
+      "bytes": 4800,
+      "sha256": "333f6953af773b9477dde9e9275877a85ab55cbcd05fa21f58f4d1ddb90f6836"
+    },
+    {
+      "path": "tests/test_service_time_calibration.py",
+      "bytes": 2047,
+      "sha256": "a9fc96fc15d45f60e39eaedb2631814591c2b86502b73b1974d331975fc29260"
+    },
+    {
+      "path": "tests/test_shadow.py",
+      "bytes": 12797,
+      "sha256": "e716c2d449b65bccba15d5380df3bcb3d28105cd369f33ad913ae17abfb84ba8"
+    },
+    {
+      "path": "tests/test_shadow_codec.py",
+      "bytes": 2137,
+      "sha256": "3823c6c78e96f2494be30ea271f7c05b7c0123829e83633e1bd65ba4a5df07cd"
+    },
+    {
+      "path": "tests/test_shadow_journal.py",
+      "bytes": 11039,
+      "sha256": "e23a44497f5f79321337d72a1a28a71fc776dce0037bfd63ff29d195528bd69e"
+    },
+    {
+      "path": "tests/test_shadow_server.py",
+      "bytes": 27171,
+      "sha256": "68ccc6fb2f194502acafada469f7724402973c45b50140d657e80aef5f1a17e7"
+    },
+    {
+      "path": "tests/test_solver.py",
+      "bytes": 3730,
+      "sha256": "b769779ca6d8f06e1d4fdedd204854d29679e05fbb9d7f650e58e166fc3274e6"
+    },
+    {
+      "path": "tests/test_trade_optimizer.py",
+      "bytes": 10424,
+      "sha256": "d6301ff3b81b0aa27f7bfa46835e7abc4fd07956d7ba8782aae64cbdf49b5820"
+    },
+    {
+      "path": "tests/test_trade_style_optimizer.py",
+      "bytes": 18373,
+      "sha256": "44fa558114768597f2d139ff3be9662f2f1406dc6871f9241903c64a070b2010"
+    },
+    {
+      "path": "tests/test_triton_projection.py",
+      "bytes": 1570,
+      "sha256": "4bed1abc4b19178ffa22aa5f2e200290cf94b58679d1fa23891adae697eb6056"
+    },
+    {
+      "path": "tests/test_warm_start_benchmark.py",
+      "bytes": 9134,
+      "sha256": "c7a3e6ec3cb731c035fe3e42df09e0c64cacb81ea1a87abb49e499b8e96682d2"
+    }
+  ],
+  "excluded": [
+    {
+      "path": "benchmarks/benchmark_certification_control.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "benchmarks/benchmark_certification_policy.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "benchmarks/benchmark_certification_workers.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "benchmarks/benchmark_durable_shadow.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "benchmarks/benchmark_prepared_production.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "benchmarks/benchmark_production_facade.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "benchmarks/benchmark_shadow_certification.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "benchmarks/benchmark_shadow_server.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "benchmarks/compare_admm.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "benchmarks/compare_cntr_open_source.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "benchmarks/compare_combinatorial.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "benchmarks/compare_mip_starts.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "benchmarks/compare_multi_gpu.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "benchmarks/compare_native_search.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "benchmarks/distributed_benchmark.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "benchmarks/evaluate_admm_stability.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "benchmarks/profile_projection.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "benchmarks/profile_refinement_budget.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "benchmarks/render_benchmark_report.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "benchmarks/tune_admm.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "deliverables/a100_bundle/README.md",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "deliverables/a100_bundle/openpo_init.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "deliverables/a100_bundle/opt_bt_4_reference.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "deliverables/a100_bundle/preflight.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "deliverables/a100_bundle/run_all.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "deliverables/a100_bundle/run_all.sh",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "deliverables/a100_bundle/run_func123.sh",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "deliverables/a100_bundle/run_portfolio.sh",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "deliverables/func123_30day_benchmark.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "deliverables/func2_optimizer_benchmark.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "deliverables/openpo-a100-bundle.zip",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "deliverables/openpo-a100-bundle.zip.sha256",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "deliverables/opt_openpo.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "deliverables/portfolio_algo_benchmark.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "deliverables/probe_opt_bt4_real_shapes.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "deploy/k8s/README.md",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "deploy/k8s/durable-shadow-statefulset.yaml",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "deploy/k8s/multi-gpu-benchmark-job.yaml",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "docs/Axioma_Optimizer.pdf",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "docs/BACKLOG.md",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "docs/HANDOFF-mpo-t1-20260821.md",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "docs/HANDOFF.md",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "docs/RESUME_PROMPT.md",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "docs/benchmark-report.html",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "docs/design.html",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "docs/func2-benchmark-report.html",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "docs/mpo-t1-report-exec-axis.html",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "docs/mpo-t1-report-main-v2.html",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "docs/mpo-t1-report-sensitivity-v2.html",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "docs/mpo-t1-report-sensitivity.html",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "docs/mpo-t1-report-sensitivity2.html",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "docs/mpo-t1-report-shrinkage-main.html",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "docs/mpo-t1-report-shrinkage-sensitivity.html",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "docs/mpo-t1-report-smoke.html",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "docs/mpo-t1-report.html",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "docs/mpo-t1.html",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "docs/product-guide.html",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "docs/technical-disclosure.html",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "scripts/__init__.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "scripts/benchmark_mosek_openpo.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "scripts/build_a100_bundle.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "scripts/iteration_gate.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "scripts/pack_branch.sh",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "scripts/qualification_digest.py",
+      "reason": "outside the standalone foundation whitelist"
+    },
+    {
+      "path": "tests/test_a100_preflight.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_a100_unified_delivery.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_admm_benchmark.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_admm_stability.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_admm_tuning.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_benchmark_certification_workers.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_benchmark_mosek_openpo.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_build_a100_bundle.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_certification_control_benchmark.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_certification_policy_benchmark.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_cntr_6000_benchmark.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_cntr_open_source.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_cntr_report.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_combinatorial_benchmark.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_docs_contract.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_durable_shadow_report.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_func123_30day_benchmark.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_func2_benchmark.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_func2_report.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_iteration_gate_certification_control.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_iteration_gate_certification_policy.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_iteration_gate_certification_workers.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_iteration_gate_cntr.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_iteration_gate_durable_shadow.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_iteration_gate_func2.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_iteration_gate_shadow.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_iteration_gate_shadow_server.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_mip_start_benchmark.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_multi_gpu_benchmark.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_native_search_benchmark.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_portfolio_algo_benchmark.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_portfolio_algo_opt_adapter.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_prepared_production_benchmark.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_prepared_production_report.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_probe_opt_bt4_real_shapes.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_production_benchmark.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_qualification_digest.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_render_certification_control.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_render_certification_policy.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_render_certification_workers.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_report_renderer_cpu_only.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_shadow_benchmark.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_shadow_report.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_shadow_server_benchmark.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    },
+    {
+      "path": "tests/test_shadow_server_report.py",
+      "reason": "legacy gate, historical-artifact renderer, or excluded private delivery/deployment"
+    }
+  ]
+}

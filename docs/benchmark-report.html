@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>openopt Verification Status</title>
+<style>
+body { margin: 0; color: #18362f; background: linear-gradient(140deg, #f4f0e6, #e6eee6);
+  font: 18px/1.6 Georgia, serif; }
+main { max-width: 900px; margin: auto; padding: 48px 24px; }
+h1 { font-size: clamp(2rem, 6vw, 3.4rem); line-height: 1.15; }
+h2 { margin-top: 2rem; }
+code { font: .9em/1.5 monospace; overflow-wrap: anywhere; }
+a { color: #bb4c24; }
+</style>
+<main>
+<p>Foundation extraction / 2026-10-10</p>
+<h1>Verification Is Not A Speedup Claim</h1>
+<p>No historical performance output was imported as current evidence.
+Independent test results are produced by
+<code>python3 scripts/verify.py</code>. The output records actual counts,
+failures, skips, dependency versions and whether CUDA is available.</p>
+<h2>Correctness Surface</h2>
+<p>The smaller <code>scripts/iteration_gate.py smoke</code> checks core API,
+projection, solver and constraint contracts. Full verification includes the
+complete migrated test suite and byte-level provenance checks. GPU skips mean
+that GPU cases were not verified; CPU passes must not be relabeled GPU passes.</p>
+<h2>Performance Qualification</h2>
+<p>Timing comparisons require the same objective and constraints, matched
+input hashes, explicit CPU/CUDA devices, warm-up separation, cold/hot timings,
+p50/p95, success rate, objective gaps, residuals and hardware/software versions.
+No KEEP verdict, universal acceleration, multi-GPU efficiency or production
+SLA is asserted by this extraction.</p>
+<p>The imported research benchmark tools retain their original methodology.
+Use explicit output paths outside the repository and verify their artifacts
+before drawing conclusions. The old report-rendering and canonical-result
+pipeline was not migrated.</p>
+<p>See <a href="design.html">design</a> and <a href="MIGRATION.md">migration
+scope</a>.</p>
+</main>
+</html>
