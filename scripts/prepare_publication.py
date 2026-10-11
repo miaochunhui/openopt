@@ -44,8 +44,16 @@ LEAK_RULES = {
         r"[A-Za-z]:[\\/]|\\\\[A-Za-z]|/(?:data|home|root|tmp|etc|3fs|hf3fs-jd)\b"),
     "network_entry": re.compile(
         r"[a-z][a-z0-9+.-]*://|(?<!:)//[a-z0-9]|"
-        r"\b(?:\d{1,3}\.){3}\d{1,3}\b|"
-        r"\b(?:[0-9a-f]{0,4}:){2,}[0-9a-f:]+\b|"
+        r"(?:\d{1,3}\.){3}\d{1,3}|"
+        # Uncompressed IPv6 has eight fields; compressed forms contain "::".
+        # Three clock fields are neither. Keep conservative compression matches.
+        r"(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}|"
+        r"(?:[0-9a-f]{1,4}:)*[0-9a-f]{0,4}::"
+        r"(?:[0-9a-f]{1,4}(?::[0-9a-f]{1,4})*)?|"
+        # Also reject non-clock IPv6-like prefixes joined to other tokens.
+        r"(?=[0-9a-f:]*[a-f])(?:[0-9a-f]{1,4}:){2}|"
+        r"(?:[0-9a-f]{3,4}:[0-9a-f]{1,4}|"
+        r"[0-9a-f]{1,4}:[0-9a-f]{3,4}):|"
         r"\b(?:localhost|[a-z0-9_-]+(?:\.[a-z0-9_-]+)*\."
         r"(?:com|org|net|io|cn|local|internal|lan))\b|[\w.+-]+@[\w.-]+", re.I),
     "host_identity": re.compile(

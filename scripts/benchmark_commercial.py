@@ -376,20 +376,22 @@ class MosekAdapter:
 
 
 def authorization(args: argparse.Namespace) -> dict:
+    if type(args.authorized_run) is not bool:
+        raise ValueError("authorization flag must be boolean")
     pin = args.authorization_sha256
-    if args.authorized_run:
+    if args.authorized_run is True:
         if not isinstance(pin, str) or not re.fullmatch(r"[a-f0-9]{64}", pin):
             raise ValueError("authorized run requires an approved record SHA256")
     elif pin is not None:
         raise ValueError("authorization record requires explicit authorized-run")
     return {"explicit_authorized_run": args.authorized_run, "record_sha256": pin,
             "record_is_legal_authorization": False, "legal_validity": "UNVERIFIED",
-            "operator_external_approval_attested": bool(args.authorized_run)}
+            "operator_external_approval_attested": args.authorized_run is True}
 
 
 def import_sdk(solver: str, args: argparse.Namespace):
     authorization(args)
-    if not args.authorized_run:
+    if args.authorized_run is not True:
         raise PermissionError("commercial SDK import requires explicit authorized-run")
     return importlib.import_module(SDKS[solver][0])
 
@@ -749,7 +751,7 @@ def main(argv: list[str] | None = None) -> int:
                 arm["reason"] = "DISCOVERY_ERROR"
             elif not arm["discovery"]["module_available"]:
                 arm["reason"] = "SDK_NOT_DISCOVERED"
-            elif args.authorized_run:
+            elif args.authorized_run is True:
                 run_arm(solver, args, arrays, arm, output, report)
         finish(report)
     except Exception as error:
