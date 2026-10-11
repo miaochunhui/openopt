@@ -60,7 +60,8 @@ def test_git_environment_discards_inherited_redirects_and_trace(monkeypatch):
 @pytest.mark.parametrize("field", ["full_name", "owner", "clone_url", "permissions"])
 def test_wrong_repository_or_missing_permission_rejected(field):
     data = {"full_name": delivery.TARGET, "clone_url": delivery.URL,
-            "owner": {"login": "miaochunhui"}, "permissions": {"push": True}}
+            "owner": {"login": "miaochunhui"}, "permissions": {"push": True},
+            "private": False}
     delivery.validate_repo(data)
     data[field] = None
     with pytest.raises(delivery.DeliveryError):
@@ -117,8 +118,12 @@ def test_api_write_scope_rejected_before_network():
 
 
 def test_source_guard_actual_bytes_and_escape(tmp_path):
+    local_git(tmp_path, "init", "-b", "master")
     path = tmp_path / "source"
     path.write_bytes(b"original")
+    local_git(tmp_path, "add", "--", "source")
+    local_git(tmp_path, "-c", "user.name=synthetic", "-c", "user.email=synthetic@example.invalid",
+              "commit", "-m", "isolated")
     files = {"source": hashlib.sha256(b"original").hexdigest()}
     delivery.source_guard(tmp_path, files)
     path.write_bytes(b"changed")
@@ -126,8 +131,34 @@ def test_source_guard_actual_bytes_and_escape(tmp_path):
         delivery.source_guard(tmp_path, files)
     with pytest.raises(delivery.DeliveryError, match="audit_source_empty"):
         delivery.source_guard(tmp_path, {})
-    with pytest.raises(delivery.DeliveryError, match="audit_source_escape"):
+    with pytest.raises(delivery.DeliveryError, match="audit_source_membership_mismatch"):
         delivery.source_guard(tmp_path, {"../escape": PIN})
+
+
+def test_source_map_must_cover_every_committed_file(tmp_path):
+    local_git(tmp_path, "init", "-b", "master")
+    (tmp_path / "a").write_text("a")
+    (tmp_path / "b").write_text("b")
+    local_git(tmp_path, "add", "--", "a", "b")
+    local_git(tmp_path, "-c", "user.name=synthetic", "-c", "user.email=synthetic@example.invalid",
+              "commit", "-m", "isolated")
+    with pytest.raises(delivery.DeliveryError, match="audit_source_membership_mismatch"):
+        delivery.source_guard(tmp_path, {"a": delivery.digest(tmp_path / "a")})
+
+
+def test_public_delivery_does_not_accept_existing_private_repository():
+    data = {"full_name": delivery.TARGET, "clone_url": delivery.URL,
+            "owner": {"login": "miaochunhui"}, "permissions": {"push": True},
+            "private": True}
+    with pytest.raises(delivery.DeliveryError, match="public_repository_required"):
+        delivery.validate_repo(data)
+
+
+def test_creation_integer_zero_is_not_boolean_false():
+    body = {"name": "openopt", "private": 0, "auto_init": 0,
+            "description": "GPU-accelerated optimization research; 0BSD."}
+    with pytest.raises(delivery.DeliveryError, match="creation_payload_refused"):
+        delivery.api("synthetic_test_value_only", "/user/repos", "POST", body)
 
 
 def test_audit_false_empty_cannot_satisfy_integer_count(tmp_path):

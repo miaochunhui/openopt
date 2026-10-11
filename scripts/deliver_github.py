@@ -90,10 +90,11 @@ def api(token, path, method="GET", body=None):
         ("/user", "GET"), ("/repos/" + TARGET, "GET"), ("/user/repos", "POST"),
     }, "api_scope_refused")
     if method == "POST":
-        require(body == {
+        require(type(body) is dict and body == {
             "name": "openopt", "private": False, "auto_init": False,
             "description": "GPU-accelerated optimization research; 0BSD.",
-        }, "creation_payload_refused")
+        } and body["private"] is False and body["auto_init"] is False,
+                "creation_payload_refused")
     req = urllib.request.Request(
         "https://api.github.com" + path, method=method,
         data=None if body is None else json.dumps(body).encode("ascii"),
@@ -121,6 +122,7 @@ def validate_repo(data):
     permissions = data.get("permissions")
     require(type(permissions) is dict and permissions.get("push") is True,
             "repository_push_permission_missing")
+    require(data.get("private") is False, "public_repository_required")
 
 
 def remote(repo, token):
@@ -219,6 +221,17 @@ def local_guard(repo, head):
 
 def source_guard(repo, files):
     require(type(files) is dict and bool(files), "audit_source_empty")
+    records = git(repo, ["ls-tree", "-rz", "--full-tree", "HEAD"]).split(b"\0")
+    names = set()
+    for record in records:
+        if not record:
+            continue
+        metadata, raw_name = record.split(b"\t", 1)
+        mode, kind, identity = metadata.split()
+        require(mode in (b"100644", b"100755") and kind == b"blob"
+                and bool(OID.fullmatch(identity.decode("ascii"))), "source_entry_invalid")
+        names.add(raw_name.decode("utf-8"))
+    require(names == set(files), "audit_source_membership_mismatch")
     for name, pin in files.items():
         require(type(name) is str and type(pin) is str and bool(SHA.fullmatch(pin)),
                 "audit_source_invalid")
@@ -241,6 +254,7 @@ def checked_worker(result, head, pin):
             "worker_input_too_large", "worker_input_invalid", "worker_internal_failure",
             "command_timeout", "command_unavailable", "command_response_invalid",
             "regular_file_required",
+            "public_repository_required",
         }
         require(type(cause) is str and (
             cause in fixed or re.fullmatch(
