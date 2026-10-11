@@ -602,6 +602,8 @@ def read_delivery(path, pin, schema, schema_pin):
     require(re.fullmatch(r"[0-9a-f]{64}", pin or ""), "receipt_pin_required")
     require(digest(read_bytes(path)) == pin, "receipt_pin_mismatch")
     receipt = json_read(path)
+    require(receipt.get("schema_sha256") == schema_pin,
+            "receipt_schema_pin_mismatch")
     require(set(receipt["artifacts_sha256"])
             == {"sbom.spdx.json", "evidence.json", "execution.log"},
             "artifact_membership_invalid")
@@ -611,7 +613,15 @@ def read_delivery(path, pin, schema, schema_pin):
     document = json_read(Path(path).parent / "sbom.spdx.json")
     evidence = json_read(Path(path).parent / "evidence.json")
     validate_standard(document, schema, schema_pin)
+    require(evidence.get("schema", {}).get("sha256") == schema_pin,
+            "evidence_schema_pin_mismatch")
     require(receipt["verdict"] == evidence["verdict"], "receipt_verdict_mismatch")
+    require(receipt.get("source_commit") == evidence["source"]["commit"],
+            "receipt_source_mismatch")
+    for field, expected in (("legal_qualification", "UNVERIFIED"),
+                            ("runtime_qualification", "NOT_TESTED")):
+        require(receipt.get(field) == evidence.get(field) == expected,
+                "receipt_qualification_mismatch")
     require(source_snapshot(Path(evidence["source_root"]), receipt["source_commit"])
             == evidence["source"], "reader_source_changed")
     if "producer" in evidence:
