@@ -53,6 +53,7 @@ def test_actual_local_repository_and_two_readonly_transports(repository):
     calls = []
     result = refs.inspect(repo, head, runner=transport(head, calls))
     assert result["verdict"] == "PRIMARY_AND_GITEE_PASS"
+    assert result["local_master"] == head
     assert result["three_host_complete"] is False
     assert result["github"]["state"] == "NOT_VERIFIED"
     assert result["github"]["credential_read"] is False
@@ -102,6 +103,38 @@ def test_wrong_head_rejects_before_network(repository):
     with pytest.raises(refs.InspectionError, match="local_head_mismatch"):
         refs.inspect(repo, "0" * 40, runner=transport(head, calls))
     assert calls == []
+
+
+def test_other_branch_at_different_commit_cannot_prove_master(repository):
+    repo, master = repository
+    git(repo, "checkout", "-b", "isolated-other")
+    git(repo, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
+        "commit", "--allow-empty", "-m", "isolated other branch")
+    head = git(repo, "rev-parse", "HEAD").decode().strip()
+    assert head != master
+    calls = []
+    with pytest.raises(refs.InspectionError, match="local_master_mismatch"):
+        refs.inspect(repo, head, runner=transport(head, calls))
+    assert calls == []
+
+
+def test_master_drift_without_head_drift_rejects(repository):
+    repo, head = repository
+    git(repo, "checkout", "--detach", head)
+    git(repo, "-c", "user.name=fixture", "-c", "user.email=fixture@example.invalid",
+        "commit", "--allow-empty", "-m", "isolated future master")
+    other = git(repo, "rev-parse", "HEAD").decode().strip()
+    git(repo, "checkout", "--detach", head)
+    original = transport(head, [])
+
+    def changed(command, **kwargs):
+        result = original(command, **kwargs)
+        if "ls-remote" in command and command[-2] == "gitee":
+            git(repo, "update-ref", "refs/heads/master", other, head)
+        return result
+
+    with pytest.raises(refs.InspectionError, match="local_master_changed"):
+        refs.inspect(repo, head, runner=changed)
 
 
 def test_dirty_source_rejects_before_network(repository):

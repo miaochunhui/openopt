@@ -70,6 +70,11 @@ remote pushes; no remote rollback or history rewrite is authorized.
 the full caller-selected clean local HEAD and the two live master refs.
 It writes a create-once external receipt. It never reads the GitHub credential,
 contacts GitHub, changes configuration, creates a repository or pushes.
+This no-GitHub-credential-read statement applies to the ordinary ref entry.
+The separate `--scan-owned` development entry reuses existing credential needles
+in memory; its receipt explicitly sets `existing_scan_credentials_read=true`.
+Neither path records credential values. Ref inspection checks local master and
+HEAD before and after the two remote queries.
 `PRIMARY_AND_GITEE_PASS` is deliberately not three-host completion:
 `github.state=NOT_VERIFIED` and `three_host_complete=false`.
 Use a full 40-character commit, not a moving branch name:

@@ -91,6 +91,8 @@ def inspect(repo, expected, *, runner=subprocess.run):
     repo = Path(repo).resolve(strict=True)
     before = head_value(query(repo, ["rev-parse", "HEAD"], runner=runner))
     require(before == expected, "local_head_mismatch")
+    require(head_value(query(repo, ["rev-parse", "refs/heads/master"],
+                             runner=runner)) == expected, "local_master_mismatch")
     require(not query(repo, ["status", "--porcelain=v1", "--untracked-files=all"],
                       runner=runner), "dirty_source")
     require(query(repo, ["config", "--get", "branch.master.remote"],
@@ -111,6 +113,8 @@ def inspect(repo, expected, *, runner=subprocess.run):
         refs[name] = {"head": identity, "matches_expected": identity == expected}
     require(head_value(query(repo, ["rev-parse", "HEAD"], runner=runner)) == before,
             "local_head_changed")
+    require(head_value(query(repo, ["rev-parse", "refs/heads/master"],
+                             runner=runner)) == expected, "local_master_changed")
     require(not query(repo, ["status", "--porcelain=v1", "--untracked-files=all"],
                       runner=runner), "source_changed")
     matched = all(row["matches_expected"] for row in refs.values())
@@ -118,6 +122,7 @@ def inspect(repo, expected, *, runner=subprocess.run):
         "verdict": "PRIMARY_AND_GITEE_PASS" if matched else "REF_MISMATCH",
         "expected_head": expected,
         "local_head": before,
+        "local_master": expected,
         "remotes": refs,
         "github": {
             "repository": "miaochunhui/openopt",
@@ -169,6 +174,8 @@ def main(argv=None):
         "push_performed": False,
         "repository_created": False,
         "credentials_changed": False,
+        "credential_values_recorded": False,
+        "existing_scan_credentials_read": args.scan_owned,
         "source_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
     }
     try:
