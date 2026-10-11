@@ -132,6 +132,16 @@ def test_wrong_token_account_stops_before_repository_discovery():
     assert opener.calls == 1
 
 
+def test_invalid_cli_never_echoes_parameter_value(capsys):
+    marker = "not" + "_a_credential_example"
+    with pytest.raises(SystemExit) as error:
+        probe.main(["--untrusted-input=" + marker])
+    assert error.value.code == 2
+    output = capsys.readouterr()
+    assert output.out == "" and output.err == "invalid_arguments\n"
+    assert marker not in output.err
+
+
 def test_transport_failure_never_records_stderr():
     def runner(*args, **kwargs):
         return SimpleNamespace(returncode=17, stdout=b"", stderr=b"synthetic_private_text")

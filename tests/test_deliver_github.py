@@ -161,6 +161,16 @@ def test_creation_integer_zero_is_not_boolean_false():
         delivery.api("synthetic_test_value_only", "/user/repos", "POST", body)
 
 
+def test_invalid_cli_reports_fixed_message_without_echo(capsys):
+    marker = "not" + "_a_credential_example"
+    with pytest.raises(SystemExit) as error:
+        delivery.main(["--untrusted-input=" + marker])
+    assert error.value.code == 2
+    output = capsys.readouterr()
+    assert output.out == "" and output.err == "invalid_arguments\n"
+    assert marker not in output.err
+
+
 def test_audit_false_empty_cannot_satisfy_integer_count(tmp_path):
     payload = dict(verdict="READER_INTEGRITY_PASS", content_verdict="BOUNDED_CONTENT_PASS",
                    audit=dict(head=HEAD, counts={"commits": False, "objects": False}))

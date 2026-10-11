@@ -31,6 +31,10 @@ and performs only a pinned ordinary master push. It isolates inherited Git
 configuration, rejects unsafe local settings, disables redirects and compares
 the destination master after pushing. No tags or development branches are pushed.
 The worker returns only bound fields; fixed failures retain their first cause.
+Both command-line parsers reject malformed arguments with only the fixed
+`invalid_arguments` message and exit code 2, never echoing their contents.
+The delivery transport accepts underscore-containing generated directory names;
+the destination remains a fixed safe basename under `/var/tmp/`.
 `--scan-owned` reads established local scan material and both user-specified
 credential files in memory, records counts/hashes only and performs no network.
 This content inspection is not proof of unknown-secret absence or legal rights.

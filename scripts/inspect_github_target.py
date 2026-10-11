@@ -35,6 +35,11 @@ class ProbeError(ValueError):
     """Only fixed non-content errors may cross the transport boundary."""
 
 
+class SafeParser(argparse.ArgumentParser):
+    def error(self, message):
+        self.exit(2, "invalid_arguments\n")
+
+
 def require(ok, cause):
     if not ok:
         raise ProbeError(cause)
@@ -231,7 +236,7 @@ def worker(pin):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    parser = SafeParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--worker", action="store_true")
     parser.add_argument("--source-sha256")
     parser.add_argument("--artifact-dir", type=Path)

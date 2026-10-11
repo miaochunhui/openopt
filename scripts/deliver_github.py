@@ -21,9 +21,9 @@ import urllib.error
 import urllib.request
 
 if __package__:
-    from .inspect_github_target import NoRedirect
+    from .inspect_github_target import NoRedirect, SafeParser
 else:
-    from inspect_github_target import NoRedirect
+    from inspect_github_target import NoRedirect, SafeParser
 
 TARGET = "miaochunhui/openopt"
 URL = "https://github.com/" + TARGET + ".git"
@@ -286,7 +286,7 @@ def coordinated(repo, head, audit, audit_pin, out):
     probe = source.with_name("inspect_github_target.py")
     source_pin, probe_pin = digest(source), digest(probe)
     remote_dir = "/var/tmp/openopt-github-delivery-" + head + "-" + out.name
-    require(bool(re.fullmatch(r"/var/tmp/openopt-github-delivery-[a-z0-9-]+", remote_dir)),
+    require(bool(re.fullmatch(r"/var/tmp/openopt-github-delivery-[a-z0-9_-]+", remote_dir)),
             "remote_path_invalid")
     call([*SSH, "mkdir", "-m", "700", remote_dir])
     call(["scp", "-q", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
@@ -324,7 +324,7 @@ def coordinated(repo, head, audit, audit_pin, out):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    parser = SafeParser(description=__doc__, allow_abbrev=False)
     parser.add_argument("--worker", action="store_true")
     parser.add_argument("--source-sha256")
     parser.add_argument("--probe-sha256")
