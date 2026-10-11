@@ -54,7 +54,7 @@ def parse_head(payload):
 def source():
     def git(*args):
         result = subprocess.run(
-            [*GIT, "-C", str(ROOT), *args], env=ENV,
+            [*GIT, "-c", f"safe.directory={ROOT.resolve()}", "-C", str(ROOT), *args], env=ENV,
             capture_output=True, check=False, timeout=10)
         require(result.returncode == 0, "source_query_failed")
         return result.stdout
