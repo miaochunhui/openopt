@@ -63,3 +63,26 @@ Local remote configuration was backed up externally before migration.
 Configuration content was byte-verified despite the shared filesystem refusing
 permission-metadata preservation. Restoring local configuration cannot undo
 remote pushes; no remote rollback or history rewrite is authorized.
+
+## Read-Only Ref Receipt
+
+`scripts/inspect_repository_refs.py` verifies the configured destinations,
+the full caller-selected clean local HEAD and the two live master refs.
+It writes a create-once external receipt. It never reads the GitHub credential,
+contacts GitHub, changes configuration, creates a repository or pushes.
+`PRIMARY_AND_GITEE_PASS` is deliberately not three-host completion:
+`github.state=NOT_VERIFIED` and `three_host_complete=false`.
+Use a full 40-character commit, not a moving branch name:
+
+```bash
+sudo -n -u infra python3 -B /data/dev/openopt/scripts/inspect_repository_refs.py \
+  --repo /data/dev/openopt --expected-head FULL_COMMIT \
+  --artifact-dir /hf3fs-jd/data/tmp/openopt-repository-refs/FRESH_RUN
+```
+
+On 2026-10-11 the existing trusted internal GitLab channel returned hostname
+`r640-61`. This establishes the observed R640 host, not a current HA failover
+test. At 19:23:34 +08:00 GitLab and Gitee master were both
+`813e2e03a2e5e6f722928f1ad7baeacdd24421be`, after an explicit audited
+fast-forward. Later receipts supersede this dated ref snapshot.
+GitHub remains pending, and no automatic three-host mirror was installed.
