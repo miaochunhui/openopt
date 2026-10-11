@@ -13,7 +13,8 @@ requires-python = ">=3.10"
 dependencies = ["numpy>=2.0", "torch>=2.4", "scipy>=1.15"]
 
 [project.urls]
-Repository = "https://gitee.com/sdfwefqaa/openopt"
+Repository = "https://gitlab.ai4everyone.top/infra/openopt"
+"Gitee Mirror" = "https://gitee.com/sdfwefqaa/openopt"
 
 [project.scripts]
 openopt-shadow-server = "openpo.shadow_server:main"

@@ -118,6 +118,12 @@ slower on GPU. Explicit requests never silently fall back.
 
 ## Maintenance
 
+GitLab `infra/openopt` is the primary repository; Gitee `sdfwefqaa/openopt`
+is a secondary copy. GitHub `miaochunhui/openopt` is the requested secondary
+destination but remains pending account verification. See
+[repository maintenance](docs/repository-maintenance.md) for the current
+sync boundary and verified operation instructions.
+
 `scripts/verify.py` runs import-provenance checks, API compatibility tests and
 the complete migrated regression suite. `scripts/iteration_gate.py smoke` runs
 the smaller correctness preflight. They report failures and actual test counts;
