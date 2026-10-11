@@ -10,7 +10,7 @@ external datasets and benchmark artifacts are not part of this delivery.
 | --- | --- | --- |
 | Primary | `https://gitlab.ai4everyone.top/infra/openopt` | `origin` |
 | Secondary | `https://gitee.com/sdfwefqaa/openopt` | `gitee` |
-| Requested secondary, pending | `https://github.com/miaochunhui/openopt` | `github` |
+| Public secondary | `https://github.com/miaochunhui/openopt` | `github` |
 
 The GitLab project was created private. No visibility change was requested or
 performed. Repository synchronization does not qualify the solver, publish the
@@ -46,18 +46,28 @@ configuration, source or receipts.
 
 ## Pending Boundaries
 
-The supplied GitHub credential authenticated a different account from
-`miaochunhui`. No GitHub repository was created or pushed. The user must
-confirm the intended account or provide matching credentials through the
-existing credential-file process, never through chat.
+The earlier credential authenticated a different account; its failed receipts
+and file remain unchanged. The user supplied the matching account file on
+2026-10-11 through the existing credential-file process. The exact account and
+target were checked before creating the public empty `miaochunhui/openopt`
+repository and performing the first ordinary master push at 20:36 +08:00.
+No alternate account repository was created and no credential was changed.
 
 The public GitLab SSH endpoint failed host-key verification. Its old trust
 record was not removed or overwritten. The verified internal channel is used
 instead; the public endpoint requires separate trusted host-key reconciliation.
 
-WIP repository-sync tools failed independent safety controls and were not
-adopted. Their failures and isolated development files are retained. This
-delivery uses explicit chair-operated Git commands, not those tools.
+Earlier WIP repository-sync tools failed independent safety controls and were
+not adopted. Their failures and isolated development files are retained.
+The separately reviewed `scripts/deliver_github.py` is chair-operated, not
+an automatic mirror. It requires an exact clean master, a pinned complete-history
+content-audit reader and matching account/target permissions. It transports
+only the master bundle through the existing infra@astrill channel, refuses
+divergent history and verifies the destination master after an ordinary push.
+Credentials stay in memory/stdin, not arguments, URLs, persistent Git
+configuration or receipts. Git authentication uses a process-only extra header
+configuration delivered through the isolated child environment. Malformed
+arguments produce a fixed content-free error.
 
 Local remote configuration was backed up externally before migration.
 Configuration content was byte-verified despite the shared filesystem refusing
@@ -91,3 +101,11 @@ test. At 19:23:34 +08:00 GitLab and Gitee master were both
 `813e2e03a2e5e6f722928f1ad7baeacdd24421be`, after an explicit audited
 fast-forward. Later receipts supersede this dated ref snapshot.
 GitHub remains pending, and no automatic three-host mirror was installed.
+
+That dated GitHub status is superseded by the 20:37 +08:00 readbacks on the
+same day. Local, GitLab, Gitee and anonymous GitHub master were all
+`aed5f343dd235ae01196fe83090c593c89131d63`. The first-delivery and separate
+read-only receipts are recorded in `docs/handoff/release4-20261011-2037.md`.
+Later commits require their own exact-head audit and destination readbacks;
+the first-delivery receipts must not be relabeled as proof of a later version.
+No automatic mirror or HA failover qualification was established.
